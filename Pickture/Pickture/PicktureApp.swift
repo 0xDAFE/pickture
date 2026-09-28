@@ -9,9 +9,16 @@ import SwiftUI
 
 @main
 struct PicktureApp: App {
+    @State private var session = CullingSession()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(session: session)
         }
+        #if os(macOS)
+        Settings {
+            SettingsSheetView(session: session)
+        }
+        #endif
     }
 }

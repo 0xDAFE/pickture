@@ -6,16 +6,368 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
+    @State private var session: CullingSession
+    @State private var isFolderImporterPresented = false
+    @State private var isSettingsPresented = false
+
+    init(session: CullingSession? = nil) {
+        _session = State(initialValue: session ?? CullingSession())
+    }
+
+    private let gridColumns = [
+        GridItem(.adaptive(minimum: 185, maximum: 260), spacing: 12)
+    ]
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        NavigationSplitView {
+            sidebarContent
+        } detail: {
+            detailContent
         }
-        .padding()
+        .fileImporter(
+            isPresented: $isFolderImporterPresented,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let folderURL = urls.first else { return }
+                do {
+                    try session.openFolder(at: folderURL)
+                    session.lastErrorMessage = nil
+                } catch {
+                    session.lastErrorMessage = error.localizedDescription
+                }
+            case .failure(let error):
+                session.lastErrorMessage = error.localizedDescription
+            }
+        }
+        .sheet(isPresented: $isSettingsPresented) {
+            SettingsSheetView(session: session)
+        }
+    }
+
+    private var sidebarContent: some View {
+        List {
+            Section("Folder") {
+                Button {
+                    isFolderImporterPresented = true
+                } label: {
+                    Label("Open Folder…", systemImage: "folder.badge.plus")
+                }
+
+                Toggle(
+                    isOn: Binding(
+                        get: { session.subfolderMode == .recursive },
+                        set: { isRecursive in
+                            do {
+                                try session.setSubfolderMode(isRecursive ? .recursive : .immediate)
+                            } catch {
+                                session.lastErrorMessage = error.localizedDescription
+                            }
+                        }
+                    )
+                ) {
+                    Label("SubfolderMode (Recursive)", systemImage: "list.bullet.indent")
+                }
+
+                Picker(
+                    selection: Binding(
+                        get: { session.previewSource },
+                        set: { session.previewSource = $0 }
+                    )
+                ) {
+                    Text("Prefer Raster").tag(PreviewSource.preferRaster)
+                    Text("Prefer RAW").tag(PreviewSource.preferRAW)
+                } label: {
+                    Label("PreviewSource", systemImage: "photo.stack")
+                }
+            }
+
+            Section("Recent Folders") {
+                if session.recentFolders.isEmpty {
+                    Text("No recent folders yet")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(session.recentFolders) { recent in
+                        HStack {
+                            Button {
+                                do {
+                                    try session.reopenRecentFolder(recent)
+                                    session.lastErrorMessage = nil
+                                } catch {
+                                    session.lastErrorMessage = error.localizedDescription
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "folder.fill")
+                                            .foregroundStyle(Color.accentColor)
+                                        Text(recent.name)
+                                            .font(.subheadline.weight(.medium))
+                                            .lineLimit(1)
+                                    }
+                                    Text(recent.displayPath)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            }
+                            .buttonStyle(.plain)
+
+                            Spacer()
+
+                            Button {
+                                session.removeRecentFolder(recent)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove \(recent.name) from Recent Folders")
+                        }
+                    }
+                }
+            }
+
+            Section("MediaCache") {
+                HStack {
+                    Text("Usage")
+                    Spacer()
+                    Text("\(session.formattedCacheUsage) / \(session.formattedCacheLimit)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Button("Clear Cache", role: .destructive) {
+                    session.clearMediaCache()
+                }
+
+                Button {
+                    isSettingsPresented = true
+                } label: {
+                    Label("Cache Settings…", systemImage: "gearshape")
+                }
+            }
+        }
+        .navigationTitle("Pickture")
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
+        VStack(spacing: 0) {
+            if let errorMessage = session.lastErrorMessage {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(errorMessage)
+                        .font(.caption)
+                    Spacer()
+                    Button("Dismiss") {
+                        session.lastErrorMessage = nil
+                    }
+                    .font(.caption.weight(.semibold))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.orange.opacity(0.15))
+            }
+
+            if session.currentFolderURL == nil {
+                emptyWorkspaceView
+            } else if session.items.isEmpty {
+                ContentUnavailableView {
+                    Label("No MediaItems Found", systemImage: "photo.on.rectangle.angled")
+                } description: {
+                    Text(
+                        session.subfolderMode == .immediate
+                            ? "No supported RAW, raster, or video files in this folder. Try enabling SubfolderMode to scan subdirectories."
+                            : "No supported RAW, raster, or video files were found in this folder or its subdirectories."
+                    )
+                } actions: {
+                    if session.subfolderMode == .immediate {
+                        Button("Enable SubfolderMode") {
+                            try? session.setSubfolderMode(.recursive)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Button("Open Another Folder…") {
+                        isFolderImporterPresented = true
+                    }
+                }
+            } else {
+                gridContentView
+            }
+        }
+        .navigationTitle(session.currentFolderURL?.lastPathComponent ?? "Pickture Grid")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    isFolderImporterPresented = true
+                } label: {
+                    Label("Open Folder", systemImage: "folder.badge.plus")
+                }
+
+                Menu {
+                    if session.recentFolders.isEmpty {
+                        Text("No Recent Folders")
+                    } else {
+                        ForEach(session.recentFolders) { recent in
+                            Button(recent.name) {
+                                try? session.reopenRecentFolder(recent)
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Recent Folders", systemImage: "clock.arrow.circlepath")
+                }
+
+                Button {
+                    try? session.toggleSubfolderMode()
+                } label: {
+                    Label(
+                        session.subfolderMode == .recursive ? "Subfolders: On" : "Subfolders: Off",
+                        systemImage: session.subfolderMode == .recursive
+                            ? "folder.fill.badge.gearshape"
+                            : "folder"
+                    )
+                }
+                .help("Toggle recursive SubfolderMode")
+
+                Button {
+                    isSettingsPresented = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+            }
+        }
+    }
+
+    private var emptyWorkspaceView: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                VStack(spacing: 10) {
+                    Image(systemName: "photo.stack.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tint)
+                    Text("Open a Folder to Start Culling")
+                        .font(.title2.weight(.semibold))
+                    Text("Select a local folder, SD card, or network share (NAS/SMB) in Files.app. RAW + JPEG/HEIC files in the same directory are paired into a single MediaPair automatically.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 480)
+                }
+                .padding(.top, 40)
+
+                Button {
+                    isFolderImporterPresented = true
+                } label: {
+                    Label("Open Folder in Files…", systemImage: "folder.badge.plus")
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                if !session.recentFolders.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Recent Folders")
+                            .font(.headline)
+                        ForEach(session.recentFolders) { recent in
+                            Button {
+                                try? session.reopenRecentFolder(recent)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "folder.fill")
+                                        .font(.title3)
+                                        .foregroundStyle(.tint)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(recent.name)
+                                            .font(.body.weight(.medium))
+                                        Text(recent.displayPath)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .padding(12)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .fill(.quaternary.opacity(0.4))
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .frame(maxWidth: 500)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var gridContentView: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Label("\(session.items.count) MediaItems", systemImage: "square.grid.3x3")
+                    .font(.caption.weight(.medium))
+
+                let pairCount = session.items.filter(\.isMediaPair).count
+                if pairCount > 0 {
+                    Text("• \(pairCount) MediaPairs (RAW+JPG)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                let videoCount = session.items.filter { $0.kind == .video }.count
+                if videoCount > 0 {
+                    Text("• \(videoCount) Videos")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Text("Cache: \(session.formattedCacheUsage) / \(session.formattedCacheLimit)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(.bar)
+
+            Divider()
+
+            ScrollView {
+                LazyVGrid(columns: gridColumns, spacing: 12) {
+                    ForEach(session.items) { item in
+                        MediaGridCellView(
+                            item: item,
+                            isSelected: session.selectedItemID == item.id,
+                            isRecursiveMode: session.subfolderMode == .recursive,
+                            previewSource: session.previewSource,
+                            cacheGeneration: session.cacheGeneration,
+                            session: session
+                        ) {
+                            session.selectedItemID = item.id
+                        }
+                    }
+                }
+                .padding(16)
+            }
+        }
     }
 }
 
