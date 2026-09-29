@@ -131,26 +131,6 @@ struct ContentView: View {
                     }
                 }
             }
-
-            Section("MediaCache") {
-                HStack {
-                    Text("Usage")
-                    Spacer()
-                    Text("\(session.formattedCacheUsage) / \(session.formattedCacheLimit)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-
-                Button("Clear Cache", role: .destructive) {
-                    session.clearMediaCache()
-                }
-
-                Button {
-                    isSettingsPresented = true
-                } label: {
-                    Label("Cache Settings…", systemImage: "gearshape")
-                }
-            }
         }
         .navigationTitle("Pickture")
         .navigationSplitViewColumnWidth(min: 220, ideal: 245, max: 320)
@@ -346,10 +326,6 @@ struct ContentView: View {
                 }
 
                 Spacer()
-
-                Text("Cache: \(session.formattedCacheUsage) / \(session.formattedCacheLimit)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)

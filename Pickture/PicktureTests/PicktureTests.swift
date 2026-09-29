@@ -351,24 +351,130 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(CGImageDestinationFinalize(embeddedDest) == true)
         try (embeddedData as Data).write(to: dngWithEmbeddedThumbURL)
 
+        // 1. Verify DNG with embedded preview uses .embeddedPreview without full decode
         let embeddedResult = try #require(PreviewLoader.extractImageThumbnail(from: dngWithEmbeddedThumbURL, maxPixelSize: 360))
         #expect(embeddedResult.strategy == .embeddedPreview)
         #expect(!embeddedResult.jpegData.isEmpty)
 
-        // Verify CullingSession loads and caches the embedded preview for the discovered RAW item
-        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
-        try session.openFolder(at: root)
-        let rawItem = try #require(session.items.first { $0.baseName == "DSC0999" })
-        let cachedThumb = try #require(await session.loadThumbnailData(for: rawItem))
-        #expect(!cachedThumb.isEmpty)
-        #expect(session.isThumbnailCached(for: rawItem) == true)
+        // 1b. Verify a spec-compliant 2-IFD DNG (IFD0 reduced-resolution preview + SubIFD0 16-bit Bayer CFA sensor data)
+        let twoIFDDNGURL = root.appendingPathComponent("DSC0998_TWO_IFD.DNG")
+        try makeTwoIFDDNGData().write(to: twoIFDDNGURL)
+        let twoIFDResult = try #require(PreviewLoader.extractImageThumbnail(from: twoIFDDNGURL, maxPixelSize: 360))
+        #expect(twoIFDResult.strategy == .embeddedPreview)
+        #expect(!twoIFDResult.jpegData.isEmpty)
 
-        // Verify user quota clamping (250 MB – 20 GB)
+        // 2. Write a TIFF/DNG container WITHOUT an embedded preview (kCGImageDestinationEmbedThumbnail: false)
+        // and verify it falls back cleanly to full image/sensor decode (.fullDecodeFallback)
+        let dngWithoutEmbeddedPreviewURL = root.appendingPathComponent("DSC1000_UNEMBEDDED.DNG")
+        let unembeddedData = NSMutableData()
+        let unembeddedDest = try #require(
+            CGImageDestinationCreateWithData(
+                unembeddedData as CFMutableData,
+                UTType.tiff.identifier as CFString,
+                1,
+                nil
+            )
+        )
+        CGImageDestinationAddImage(
+            unembeddedDest,
+            cgImage,
+            [kCGImageDestinationEmbedThumbnail: false] as CFDictionary
+        )
+        #expect(CGImageDestinationFinalize(unembeddedDest) == true)
+        try (unembeddedData as Data).write(to: dngWithoutEmbeddedPreviewURL)
+
+        let fullDecodeResult = try #require(PreviewLoader.extractImageThumbnail(from: dngWithoutEmbeddedPreviewURL, maxPixelSize: 360))
+        #expect(fullDecodeResult.strategy == .fullDecodeFallback)
+        #expect(!fullDecodeResult.jpegData.isEmpty)
+        let decodedFallbackImage = try #require(PreviewLoader.decodeCGImage(from: fullDecodeResult.jpegData))
+        #expect(max(decodedFallbackImage.width, decodedFallbackImage.height) <= 360)
+
+        // 3. Verify CullingSession loads and caches both DNG files (and honours .preferRAW on a MediaPair)
+        try writeSampleRasterImage(to: root.appendingPathComponent("DSC0999.JPG"), red: 20, green: 200, blue: 80)
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        session.previewSource = .preferRAW
+        try session.openFolder(at: root)
+
+        let pairedDNGItem = try #require(session.items.first { $0.baseName == "DSC0999" })
+        #expect(pairedDNGItem.isMediaPair == true)
+        #expect(pairedDNGItem.preferredFile(for: session.previewSource).fileExtension.uppercased() == "DNG")
+        let cachedPairedRAWThumb = try #require(await session.loadThumbnailData(for: pairedDNGItem))
+        #expect(!cachedPairedRAWThumb.isEmpty)
+        #expect(session.isThumbnailCached(for: pairedDNGItem) == true)
+
+        let unembeddedDNGItem = try #require(session.items.first { $0.baseName == "DSC1000_UNEMBEDDED" })
+        let cachedFullDecodeThumb = try #require(await session.loadThumbnailData(for: unembeddedDNGItem))
+        #expect(!cachedFullDecodeThumb.isEmpty)
+        #expect(session.isThumbnailCached(for: unembeddedDNGItem) == true)
+
+        // 4. Verify user quota clamping (250 MB – 20 GB)
         session.setUserConfiguredCacheSizeLimitBytes(10 * 1_024 * 1_024) // below 250 MB
         #expect(session.cacheSizeLimitBytes == MediaCache.minUserQuotaBytes)
 
         session.setUserConfiguredCacheSizeLimitBytes(50 * 1_024 * 1_024 * 1_024) // above 20 GB
         #expect(session.cacheSizeLimitBytes == MediaCache.maxUserQuotaBytes)
+    }
+
+    private func makeTwoIFDDNGData() -> Data {
+        var data = Data()
+        func appendU16(_ v: UInt16) { var x = v.littleEndian; data.append(Data(bytes: &x, count: 2)) }
+        func appendU32(_ v: UInt32) { var x = v.littleEndian; data.append(Data(bytes: &x, count: 4)) }
+        func entry(tag: UInt16, type: UInt16, count: UInt32, valueOrOffset: UInt32) {
+            appendU16(tag); appendU16(type); appendU32(count); appendU32(valueOrOffset)
+        }
+
+        // Little-endian TIFF header ("II", 42, IFD0 at offset 8)
+        data.append(contentsOf: [0x49, 0x49])
+        appendU16(42)
+        appendU32(8)
+
+        let previewW: UInt32 = 32
+        let previewH: UInt32 = 32
+        let previewPixels = [UInt8](repeating: 140, count: Int(previewW * previewH * 3))
+        let rawW: UInt32 = 64
+        let rawH: UInt32 = 64
+        let rawPixels = [UInt16](repeating: 2048, count: Int(rawW * rawH))
+
+        // Layout:
+        // 8: IFD0 (12 entries -> 2 + 12*12 + 4 = 150 bytes -> ends at 158)
+        // 158: BitsPerSample [8,8,8] (6 bytes -> ends at 164)
+        // 164: SubIFD0 (11 entries -> 2 + 11*12 + 4 = 138 bytes -> ends at 302)
+        // 302: Preview RGB data (3072 bytes -> ends at 3374)
+        // 3374: CFA 16-bit Bayer sensor data (8192 bytes -> ends at 11566)
+        appendU16(12)
+        entry(tag: 254, type: 4, count: 1, valueOrOffset: 1)          // NewSubfileType = 1 (Preview)
+        entry(tag: 256, type: 4, count: 1, valueOrOffset: previewW)   // ImageWidth
+        entry(tag: 257, type: 4, count: 1, valueOrOffset: previewH)   // ImageLength
+        entry(tag: 258, type: 3, count: 3, valueOrOffset: 158)        // BitsPerSample -> [8,8,8]
+        entry(tag: 259, type: 3, count: 1, valueOrOffset: 1)          // Compression = Uncompressed
+        entry(tag: 262, type: 3, count: 1, valueOrOffset: 2)          // PhotometricInterpretation = RGB
+        entry(tag: 273, type: 4, count: 1, valueOrOffset: 302)        // StripOffsets
+        entry(tag: 277, type: 3, count: 1, valueOrOffset: 3)          // SamplesPerPixel = 3
+        entry(tag: 278, type: 4, count: 1, valueOrOffset: previewH)   // RowsPerStrip
+        entry(tag: 279, type: 4, count: 1, valueOrOffset: UInt32(previewPixels.count)) // StripByteCounts
+        entry(tag: 330, type: 4, count: 1, valueOrOffset: 164)        // SubIFDs -> SubIFD0
+        entry(tag: 50706, type: 1, count: 4, valueOrOffset: 0x00000401) // DNGVersion = 1.4.0.0
+        appendU32(0)
+
+        appendU16(8); appendU16(8); appendU16(8)
+
+        appendU16(11)
+        entry(tag: 254, type: 4, count: 1, valueOrOffset: 0)          // NewSubfileType = 0 (Full-res RAW)
+        entry(tag: 256, type: 4, count: 1, valueOrOffset: rawW)
+        entry(tag: 257, type: 4, count: 1, valueOrOffset: rawH)
+        entry(tag: 258, type: 3, count: 1, valueOrOffset: 16)         // 16-bit sensor
+        entry(tag: 259, type: 3, count: 1, valueOrOffset: 1)
+        entry(tag: 262, type: 3, count: 1, valueOrOffset: 32803)      // CFA (Color Filter Array)
+        entry(tag: 273, type: 4, count: 1, valueOrOffset: 3374)
+        entry(tag: 277, type: 3, count: 1, valueOrOffset: 1)
+        entry(tag: 278, type: 4, count: 1, valueOrOffset: rawH)
+        entry(tag: 279, type: 4, count: 1, valueOrOffset: UInt32(rawPixels.count * 2))
+        entry(tag: 33421, type: 3, count: 2, valueOrOffset: 0x00020002) // CFARepeatPatternDim = 2x2
+        appendU32(0)
+
+        data.append(contentsOf: previewPixels)
+        rawPixels.withUnsafeBytes { data.append(contentsOf: $0) }
+        return data
     }
 }
 
