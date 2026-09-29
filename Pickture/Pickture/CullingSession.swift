@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Observation
 
@@ -61,6 +62,15 @@ final class CullingSession {
 
     func isThumbnailCached(for item: MediaItem, maxPixelSize: Int = 360) -> Bool {
         mediaCache.contains(key: thumbnailCacheKey(for: item, maxPixelSize: maxPixelSize))
+    }
+
+    func cachedThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) -> CGImage? {
+        let key = thumbnailCacheKey(for: item, maxPixelSize: maxPixelSize)
+        guard let cachedData = mediaCache.readData(forKey: key) else {
+            return nil
+        }
+        self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
+        return PreviewLoader.decodeCGImage(from: cachedData)
     }
 
     func setCacheSizeLimitBytes(_ limitBytes: Int64) {

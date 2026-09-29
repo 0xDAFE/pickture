@@ -17,6 +17,10 @@ struct MediaGridCellView: View {
         "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)"
     }
 
+    private var displayedThumbnail: CGImage? {
+        thumbnailImage ?? session.cachedThumbnailImage(for: item, maxPixelSize: 360)
+    }
+
     var body: some View {
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 6) {
@@ -24,8 +28,8 @@ struct MediaGridCellView: View {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(.quaternary.opacity(0.5))
 
-                    if let thumbnailImage {
-                        Image(decorative: thumbnailImage, scale: 1.0, orientation: .up)
+                    if let cgImage = displayedThumbnail {
+                        Image(decorative: cgImage, scale: 1.0, orientation: .up)
                             .resizable()
                             .scaledToFill()
                             .frame(maxWidth: .infinity, maxHeight: .infinity)

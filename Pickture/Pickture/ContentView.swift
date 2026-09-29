@@ -5,6 +5,8 @@
 //  Created by David on 27.09.26.
 //
 
+import CoreGraphics
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -151,6 +153,7 @@ struct ContentView: View {
             }
         }
         .navigationTitle("Pickture")
+        .navigationSplitViewColumnWidth(min: 220, ideal: 245, max: 320)
     }
 
     private func handleReopenRecentFolder(_ recent: RecentFolder) {
@@ -375,6 +378,103 @@ struct ContentView: View {
     }
 }
 
-#Preview {
-    ContentView()
+#Preview("Grid View (Sample Shoot)") {
+    ContentView(session: SelfContainedPreviewData.makeSampleSession())
+        .frame(minWidth: 1040, minHeight: 640)
 }
+
+@MainActor
+private enum SelfContainedPreviewData {
+    static func makeSampleSession() -> CullingSession {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PickturePreviewShoot", isDirectory: true)
+        let day1 = root.appendingPathComponent("Day1_Ceremony", isDirectory: true)
+        let day2 = root.appendingPathComponent("Day2_Portraits", isDirectory: true)
+        try? FileManager.default.createDirectory(at: day1, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: day2, withIntermediateDirectories: true)
+
+        writePreviewImage(to: day1.appendingPathComponent("DSC0101.JPG"), r: 64, g: 132, b: 214)
+        try? Data("raw".utf8).write(to: day1.appendingPathComponent("DSC0101.ARW"))
+
+        writePreviewImage(to: day1.appendingPathComponent("DSC0102.JPG"), r: 218, g: 124, b: 68)
+        try? Data("raw".utf8).write(to: day1.appendingPathComponent("DSC0102.CR3"))
+
+        writePreviewImage(to: day1.appendingPathComponent("DSC0103.PNG"), r: 72, g: 168, b: 118)
+        try? Data("video".utf8).write(to: day1.appendingPathComponent("DSC0103.MOV"))
+
+        writePreviewImage(to: day2.appendingPathComponent("IMG_2040.JPG"), r: 158, g: 96, b: 196)
+        try? Data("raw".utf8).write(to: day2.appendingPathComponent("IMG_2040.NEF"))
+
+        writePreviewImage(to: day2.appendingPathComponent("IMG_2041.JPG"), r: 214, g: 172, b: 64)
+
+        let videoThumbURL = day1.appendingPathComponent(".video_preview.jpg")
+        writePreviewImage(to: videoThumbURL, r: 58, g: 82, b: 124)
+        let videoThumbData = try? Data(contentsOf: videoThumbURL)
+
+        let storeURL = root.appendingPathComponent(".preview-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeURL)
+        try? session.setSubfolderMode(.recursive)
+        try? session.openFolder(at: root)
+        for item in session.items {
+            let key = session.thumbnailCacheKey(for: item, maxPixelSize: 360)
+            if item.kind == .photo {
+                let file = item.preferredFile(for: session.previewSource)
+                if let extracted = PreviewLoader.extractImageThumbnail(from: file.url, maxPixelSize: 360) {
+                    session.mediaCache.storeData(extracted.jpegData, forKey: key)
+                }
+            } else if let videoThumbData {
+                session.mediaCache.storeData(videoThumbData, forKey: key)
+            }
+        }
+        session.setCacheSizeLimitBytes(session.cacheSizeLimitBytes)
+        session.selectedItemID = session.items.first?.id
+        return session
+    }
+
+    private static func writePreviewImage(to url: URL, r: UInt8, g: UInt8, b: UInt8) {
+        let width = 320
+        let height = 240
+        var pixels = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let offset = (y * width + x) * 4
+                let boost = UInt8((x + y) % 36)
+                pixels[offset] = r &+ boost
+                pixels[offset + 1] = g &+ boost
+                pixels[offset + 2] = b &+ boost
+                pixels[offset + 3] = 255
+            }
+        }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let cgImage = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 32,
+                  bytesPerRow: width * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: true,
+                  intent: .defaultIntent
+              ) else {
+            return
+        }
+        let mutableData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            mutableData as CFMutableData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else {
+            return
+        }
+        CGImageDestinationAddImage(dest, cgImage, nil)
+        if CGImageDestinationFinalize(dest) {
+            try? (mutableData as Data).write(to: url)
+        }
+    }
+}
+

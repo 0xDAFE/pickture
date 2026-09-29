@@ -17,9 +17,9 @@ nonisolated struct MediaCacheIndexState: Codable, Sendable {
 
 @MainActor
 final class MediaCache {
-    static let minUserQuotaBytes: Int64 = 250 * 1_024 * 1_024       // 250 MB
-    static let maxUserQuotaBytes: Int64 = 20 * 1_024 * 1_024 * 1_024 // 20 GB
-    static let defaultQuotaBytes: Int64 = 2 * 1_024 * 1_024 * 1_024  // 2 GB
+    nonisolated static let minUserQuotaBytes: Int64 = 250 * 1_024 * 1_024       // 250 MB
+    nonisolated static let maxUserQuotaBytes: Int64 = 20 * 1_024 * 1_024 * 1_024 // 20 GB
+    nonisolated static let defaultQuotaBytes: Int64 = 2 * 1_024 * 1_024 * 1_024  // 2 GB
 
     static let quotaPresetsBytes: [(label: String, bytes: Int64)] = [
         ("250 MB", 250 * 1_024 * 1_024),
