@@ -96,12 +96,7 @@ struct ContentView: View {
                     ForEach(session.recentFolders) { recent in
                         HStack {
                             Button {
-                                do {
-                                    try session.reopenRecentFolder(recent)
-                                    session.lastErrorMessage = nil
-                                } catch {
-                                    session.lastErrorMessage = error.localizedDescription
-                                }
+                                handleReopenRecentFolder(recent)
                             } label: {
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: 6) {
@@ -156,6 +151,15 @@ struct ContentView: View {
             }
         }
         .navigationTitle("Pickture")
+    }
+
+    private func handleReopenRecentFolder(_ recent: RecentFolder) {
+        do {
+            try session.reopenRecentFolder(recent)
+            session.lastErrorMessage = nil
+        } catch {
+            session.lastErrorMessage = error.localizedDescription
+        }
     }
 
     @ViewBuilder
@@ -219,7 +223,7 @@ struct ContentView: View {
                     } else {
                         ForEach(session.recentFolders) { recent in
                             Button(recent.name) {
-                                try? session.reopenRecentFolder(recent)
+                                handleReopenRecentFolder(recent)
                             }
                         }
                     }
@@ -281,7 +285,7 @@ struct ContentView: View {
                             .font(.headline)
                         ForEach(session.recentFolders) { recent in
                             Button {
-                                try? session.reopenRecentFolder(recent)
+                                handleReopenRecentFolder(recent)
                             } label: {
                                 HStack(spacing: 12) {
                                     Image(systemName: "folder.fill")

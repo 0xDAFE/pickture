@@ -150,6 +150,24 @@ nonisolated struct RecentFolder: Identifiable, Hashable, Codable, Sendable {
     let lastOpenedAt: Date
 }
 
+nonisolated struct StarRating: Hashable, Codable, Comparable, ExpressibleByIntegerLiteral, Sendable {
+    let value: Int
+
+    static let unrated = StarRating(0)
+
+    init(_ value: Int) {
+        self.value = min(5, max(0, value))
+    }
+
+    init(integerLiteral value: Int) {
+        self.init(value)
+    }
+
+    static func < (lhs: StarRating, rhs: StarRating) -> Bool {
+        lhs.value < rhs.value
+    }
+}
+
 nonisolated enum PickFlag: String, Codable, CaseIterable, Hashable, Sendable {
     case picked
     case unflagged
@@ -168,16 +186,16 @@ nonisolated enum ColorLabel: String, Codable, CaseIterable, Hashable, Sendable {
 }
 
 nonisolated struct CurationMetadata: Hashable, Codable, Sendable {
-    var starRating: Int
+    var starRating: StarRating
     var pickFlag: PickFlag
     var colorLabel: ColorLabel
 
     init(
-        starRating: Int = 0,
+        starRating: StarRating = .unrated,
         pickFlag: PickFlag = .unflagged,
         colorLabel: ColorLabel = .none
     ) {
-        self.starRating = min(5, max(0, starRating))
+        self.starRating = starRating
         self.pickFlag = pickFlag
         self.colorLabel = colorLabel
     }

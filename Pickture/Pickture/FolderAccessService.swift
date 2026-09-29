@@ -24,17 +24,18 @@ final class FolderAccessService {
     func beginAccessingAndRecordFolder(at url: URL) throws -> (resolvedURL: URL, recentFolders: [RecentFolder]) {
         stopAccessingCurrentFolder()
 
+        // Preserve the original security-scoped URL instance so its sandbox token is never stripped
         let didStartScope = url.startAccessingSecurityScopedResource()
-        let standardized = url.standardizedFileURL
         if didStartScope {
-            activeSecurityScopedURL = standardized
+            activeSecurityScopedURL = url
         }
 
-        let bookmark = Self.makeBookmarkData(for: standardized)
+        let bookmark = Self.makeBookmarkData(for: url)
+        let canonicalPath = url.standardizedFileURL.path
         let entry = RecentFolder(
-            id: standardized.path,
-            name: standardized.lastPathComponent,
-            displayPath: standardized.path,
+            id: canonicalPath,
+            name: url.lastPathComponent,
+            displayPath: canonicalPath,
             bookmarkData: bookmark,
             lastOpenedAt: Date()
         )
@@ -45,7 +46,7 @@ final class FolderAccessService {
             list = Array(list.prefix(maxRecentFoldersCount))
         }
         try persistRecentFolders(list)
-        return (standardized, list)
+        return (url, list)
     }
 
     func resolveAndAccess(recentFolder: RecentFolder) throws -> (resolvedURL: URL, recentFolders: [RecentFolder]) {
@@ -73,46 +74,47 @@ final class FolderAccessService {
         try data.write(to: recentFoldersFileURL, options: .atomic)
     }
 
-    private static func makeBookmarkData(for url: URL) -> Data {
+    private static var bookmarkCreationOptionCandidates: [URL.BookmarkCreationOptions] {
         #if os(macOS)
-        if let scoped = try? url.bookmarkData(
-            options: [.withSecurityScope],
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        ) {
-            return scoped
-        }
+        return [[.withSecurityScope], []]
+        #else
+        return [[]]
         #endif
-        if let standard = try? url.bookmarkData(
-            options: [],
-            includingResourceValuesForKeys: nil,
-            relativeTo: nil
-        ) {
-            return standard
+    }
+
+    private static var bookmarkResolutionOptionCandidates: [URL.BookmarkResolutionOptions] {
+        #if os(macOS)
+        return [[.withSecurityScope], []]
+        #else
+        return [[]]
+        #endif
+    }
+
+    private static func makeBookmarkData(for url: URL) -> Data {
+        for options in bookmarkCreationOptionCandidates {
+            if let data = try? url.bookmarkData(
+                options: options,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            ) {
+                return data
+            }
         }
-        return Data(url.path.utf8)
+        return Data(url.standardizedFileURL.path.utf8)
     }
 
     private static func resolveURL(from recentFolder: RecentFolder) -> URL {
-        var isStale = false
-        #if os(macOS)
-        if let url = try? URL(
-            resolvingBookmarkData: recentFolder.bookmarkData,
-            options: [.withSecurityScope],
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        ) {
-            return url.standardizedFileURL
+        for options in bookmarkResolutionOptionCandidates {
+            var isStale = false
+            if let url = try? URL(
+                resolvingBookmarkData: recentFolder.bookmarkData,
+                options: options,
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            ) {
+                return url
+            }
         }
-        #endif
-        if let url = try? URL(
-            resolvingBookmarkData: recentFolder.bookmarkData,
-            options: [],
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        ) {
-            return url.standardizedFileURL
-        }
-        return URL(fileURLWithPath: recentFolder.displayPath).standardizedFileURL
+        return URL(fileURLWithPath: recentFolder.displayPath)
     }
 }

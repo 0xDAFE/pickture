@@ -129,26 +129,28 @@ final class CullingSession {
 
     func openFolder(at url: URL) throws {
         let (resolvedURL, updatedRecents) = try folderAccessService.beginAccessingAndRecordFolder(at: url)
-        self.recentFolders = updatedRecents
-        self.currentFolderURL = resolvedURL
-        self.items = try discoverItems(in: resolvedURL, mode: subfolderMode)
+        try applyOpenedFolder(resolvedURL: resolvedURL, updatedRecents: updatedRecents)
     }
 
     func reopenRecentFolder(_ recentFolder: RecentFolder) throws {
         let (resolvedURL, updatedRecents) = try folderAccessService.resolveAndAccess(recentFolder: recentFolder)
-        self.recentFolders = updatedRecents
-        self.currentFolderURL = resolvedURL
-        self.items = try discoverItems(in: resolvedURL, mode: subfolderMode)
+        try applyOpenedFolder(resolvedURL: resolvedURL, updatedRecents: updatedRecents)
     }
 
     func removeRecentFolder(_ recentFolder: RecentFolder) {
         self.recentFolders = folderAccessService.removeRecentFolder(id: recentFolder.id)
     }
 
+    private func applyOpenedFolder(resolvedURL: URL, updatedRecents: [RecentFolder]) throws {
+        self.recentFolders = updatedRecents
+        self.currentFolderURL = resolvedURL
+        self.items = try discoverItems(in: resolvedURL.standardizedFileURL, mode: subfolderMode)
+    }
+
     func setSubfolderMode(_ mode: SubfolderMode) throws {
         self.subfolderMode = mode
         if let currentFolderURL {
-            self.items = try discoverItems(in: currentFolderURL, mode: mode)
+            self.items = try discoverItems(in: currentFolderURL.standardizedFileURL, mode: mode)
         }
     }
 
@@ -189,7 +191,7 @@ final class CullingSession {
                 mediaFiles.append(MediaFile(url: fileURL, formatKind: formatKind))
             }
 
-            let dirItems = Self.groupDirectoryMediaFiles(
+            let dirItems = Self.pairDirectoryMediaFiles(
                 mediaFiles,
                 sidecarsByLowerBase: sidecarByLowerBase,
                 directoryURL: directoryURL,
@@ -241,7 +243,7 @@ final class CullingSession {
         return directories.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
-    nonisolated static func groupDirectoryMediaFiles(
+    nonisolated static func pairDirectoryMediaFiles(
         _ files: [MediaFile],
         sidecarsByLowerBase: [String: URL],
         directoryURL: URL,
@@ -281,11 +283,11 @@ final class CullingSession {
             }
         }
 
-        for (lowerBase, group) in photosByLowerBase {
-            let raws = group
+        for (lowerBase, candidates) in photosByLowerBase {
+            let raws = candidates
                 .filter { $0.formatKind == .raw }
                 .sorted { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }
-            let rasters = group
+            let rasters = candidates
                 .filter { $0.formatKind == .raster }
                 .sorted {
                     let p0 = MediaFormatKind.rasterPriority(fileExtension: $0.fileExtension)
@@ -311,8 +313,25 @@ final class CullingSession {
                         sidecarURL: sidecarURL
                     )
                 )
+
+                // Preserve any additional unpaired files sharing the same basename in this directory
+                let remainingFiles = Array(raws.dropFirst()) + Array(rasters.dropFirst())
+                for extraFile in remainingFiles.sorted(by: { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }) {
+                    result.append(
+                        MediaItem(
+                            id: extraFile.id,
+                            baseName: extraFile.baseName,
+                            directoryURL: directoryURL,
+                            relativeDirectoryPath: relativeDir,
+                            kind: .photo,
+                            primaryFile: extraFile,
+                            mediaPair: nil,
+                            sidecarURL: sidecarURL
+                        )
+                    )
+                }
             } else {
-                for single in group.sorted(by: { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }) {
+                for single in candidates.sorted(by: { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }) {
                     result.append(
                         MediaItem(
                             id: single.id,

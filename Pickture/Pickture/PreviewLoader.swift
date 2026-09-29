@@ -28,7 +28,7 @@ nonisolated enum PreviewLoader {
             if let result = extractImageThumbnail(from: file.url, maxPixelSize: maxPixelSize) {
                 return result
             }
-            // If preferred file fails in a MediaPair, try the companion file
+            // If preferred file fails in a MediaPair, try the alternate paired MediaFile
             if let pair = item.mediaPair {
                 let fallbackURL = (file.id == pair.rawFile.id) ? pair.rasterFile.url : pair.rawFile.url
                 return extractImageThumbnail(from: fallbackURL, maxPixelSize: maxPixelSize)
@@ -46,41 +46,41 @@ nonisolated enum PreviewLoader {
         ]
         let isRaw = MediaFormatKind.classify(fileExtension: url.pathExtension) == .raw
 
-        // For RAW files, also check if an embedded JPEG preview stream exists in the initial header bytes
-        // so slow network shares only read the header prefix instead of the full sensor payload.
-        if isRaw, let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(at: url, maxPixelSize: maxPixelSize) {
-            return PreviewExtractionResult(jpegData: headerJPEG, strategy: .embeddedPreview)
-        }
-
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) else {
-            return nil
-        }
-
-        // Step 1: Streaming embedded preview extraction (avoids full RAW/image decode over network links).
-        // Omit kCGImageSourceThumbnailMaxPixelSize on the initial probe so ImageIO never rejects an
-        // embedded EXIF/IFD thumbnail whose native pixel dimension is smaller than maxPixelSize.
-        let embeddedProbeOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
-            kCGImageSourceCreateThumbnailFromImageAlways: false,
-            kCGImageSourceCreateThumbnailWithTransform: true
-        ]
-        if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, embeddedProbeOptions as CFDictionary) {
-            let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
-            if let jpegData = encodeToJPEG(cgImage: scaled) {
-                return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
+        if let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) {
+            // Step 1: Streaming embedded preview extraction via CGImageSource (avoids full RAW/image decode).
+            // Omit kCGImageSourceThumbnailMaxPixelSize on the embedded probe so ImageIO never rejects an
+            // embedded EXIF/IFD preview whose pixel dimension is smaller than maxPixelSize.
+            let embeddedProbeOptions: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
+                kCGImageSourceCreateThumbnailFromImageAlways: false,
+                kCGImageSourceCreateThumbnailWithTransform: true
+            ]
+            if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, embeddedProbeOptions as CFDictionary) {
+                let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
+                if let jpegData = encodeToJPEG(cgImage: scaled) {
+                    return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
+                }
             }
-        }
 
-        // Step 2: Fallback to generating thumbnail from image if no embedded preview header exists
-        let fallbackOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
-        ]
-        if let fallbackCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, fallbackOptions as CFDictionary),
-           let jpegData = encodeToJPEG(cgImage: fallbackCGImage) {
-            return PreviewExtractionResult(jpegData: jpegData, strategy: .fullDecodeFallback)
+            // For RAW files whose embedded JPEG header was not returned by CGImageSource thumbnail probe,
+            // inspect only the initial header prefix before falling back to full image decode.
+            if isRaw, let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(at: url, maxPixelSize: maxPixelSize) {
+                return PreviewExtractionResult(jpegData: headerJPEG, strategy: .embeddedPreview)
+            }
+
+            // Step 2: Fallback to generating thumbnail from full image decode when no embedded preview exists.
+            let fallbackOptions: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            ]
+            if let fallbackCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, fallbackOptions as CFDictionary),
+               let jpegData = encodeToJPEG(cgImage: fallbackCGImage) {
+                return PreviewExtractionResult(jpegData: jpegData, strategy: .fullDecodeFallback)
+            }
+        } else if isRaw, let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(at: url, maxPixelSize: maxPixelSize) {
+            return PreviewExtractionResult(jpegData: headerJPEG, strategy: .embeddedPreview)
         }
 
         return nil
@@ -100,22 +100,39 @@ nonisolated enum PreviewLoader {
         }
         let soi = Data([0xFF, 0xD8, 0xFF])
         let eoi = Data([0xFF, 0xD9])
-        guard let startRange = prefixData.range(of: soi),
-              let endRange = prefixData.range(of: eoi, options: .backwards, in: startRange.lowerBound..<prefixData.endIndex),
-              endRange.upperBound > startRange.lowerBound else {
-            return nil
-        }
-        let candidateJPEG = prefixData.subdata(in: startRange.lowerBound..<endRange.upperBound)
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
         ]
-        guard let source = CGImageSourceCreateWithData(candidateJPEG as CFData, nil),
-              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+
+        var searchStart = prefixData.startIndex
+        var bestImage: CGImage?
+
+        while let startRange = prefixData.range(of: soi, in: searchStart..<prefixData.endIndex) {
+            var eoiSearch = startRange.upperBound
+            while let endRange = prefixData.range(of: eoi, in: eoiSearch..<prefixData.endIndex) {
+                let candidateJPEG = prefixData.subdata(in: startRange.lowerBound..<endRange.upperBound)
+                if let source = CGImageSourceCreateWithData(candidateJPEG as CFData, nil),
+                   let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+                    if let currentBest = bestImage {
+                        if cgImage.width * cgImage.height > currentBest.width * currentBest.height {
+                            bestImage = cgImage
+                        }
+                    } else {
+                        bestImage = cgImage
+                    }
+                    break
+                }
+                eoiSearch = endRange.upperBound
+            }
+            searchStart = startRange.upperBound
+        }
+
+        guard let bestImage else {
             return nil
         }
-        return encodeToJPEG(cgImage: cgImage)
+        return encodeToJPEG(cgImage: bestImage)
     }
 
     private static func downsampleIfNeeded(cgImage: CGImage, maxPixelSize: Int) -> CGImage {

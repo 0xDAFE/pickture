@@ -307,27 +307,63 @@ struct CullingSessionDiscoveryAndCacheTests {
     }
 
     @Test("Streaming CGImageSource prefers embedded header preview before full decode fallback and clamps user quota to 250 MB – 20 GB")
-    func embeddedPreviewExtractionAndUserQuotaClamping() throws {
+    func embeddedPreviewExtractionAndUserQuotaClamping() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        // Write a RAW (.ARW) file containing an embedded JPEG preview header followed by simulated sensor data
-        let previewJPEGURL = root.appendingPathComponent("preview.jpg")
-        try writeSampleRasterImage(to: previewJPEGURL, red: 90, green: 140, blue: 220)
-        let previewJPEGData = try Data(contentsOf: previewJPEGURL)
+        // Write a 640x480 image with an embedded EXIF thumbnail via CGImageDestination (UTType.jpeg + kCGImageDestinationEmbedThumbnail)
+        let width = 640
+        let height = 480
+        let pixels = [UInt8](repeating: 180, count: width * height * 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let provider = try #require(CGDataProvider(data: Data(pixels) as CFData))
+        let cgImage = try #require(
+            CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: width * 4,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+            )
+        )
 
-        let rawWithEmbeddedPreviewURL = root.appendingPathComponent("DSC0999.ARW")
-        var simulatedRawData = Data("SONY-ARW-HEADER-PREFIX".utf8)
-        simulatedRawData.append(previewJPEGData)
-        simulatedRawData.append(Data(repeating: 0xAA, count: 65_536)) // simulated trailing RAW sensor payload
-        try simulatedRawData.write(to: rawWithEmbeddedPreviewURL)
+        let dngWithEmbeddedThumbURL = root.appendingPathComponent("DSC0999.DNG")
+        let embeddedData = NSMutableData()
+        let embeddedDest = try #require(
+            CGImageDestinationCreateWithData(
+                embeddedData as CFMutableData,
+                UTType.jpeg.identifier as CFString,
+                1,
+                nil
+            )
+        )
+        CGImageDestinationAddImage(
+            embeddedDest,
+            cgImage,
+            [kCGImageDestinationEmbedThumbnail: true] as CFDictionary
+        )
+        #expect(CGImageDestinationFinalize(embeddedDest) == true)
+        try (embeddedData as Data).write(to: dngWithEmbeddedThumbURL)
 
-        let embeddedResult = try #require(PreviewLoader.extractImageThumbnail(from: rawWithEmbeddedPreviewURL, maxPixelSize: 160))
+        let embeddedResult = try #require(PreviewLoader.extractImageThumbnail(from: dngWithEmbeddedThumbURL, maxPixelSize: 360))
         #expect(embeddedResult.strategy == .embeddedPreview)
         #expect(!embeddedResult.jpegData.isEmpty)
 
-        // Verify user quota clamping (250 MB – 20 GB)
+        // Verify CullingSession loads and caches the embedded preview for the discovered RAW item
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        try session.openFolder(at: root)
+        let rawItem = try #require(session.items.first { $0.baseName == "DSC0999" })
+        let cachedThumb = try #require(await session.loadThumbnailData(for: rawItem))
+        #expect(!cachedThumb.isEmpty)
+        #expect(session.isThumbnailCached(for: rawItem) == true)
+
+        // Verify user quota clamping (250 MB – 20 GB)
         session.setUserConfiguredCacheSizeLimitBytes(10 * 1_024 * 1_024) // below 250 MB
         #expect(session.cacheSizeLimitBytes == MediaCache.minUserQuotaBytes)
 
