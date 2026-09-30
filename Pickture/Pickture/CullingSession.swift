@@ -33,6 +33,199 @@ final class CullingSession {
     var activeConflictItemID: String?
     var subfolderMode: SubfolderMode = .immediate
     var previewSource: PreviewSource = .preferRaster
+    var isBorderTapNavigationEnabled: Bool = true
+    var viewMode: ViewMode = .grid
+    var filmstripDockPosition: FilmstripDockPosition = .bottom
+    var shortcutProfileKind: ShortcutProfileKind = .lightroom
+    var customShortcutMappings: [String: SessionCommand] = [:]
+    var isAutoAdvanceEnabled: Bool = false
+
+    var activeShortcutProfile: ShortcutProfile {
+        switch shortcutProfileKind {
+        case .lightroom:
+            return .lightroom
+        case .captureOne:
+            return .captureOne
+        case .custom:
+            return .custom(overrides: customShortcutMappings)
+        }
+    }
+
+    var selectedItem: MediaItem? {
+        if let id = selectedItemID, let found = items.first(where: { $0.id == id }) {
+            return found
+        }
+        return items.first
+    }
+
+    func setViewMode(_ mode: ViewMode) {
+        viewMode = mode
+    }
+
+    func toggleViewMode() {
+        viewMode = (viewMode == .grid) ? .filmstrip : .grid
+    }
+
+    func setFilmstripDockPosition(_ position: FilmstripDockPosition) {
+        filmstripDockPosition = position
+    }
+
+    func setShortcutProfileKind(_ kind: ShortcutProfileKind) {
+        shortcutProfileKind = kind
+    }
+
+    func setCustomShortcut(key: String, command: SessionCommand) {
+        customShortcutMappings[key.lowercased()] = command
+    }
+
+    func toggleAutoAdvance() {
+        isAutoAdvanceEnabled.toggle()
+    }
+
+    func togglePreviewSource() {
+        previewSource = (previewSource == .preferRaster) ? .preferRAW : .preferRaster
+    }
+
+    func toggleBorderTapNavigation() {
+        isBorderTapNavigationEnabled.toggle()
+    }
+
+    func borderTapZoneWidth(for containerWidth: CGFloat) -> CGFloat {
+        min(containerWidth * 0.12, 64.0)
+    }
+
+    @discardableResult
+    func handleBorderTap(at location: CGPoint, in containerSize: CGSize) -> Bool {
+        guard isBorderTapNavigationEnabled else { return false }
+        guard containerSize.width > 0 else { return false }
+        let zoneWidth = borderTapZoneWidth(for: containerSize.width)
+        if location.x <= zoneWidth {
+            selectPreviousItem()
+            return true
+        } else if location.x >= (containerSize.width - zoneWidth) {
+            selectNextItem()
+            return true
+        }
+        return false
+    }
+
+    func selectNextItem() {
+        guard !items.isEmpty else { return }
+        guard let currentID = selectedItemID,
+              let currentIndex = items.firstIndex(where: { $0.id == currentID }) else {
+            selectedItemID = items.first?.id
+            return
+        }
+        if currentIndex + 1 < items.count {
+            selectedItemID = items[currentIndex + 1].id
+        }
+    }
+
+    func selectPreviousItem() {
+        guard !items.isEmpty else { return }
+        guard let currentID = selectedItemID,
+              let currentIndex = items.firstIndex(where: { $0.id == currentID }) else {
+            selectedItemID = items.first?.id
+            return
+        }
+        if currentIndex > 0 {
+            selectedItemID = items[currentIndex - 1].id
+        }
+    }
+
+    func selectFirstItem() {
+        if let first = items.first {
+            selectedItemID = first.id
+        }
+    }
+
+    func selectLastItem() {
+        if let last = items.last {
+            selectedItemID = last.id
+        }
+    }
+
+    @discardableResult
+    func executeCommand(_ command: SessionCommand) -> Bool {
+        switch command {
+        case .curation(let action):
+            guard let item = selectedItem else { return false }
+            applyCurationAction(action, to: item)
+            return true
+
+        case .selectPrevious:
+            selectPreviousItem()
+            return true
+
+        case .selectNext:
+            selectNextItem()
+            return true
+
+        case .selectFirst:
+            selectFirstItem()
+            return true
+
+        case .selectLast:
+            selectLastItem()
+            return true
+
+        case .toggleViewMode:
+            toggleViewMode()
+            return true
+
+        case .setViewMode(let mode):
+            setViewMode(mode)
+            return true
+
+        case .togglePreviewSource:
+            togglePreviewSource()
+            return true
+
+        case .setPreviewSource(let source):
+            self.previewSource = source
+            return true
+
+        case .toggleAutoAdvance:
+            toggleAutoAdvance()
+            return true
+
+        case .setAutoAdvance(let enabled):
+            self.isAutoAdvanceEnabled = enabled
+            return true
+
+        case .toggleBorderTapNavigation:
+            toggleBorderTapNavigation()
+            return true
+        }
+    }
+
+    @discardableResult
+    func handleShortcutKey(_ rawKey: String) -> Bool {
+        guard let command = activeShortcutProfile.command(for: rawKey) else {
+            return false
+        }
+        return executeCommand(command)
+    }
+
+    func applyCurationAction(_ action: CurationAction, to item: MediaItem) {
+        var current = curationMetadata(for: item)
+        switch action {
+        case .starRating(let rating):
+            current.starRating = rating
+        case .pickFlag(let flag):
+            current.pickFlag = flag
+        case .colorLabel(let label):
+            current.colorLabel = label
+        case .compound(let star, let flag, let label):
+            if let star { current.starRating = star }
+            if let flag { current.pickFlag = flag }
+            if let label { current.colorLabel = label }
+        }
+        updateCurationMetadata(current, for: item)
+        if isAutoAdvanceEnabled && (selectedItemID == nil || selectedItemID == item.id) {
+            selectNextItem()
+        }
+    }
 
     var formattedCacheUsage: String {
         ByteCountFormatter.string(fromByteCount: mediaCacheTotalBytes, countStyle: .file)
@@ -106,21 +299,15 @@ final class CullingSession {
     }
 
     func setStarRating(_ rating: StarRating, for item: MediaItem) {
-        var current = curationMetadata(for: item)
-        current.starRating = rating
-        updateCurationMetadata(current, for: item)
+        applyCurationAction(.starRating(rating), to: item)
     }
 
     func setPickFlag(_ flag: PickFlag, for item: MediaItem) {
-        var current = curationMetadata(for: item)
-        current.pickFlag = flag
-        updateCurationMetadata(current, for: item)
+        applyCurationAction(.pickFlag(flag), to: item)
     }
 
     func setColorLabel(_ label: ColorLabel, for item: MediaItem) {
-        var current = curationMetadata(for: item)
-        current.colorLabel = label
-        updateCurationMetadata(current, for: item)
+        applyCurationAction(.colorLabel(label), to: item)
     }
 
     func updateCurationMetadata(_ metadata: CurationMetadata, for item: MediaItem) {
@@ -382,6 +569,38 @@ final class CullingSession {
 
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
         let key = thumbnailCacheKey(for: item, maxPixelSize: maxPixelSize)
+        if let cached = mediaCache.readData(forKey: key) {
+            self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
+            return cached
+        }
+        let source = previewSource
+        let extracted = await Task.detached(priority: .userInitiated) {
+            await PreviewLoader.extractThumbnail(for: item, previewSource: source, maxPixelSize: maxPixelSize)
+        }.value
+        guard let extracted else {
+            return nil
+        }
+        mediaCache.storeData(extracted.jpegData, forKey: key)
+        self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
+        return extracted.jpegData
+    }
+
+    func previewCacheKey(for item: MediaItem, maxPixelSize: Int = 2048) -> String {
+        let file = item.preferredFile(for: previewSource)
+        return "\(file.id)#preview#\(previewSource.rawValue)#\(maxPixelSize)"
+    }
+
+    func cachedPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {
+        let key = previewCacheKey(for: item, maxPixelSize: maxPixelSize)
+        guard let cachedData = mediaCache.readData(forKey: key) else {
+            return nil
+        }
+        self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
+        return PreviewLoader.decodeCGImage(from: cachedData)
+    }
+
+    func loadPreviewImageData(for item: MediaItem, maxPixelSize: Int = 2048) async -> Data? {
+        let key = previewCacheKey(for: item, maxPixelSize: maxPixelSize)
         if let cached = mediaCache.readData(forKey: key) {
             self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
             return cached

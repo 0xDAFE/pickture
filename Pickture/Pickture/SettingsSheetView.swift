@@ -75,6 +75,58 @@ struct SettingsSheetView: View {
                     Text("MediaCache evicts least-recently-used thumbnails automatically when usage exceeds your configured byte quota (250 MB – 20 GB). Clearing MediaCache never deletes unsynchronized ratings or pending sidecar writes in MetadataSyncStore.")
                 }
 
+                Section {
+                    Picker(
+                        "Filmstrip Dock Position",
+                        selection: Binding(
+                            get: { session.filmstripDockPosition },
+                            set: { session.setFilmstripDockPosition($0) }
+                        )
+                    ) {
+                        ForEach(FilmstripDockPosition.allCases, id: \.self) { pos in
+                            Text(pos.displayName).tag(pos)
+                        }
+                    }
+
+                    Toggle(
+                        "Border Tap Navigation",
+                        isOn: Binding(
+                            get: { session.isBorderTapNavigationEnabled },
+                            set: { _ in session.toggleBorderTapNavigation() }
+                        )
+                    )
+                } header: {
+                    Text("Filmstrip & Touch")
+                } footer: {
+                    Text("When Border Tap Navigation is enabled, tapping within the left or right outer border zones (min(width * 0.12, 64pt)) navigates to the previous or next item. Disable to prevent accidental navigation from hand/thumb grip.")
+                }
+
+                Section {
+                    Picker(
+                        "Shortcut Profile",
+                        selection: Binding(
+                            get: { session.shortcutProfileKind },
+                            set: { session.setShortcutProfileKind($0) }
+                        )
+                    ) {
+                        ForEach(ShortcutProfileKind.allCases, id: \.self) { kind in
+                            Text(kind.displayName).tag(kind)
+                        }
+                    }
+
+                    Toggle(
+                        "Auto-Advance Selection (A)",
+                        isOn: Binding(
+                            get: { session.isAutoAdvanceEnabled },
+                            set: { _ in session.toggleAutoAdvance() }
+                        )
+                    )
+                } header: {
+                    Text("Shortcuts & Auto-Advance")
+                } footer: {
+                    Text("Lightroom profile maps ratings 0–5, flags P/X/U, labels 6–9. Capture One profile maps ratings 0–5, flags +/-/U, label *. Auto-Advance automatically moves selection to the next item immediately after applying a rating, flag, or label.")
+                }
+
                 Section("Preview & Discovery Defaults") {
                     Picker(
                         "Default PreviewSource",

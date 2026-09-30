@@ -191,12 +191,105 @@ struct ContentView: View {
                     }
                 }
             } else {
-                gridContentView
+                if session.viewMode == .grid {
+                    gridContentView
+                } else {
+                    FilmstripView(session: session)
+                }
             }
         }
-        .navigationTitle(session.currentFolderURL?.lastPathComponent ?? "Pickture Grid")
+        .focusable()
+        .onKeyPress(phases: .down) { press in
+            if session.handleShortcutKey(press.characters) {
+                return .handled
+            }
+            if press.key == .space {
+                if session.handleShortcutKey(" ") { return .handled }
+            } else if press.key == .leftArrow {
+                if session.handleShortcutKey("left") { return .handled }
+            } else if press.key == .rightArrow {
+                if session.handleShortcutKey("right") { return .handled }
+            } else if press.key == .upArrow {
+                if session.handleShortcutKey("up") { return .handled }
+            } else if press.key == .downArrow {
+                if session.handleShortcutKey("down") { return .handled }
+            }
+            return .ignored
+        }
+        .navigationTitle(
+            session.currentFolderURL == nil
+                ? "Pickture"
+                : "\(session.currentFolderURL!.lastPathComponent) (\(session.viewMode == .grid ? "Grid" : "Filmstrip"))"
+        )
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                // View Mode Toggle (Grid vs Filmstrip)
+                Picker("View Mode", selection: Binding(
+                    get: { session.viewMode },
+                    set: { session.setViewMode($0) }
+                )) {
+                    Label("Grid (G)", systemImage: "square.grid.3x3").tag(ViewMode.grid)
+                    Label("Filmstrip (E)", systemImage: "rectangle.split.3x1").tag(ViewMode.filmstrip)
+                }
+                .pickerStyle(.segmented)
+                .help("Toggle between Grid View (G) and Filmstrip View (E or Space)")
+
+                // Filmstrip Dock Position (when in Filmstrip view)
+                if session.viewMode == .filmstrip {
+                    Menu {
+                        Button {
+                            session.setFilmstripDockPosition(.bottom)
+                        } label: {
+                            Label("Bottom Dock", systemImage: session.filmstripDockPosition == .bottom ? "checkmark" : "")
+                        }
+                        Button {
+                            session.setFilmstripDockPosition(.right)
+                        } label: {
+                            Label("Right Dock", systemImage: session.filmstripDockPosition == .right ? "checkmark" : "")
+                        }
+                    } label: {
+                        Label(
+                            "Dock: \(session.filmstripDockPosition.displayName)",
+                            systemImage: session.filmstripDockPosition == .bottom ? "dock.rectangle" : "sidebar.right"
+                        )
+                    }
+                    .help("Filmstrip thumbnail strip dock position")
+
+                    Button {
+                        session.toggleBorderTapNavigation()
+                    } label: {
+                        Label(
+                            session.isBorderTapNavigationEnabled ? "Border Tap: On" : "Border Tap: Off",
+                            systemImage: session.isBorderTapNavigationEnabled ? "hand.tap.fill" : "hand.tap"
+                        )
+                        .foregroundStyle(session.isBorderTapNavigationEnabled ? Color.accentColor : Color.secondary)
+                    }
+                    .help("Toggle BorderTapNavigation edge touch zones")
+                }
+
+                // PreviewSource Toggle Button (J)
+                Button {
+                    session.togglePreviewSource()
+                } label: {
+                    Label(
+                        session.previewSource == .preferRaster ? "Raster" : "RAW",
+                        systemImage: "photo.stack"
+                    )
+                }
+                .help("Toggle PreviewSource (PreferRaster ↔ PreferRAW) (J)")
+
+                // Auto-Advance Toggle Button (A)
+                Button {
+                    session.toggleAutoAdvance()
+                } label: {
+                    Label(
+                        session.isAutoAdvanceEnabled ? "Auto-Advance: On" : "Auto-Advance: Off",
+                        systemImage: session.isAutoAdvanceEnabled ? "forward.fill" : "forward"
+                    )
+                    .foregroundStyle(session.isAutoAdvanceEnabled ? Color.accentColor : Color.primary)
+                }
+                .help("Toggle Auto-Advance after rating (A)")
+
                 Button {
                     isFolderImporterPresented = true
                 } label: {

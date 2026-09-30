@@ -182,6 +182,12 @@ struct MediaGridCellView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                session.selectedItemID = item.id
+                session.setViewMode(.filmstrip)
+            }
+        )
         .contextMenu {
             contextMenuContent
         }

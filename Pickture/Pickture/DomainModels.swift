@@ -337,6 +337,197 @@ extension ColorLabel {
 }
 #endif
 
+nonisolated enum ViewMode: String, Codable, CaseIterable, Hashable, Sendable {
+    case grid
+    case filmstrip
+}
+
+nonisolated enum FilmstripDockPosition: String, Codable, CaseIterable, Hashable, Sendable {
+    case bottom
+    case right
+
+    public var displayName: String {
+        switch self {
+        case .bottom: return "Bottom"
+        case .right: return "Right"
+        }
+    }
+}
+
+nonisolated enum CurationAction: Hashable, Codable, Sendable {
+    case starRating(StarRating)
+    case pickFlag(PickFlag)
+    case colorLabel(ColorLabel)
+    case compound(starRating: StarRating? = nil, pickFlag: PickFlag? = nil, colorLabel: ColorLabel? = nil)
+
+    public static func setStarRating(_ rating: StarRating) -> CurationAction {
+        .starRating(rating)
+    }
+
+    public static func setPickFlag(_ flag: PickFlag) -> CurationAction {
+        .pickFlag(flag)
+    }
+
+    public static func setColorLabel(_ label: ColorLabel) -> CurationAction {
+        .colorLabel(label)
+    }
+}
+
+nonisolated enum SessionCommand: Hashable, Codable, Sendable {
+    case curation(CurationAction)
+    case selectPrevious
+    case selectNext
+    case selectFirst
+    case selectLast
+    case toggleViewMode
+    case setViewMode(ViewMode)
+    case togglePreviewSource
+    case setPreviewSource(PreviewSource)
+    case toggleAutoAdvance
+    case setAutoAdvance(Bool)
+    case toggleBorderTapNavigation
+}
+
+nonisolated enum ShortcutProfileKind: String, Codable, CaseIterable, Hashable, Sendable {
+    case lightroom
+    case captureOne
+    case custom
+
+    public var displayName: String {
+        switch self {
+        case .lightroom: return "Lightroom"
+        case .captureOne: return "Capture One"
+        case .custom: return "Custom"
+        }
+    }
+
+    public var defaultKeyMappings: [String: SessionCommand] {
+        switch self {
+        case .lightroom:
+            return [
+                "0": .curation(.setStarRating(0)),
+                "1": .curation(.setStarRating(1)),
+                "2": .curation(.setStarRating(2)),
+                "3": .curation(.setStarRating(3)),
+                "4": .curation(.setStarRating(4)),
+                "5": .curation(.setStarRating(5)),
+                "p": .curation(.setPickFlag(.picked)),
+                "x": .curation(.setPickFlag(.rejected)),
+                "u": .curation(.setPickFlag(.unflagged)),
+                "6": .curation(.setColorLabel(.red)),
+                "7": .curation(.setColorLabel(.yellow)),
+                "8": .curation(.setColorLabel(.green)),
+                "9": .curation(.setColorLabel(.blue)),
+                "g": .setViewMode(.grid),
+                "e": .setViewMode(.filmstrip),
+                " ": .toggleViewMode,
+                "space": .toggleViewMode,
+                "j": .togglePreviewSource,
+                "a": .toggleAutoAdvance,
+                "left": .selectPrevious,
+                "arrowleft": .selectPrevious,
+                "h": .selectPrevious,
+                "[": .selectPrevious,
+                "right": .selectNext,
+                "arrowright": .selectNext,
+                "l": .selectNext,
+                "]": .selectNext,
+                "up": .selectPrevious,
+                "arrowup": .selectPrevious,
+                "down": .selectNext,
+                "arrowdown": .selectNext
+            ]
+        case .captureOne:
+            return [
+                "0": .curation(.setStarRating(0)),
+                "1": .curation(.setStarRating(1)),
+                "2": .curation(.setStarRating(2)),
+                "3": .curation(.setStarRating(3)),
+                "4": .curation(.setStarRating(4)),
+                "5": .curation(.setStarRating(5)),
+                "+": .curation(.setPickFlag(.picked)),
+                "=": .curation(.setPickFlag(.picked)),
+                "-": .curation(.setPickFlag(.rejected)),
+                "u": .curation(.setPickFlag(.unflagged)),
+                "p": .curation(.setPickFlag(.picked)),
+                "x": .curation(.setPickFlag(.rejected)),
+                "*": .curation(.setColorLabel(.green)),
+                "6": .curation(.setColorLabel(.red)),
+                "7": .curation(.setColorLabel(.yellow)),
+                "8": .curation(.setColorLabel(.green)),
+                "9": .curation(.setColorLabel(.blue)),
+                "g": .setViewMode(.grid),
+                "e": .setViewMode(.filmstrip),
+                " ": .toggleViewMode,
+                "space": .toggleViewMode,
+                "j": .togglePreviewSource,
+                "a": .toggleAutoAdvance,
+                "left": .selectPrevious,
+                "arrowleft": .selectPrevious,
+                "h": .selectPrevious,
+                "[": .selectPrevious,
+                "right": .selectNext,
+                "arrowright": .selectNext,
+                "l": .selectNext,
+                "]": .selectNext,
+                "up": .selectPrevious,
+                "arrowup": .selectPrevious,
+                "down": .selectNext,
+                "arrowdown": .selectNext
+            ]
+        case .custom:
+            return ShortcutProfileKind.lightroom.defaultKeyMappings
+        }
+    }
+}
+
+nonisolated struct ShortcutProfile: Identifiable, Hashable, Codable, Sendable {
+    public var id: String { kind.rawValue }
+    public var kind: ShortcutProfileKind
+    public var name: String
+    public var keyMappings: [String: SessionCommand]
+
+    public init(kind: ShortcutProfileKind, name: String? = nil, keyMappings: [String: SessionCommand]? = nil) {
+        self.kind = kind
+        self.name = name ?? kind.displayName
+        self.keyMappings = keyMappings ?? kind.defaultKeyMappings
+    }
+
+    public static let lightroom = ShortcutProfile(kind: .lightroom)
+    public static let captureOne = ShortcutProfile(kind: .captureOne)
+
+    public static func custom(overrides: [String: SessionCommand] = [:]) -> ShortcutProfile {
+        var mappings = ShortcutProfileKind.lightroom.defaultKeyMappings
+        for (k, v) in overrides {
+            mappings[k.lowercased()] = v
+        }
+        return ShortcutProfile(kind: .custom, name: "Custom", keyMappings: mappings)
+    }
+
+    public func command(for key: String) -> SessionCommand? {
+        let lower = key.lowercased()
+        if let direct = keyMappings[key] { return direct }
+        if let lowerMapped = keyMappings[lower] { return lowerMapped }
+        if key == " " || lower == "space" {
+            return keyMappings[" "] ?? keyMappings["space"]
+        }
+        if key == "\u{F702}" || lower == "arrowleft" || lower == "left" {
+            return keyMappings["left"] ?? keyMappings["arrowleft"]
+        }
+        if key == "\u{F703}" || lower == "arrowright" || lower == "right" {
+            return keyMappings["right"] ?? keyMappings["arrowright"]
+        }
+        if key == "\u{F700}" || lower == "arrowup" || lower == "up" {
+            return keyMappings["up"] ?? keyMappings["arrowup"]
+        }
+        if key == "\u{F701}" || lower == "arrowdown" || lower == "down" {
+            return keyMappings["down"] ?? keyMappings["arrowdown"]
+        }
+        return nil
+    }
+}
+
+
 
 
 
