@@ -12,6 +12,8 @@ struct MediaGridCellView: View {
 
     @State private var thumbnailImage: CGImage?
     @State private var isLoadingThumbnail = false
+    @State private var isHovered = false
+    @Environment(\.colorScheme) private var colorScheme
 
     private var taskKey: String {
         "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)"
@@ -21,12 +23,39 @@ struct MediaGridCellView: View {
         thumbnailImage ?? session.cachedThumbnailImage(for: item, maxPixelSize: 360)
     }
 
+    private var currentAspectRatio: CGFloat {
+        if let cgImage = displayedThumbnail {
+            return cgImage.aspectRatio
+        }
+        return session.thumbnailAspectRatio(for: item)
+    }
+
     private var curation: CurationMetadata {
         session.curationMetadata(for: item)
     }
 
     private var syncState: SyncState {
         session.syncState(for: item)
+    }
+
+    private var floatingDropShadowColor: Color {
+        Color.black.opacity(colorScheme == .dark ? 0.22 : 0.12)
+    }
+
+    private func platformFillColor(opacity: Double) -> Color {
+        #if canImport(AppKit)
+        Color(nsColor: .quaternarySystemFill).opacity(opacity)
+        #else
+        Color.secondary.opacity(opacity)
+        #endif
+    }
+
+    private var hoverPlateFill: Color {
+        platformFillColor(opacity: 0.4)
+    }
+
+    private var neutralPlaceholderFill: Color {
+        platformFillColor(opacity: 0.5)
     }
 
     var body: some View {
@@ -39,110 +68,29 @@ struct MediaGridCellView: View {
             }
         }) {
             VStack(alignment: .leading, spacing: 6) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.black.opacity(0.85))
+                // Tier 1: Image Stage (upper zone with fixed maximum height & uniform baseline shelf)
+                imageStageView
 
-                    if let cgImage = displayedThumbnail {
-                        Image(decorative: cgImage, scale: 1.0, orientation: .up)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        VStack(spacing: 6) {
-                            if isLoadingThumbnail {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: item.kind == .video ? "film" : "photo")
-                                    .font(.title2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Text(item.primaryFile.fileExtension.uppercased())
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    // Overlay badges (Format & Sync state in corners)
-                    VStack {
-                        // Top row: file format badge + sync state indicator
-                        HStack(spacing: 6) {
-                            if item.isMediaPair {
-                                Text(item.badgeText)
-                                    .font(.caption2.weight(.bold))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(.black.opacity(0.75), in: Capsule())
-                                    .foregroundStyle(.yellow)
-                            } else {
-                                Text(item.badgeText)
-                                    .font(.caption2.weight(.semibold))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(.black.opacity(0.65), in: Capsule())
-                                    .foregroundStyle(.white)
-                            }
-
-                            Spacer()
-
-                            syncStateBadgeView
-                        }
-                        .padding(6)
-
-                        Spacer()
-
-                        // Bottom row: Video format indicator if applicable
-                        if item.kind == .video {
-                            HStack {
-                                Spacer()
-                                Image(systemName: "video.fill")
-                                    .font(.caption2)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(.black.opacity(0.65), in: Capsule())
-                                    .foregroundStyle(.white)
-                            }
-                            .padding(6)
-                        }
-                    }
-                }
-                .aspectRatio(4.0 / 3.0, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2.5)
-                )
-
-                // Item info & Quick curation toolbar
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.displayFileName)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-
-                    if isRecursiveMode && !item.relativeDirectoryPath.isEmpty {
-                        Text(item.relativeDirectoryPath)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                    }
-
-                    // Interactive Curation Bar
-                    curationToolbarView
-                }
-                .padding(.horizontal, 2)
+                // Tier 2: Metadata Deck (pinned fixed height with middle-truncated filename & toolbar)
+                metadataDeckView
             }
             .padding(6)
             .background(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+                    .fill(
+                        isSelected
+                            ? Color.accentColor.opacity(0.12)
+                            : (isHovered ? hoverPlateFill : Color.clear)
+                    )
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
         .simultaneousGesture(
             TapGesture(count: 2).onEnded {
                 session.selectedItemID = item.id
@@ -166,8 +114,124 @@ struct MediaGridCellView: View {
             }.value
             if !Task.isCancelled {
                 thumbnailImage = decoded
+                if let decoded {
+                    session.recordThumbnailAspectRatio(decoded.aspectRatio, for: item.id)
+                }
             }
         }
+    }
+
+    // MARK: - Tier 1: Image Stage
+
+    @ViewBuilder
+    private var imageStageView: some View {
+        GeometryReader { proxy in
+            let stageWidth = proxy.size.width
+            let stageHeight = proxy.size.height
+            let silhouetteSize = session.gridItemSilhouetteSize(
+                aspectRatio: currentAspectRatio,
+                stageWidth: stageWidth,
+                stageHeight: stageHeight,
+                mediaKind: item.kind
+            )
+
+            ZStack(alignment: .bottom) {
+                Color.clear
+
+                floatingSilhouetteView(size: silhouetteSize)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .aspectRatio(4.0 / 3.0, contentMode: .fit)
+    }
+
+    @ViewBuilder
+    private func floatingSilhouetteView(size: CGSize) -> some View {
+        ZStack {
+            if let cgImage = displayedThumbnail {
+                Image(decorative: cgImage, scale: 1.0, orientation: .up)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                placeholderView
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2.5)
+        )
+        .overlay(alignment: .topLeading) {
+            formatBadgeView
+                .padding(6)
+        }
+        .overlay(alignment: .topTrailing) {
+            syncStateBadgeView
+                .padding(6)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if item.kind == .video {
+                videoBadgeView
+                    .padding(6)
+            }
+        }
+        .shadow(
+            color: floatingDropShadowColor,
+            radius: 4,
+            x: 0,
+            y: 2
+        )
+    }
+
+    @ViewBuilder
+    private var placeholderView: some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(neutralPlaceholderFill)
+            .overlay(
+                VStack(spacing: 6) {
+                    if isLoadingThumbnail {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: item.kind == .video ? "film" : "photo")
+                            .font(.title2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(item.primaryFile.fileExtension.uppercased())
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            )
+    }
+
+    @ViewBuilder
+    private var formatBadgeView: some View {
+        if item.isMediaPair {
+            Text("RAW+JPG")
+                .font(.caption2.weight(.bold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(.black.opacity(0.75), in: Capsule())
+                .foregroundStyle(.yellow)
+        } else {
+            Text(item.primaryFile.fileExtension.uppercased())
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(.black.opacity(0.65), in: Capsule())
+                .foregroundStyle(.white)
+        }
+    }
+
+    @ViewBuilder
+    private var videoBadgeView: some View {
+        Image(systemName: "play.fill")
+            .font(.system(size: 8, weight: .bold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(.black.opacity(0.7), in: Capsule())
+            .foregroundStyle(.white)
     }
 
     @ViewBuilder
@@ -213,6 +277,35 @@ struct MediaGridCellView: View {
         case .synced:
             EmptyView()
         }
+    }
+
+    // MARK: - Tier 2: Metadata Deck
+
+    @ViewBuilder
+    private var metadataDeckView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Row 1: Filename with middle truncation (and optional relative directory path in recursive SubfolderMode)
+            HStack(spacing: 4) {
+                Text(item.displayFileName)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                if isRecursiveMode && !item.relativeDirectoryPath.isEmpty {
+                    Text("• \(item.relativeDirectoryPath)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            }
+
+            // Row 2: Interactive curation toolbar
+            curationToolbarView
+        }
+        .frame(height: session.gridMetadataDeckHeight, alignment: .top)
+        .padding(.horizontal, 2)
     }
 
     private var curationToolbarView: some View {
@@ -286,6 +379,8 @@ struct MediaGridCellView: View {
         }
         .padding(.top, 2)
     }
+
+    // MARK: - Context Menu
 
     @ViewBuilder
     private var contextMenuContent: some View {

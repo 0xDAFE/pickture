@@ -505,22 +505,32 @@ struct ContentView: View {
 
             Divider()
 
-            ScrollView {
-                LazyVGrid(columns: gridColumns, spacing: 12) {
-                    ForEach(session.items) { item in
-                        MediaGridCellView(
-                            item: item,
-                            isSelected: session.selectedItemID == item.id,
-                            isRecursiveMode: session.subfolderMode == .recursive,
-                            previewSource: session.previewSource,
-                            cacheGeneration: session.cacheGeneration,
-                            session: session
-                        ) {
-                            session.selectedItemID = item.id
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVGrid(columns: gridColumns, spacing: 12) {
+                        ForEach(session.items) { item in
+                            MediaGridCellView(
+                                item: item,
+                                isSelected: session.selectedItemID == item.id,
+                                isRecursiveMode: session.subfolderMode == .recursive,
+                                previewSource: session.previewSource,
+                                cacheGeneration: session.cacheGeneration,
+                                session: session
+                            ) {
+                                session.selectedItemID = item.id
+                            }
+                            .id(item.id)
+                        }
+                    }
+                    .padding(16)
+                }
+                .onChange(of: session.selectedItemID) { _, newID in
+                    if let newID, session.viewMode == .grid {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            proxy.scrollTo(newID)
                         }
                     }
                 }
-                .padding(16)
             }
         }
     }
