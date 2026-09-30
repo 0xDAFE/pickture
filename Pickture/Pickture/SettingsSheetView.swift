@@ -105,11 +105,11 @@ struct SettingsSheetView: View {
                     Picker(
                         "Shortcut Profile",
                         selection: Binding(
-                            get: { session.shortcutProfileKind },
+                            get: { session.shortcutProfileKind == .custom ? .lightroom : session.shortcutProfileKind },
                             set: { session.setShortcutProfileKind($0) }
                         )
                     ) {
-                        ForEach(ShortcutProfileKind.allCases, id: \.self) { kind in
+                        ForEach(ShortcutProfileKind.allCases.filter { $0 != .custom }, id: \.self) { kind in
                             Text(kind.displayName).tag(kind)
                         }
                     }
