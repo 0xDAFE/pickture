@@ -210,7 +210,6 @@ struct CullingSessionFilmstripAndShortcutTests {
 
         let item0 = session.items[0]
         let item1 = session.items[1]
-        let item2 = session.items[2]
 
         // Default profile is Lightroom
         #expect(session.shortcutProfileKind == .lightroom)
