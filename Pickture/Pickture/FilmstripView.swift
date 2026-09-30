@@ -1,6 +1,9 @@
 import AVKit
 import CoreGraphics
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 struct FilmstripView: View {
     let session: CullingSession
@@ -269,7 +272,7 @@ struct FilmstripView: View {
                 ScrollView(.horizontal, showsIndicators: true) {
                     LazyHStack(spacing: 8) {
                         ForEach(session.items) { item in
-                            thumbnailItemView(for: item)
+                            thumbnailItemView(for: item, position: .bottom)
                         }
                     }
                     .padding(.horizontal, 12)
@@ -286,7 +289,7 @@ struct FilmstripView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(spacing: 8) {
                         ForEach(session.items) { item in
-                            thumbnailItemView(for: item)
+                            thumbnailItemView(for: item, position: .right)
                         }
                     }
                     .padding(.vertical, 12)
@@ -303,11 +306,12 @@ struct FilmstripView: View {
         }
     }
 
-    private func thumbnailItemView(for item: MediaItem) -> some View {
+    private func thumbnailItemView(for item: MediaItem, position: FilmstripDockPosition) -> some View {
         FilmstripThumbnailCell(
             item: item,
             isSelected: session.selectedItemID == item.id,
-            session: session
+            session: session,
+            dockPosition: position
         )
         .id(item.id)
         .onTapGesture {
@@ -481,6 +485,7 @@ struct FilmstripThumbnailCell: View {
     let item: MediaItem
     let isSelected: Bool
     let session: CullingSession
+    var dockPosition: FilmstripDockPosition = .bottom
 
     @State private var thumbnail: CGImage?
 
@@ -496,11 +501,39 @@ struct FilmstripThumbnailCell: View {
         thumbnail ?? session.cachedThumbnailImage(for: item, maxPixelSize: 360)
     }
 
+    private var currentAspectRatio: CGFloat {
+        if let cgImage = displayedImage {
+            return CGFloat(cgImage.width) / CGFloat(max(1, cgImage.height))
+        }
+        return session.thumbnailAspectRatio(for: item)
+    }
+
+    private var thumbnailSize: CGSize {
+        session.filmstripThumbnailSize(aspectRatio: currentAspectRatio, dockPosition: dockPosition)
+    }
+
+    private var neutralMattingColor: Color {
+        #if canImport(AppKit)
+        Color(nsColor: .controlBackgroundColor)
+        #else
+        Color.secondary.opacity(0.15)
+        #endif
+    }
+
     var body: some View {
+        let size = thumbnailSize
+        let isCompact = size.width < 70
+        let leadingPad: CGFloat = (curation.colorLabel != .none) ? (isCompact ? 8 : 9) : (isCompact ? 3 : 4)
+        let trailingPad: CGFloat = isCompact ? 3 : 4
+
         VStack(spacing: 4) {
             ZStack {
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.black.opacity(0.85))
+                    .fill(neutralMattingColor)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                    )
 
                 if let cgImage = displayedImage {
                     Image(decorative: cgImage, scale: 1.0, orientation: .up)
@@ -568,7 +601,7 @@ struct FilmstripThumbnailCell: View {
 
                     Spacer()
 
-                    HStack(spacing: 2) {
+                    HStack(spacing: isCompact ? 1 : 2) {
                         if curation.starRating > 0 {
                             HStack(spacing: 1) {
                                 Image(systemName: "star.fill")
@@ -578,7 +611,7 @@ struct FilmstripThumbnailCell: View {
                                     .font(.system(size: 8, weight: .bold))
                                     .foregroundStyle(.white)
                             }
-                            .padding(.horizontal, 4)
+                            .padding(.horizontal, isCompact ? 2.5 : 4)
                             .padding(.vertical, 2)
                             .background(.black.opacity(0.8), in: Capsule())
                         }
@@ -590,22 +623,27 @@ struct FilmstripThumbnailCell: View {
                             Image(systemName: "flag.fill")
                                 .font(.system(size: 8))
                                 .foregroundStyle(.green)
-                                .padding(3)
+                                .padding(isCompact ? 2 : 3)
                                 .background(.black.opacity(0.8), in: Circle())
                         case .rejected:
                             Image(systemName: "xmark")
                                 .font(.system(size: 8, weight: .bold))
                                 .foregroundStyle(.red)
-                                .padding(3)
+                                .padding(isCompact ? 2 : 3)
                                 .background(.black.opacity(0.8), in: Circle())
                         case .unflagged:
                             EmptyView()
                         }
                     }
                 }
-                .padding(curation.colorLabel != .none ? EdgeInsets(top: 5, leading: 9, bottom: 5, trailing: 5) : EdgeInsets(top: 5, leading: 5, bottom: 5, trailing: 5))
+                .padding(EdgeInsets(
+                    top: 3,
+                    leading: leadingPad,
+                    bottom: 3,
+                    trailing: trailingPad
+                ))
             }
-            .frame(width: 108, height: 76)
+            .frame(width: size.width, height: size.height)
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
@@ -616,15 +654,20 @@ struct FilmstripThumbnailCell: View {
                 .font(.system(size: 10, weight: isSelected ? .bold : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .multilineTextAlignment(.center)
                 .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
-                .frame(width: 108)
+                .frame(width: max(size.width, 64))
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.baseName), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
         .task(id: item.id) {
             if thumbnail == nil {
                 if let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) {
-                    thumbnail = PreviewLoader.decodeCGImage(from: data)
+                    if let decoded = PreviewLoader.decodeCGImage(from: data) {
+                        thumbnail = decoded
+                        let ratio = CGFloat(decoded.width) / CGFloat(max(1, decoded.height))
+                        session.recordThumbnailAspectRatio(ratio, for: item.id)
+                    }
                 }
             }
         }

@@ -21,6 +21,7 @@ final class CullingSession {
     private var syncStateByItemID: [String: SyncState] = [:]
     private var baseSnapshotByItemID: [String: BaseSnapshot] = [:]
     private var conflictsByItemID: [String: MetadataConflict] = [:]
+    private var thumbnailAspectRatios: [String: CGFloat] = [:]
     private var isFlushingPendingWrites: Bool = false
     var isSyncSuspended: Bool = false {
         didSet {
@@ -93,6 +94,64 @@ final class CullingSession {
     func borderTapZoneWidth(for containerWidth: CGFloat) -> CGFloat {
         min(containerWidth * 0.12, 64.0)
     }
+
+    func filmstripThumbnailSize(aspectRatio: CGFloat, dockPosition: FilmstripDockPosition) -> CGSize {
+        let safeRatio: CGFloat
+        if aspectRatio.isNaN || aspectRatio.isInfinite || aspectRatio <= 0 {
+            safeRatio = 1.5
+        } else {
+            safeRatio = aspectRatio
+        }
+
+        switch dockPosition {
+        case .bottom:
+            let height: CGFloat = 72.0
+            let unroundedWidth = height * safeRatio
+            let clampedWidth = min(128.0, max(48.0, unroundedWidth.rounded()))
+            return CGSize(width: clampedWidth, height: height)
+
+        case .right:
+            let width: CGFloat = 112.0
+            let divisor = max(0.1, safeRatio)
+            let unroundedHeight = width / divisor
+            let clampedHeight = min(150.0, max(64.0, unroundedHeight.rounded()))
+            return CGSize(width: width, height: clampedHeight)
+        }
+    }
+
+    func fallbackAspectRatio(for kind: MediaKind) -> CGFloat {
+        kind == .video ? 1.777 : 1.5
+    }
+
+    func fallbackAspectRatio(for item: MediaItem) -> CGFloat {
+        fallbackAspectRatio(for: item.kind)
+    }
+
+    func thumbnailAspectRatio(for item: MediaItem) -> CGFloat {
+        if let cachedRatio = thumbnailAspectRatios[item.id] {
+            return cachedRatio
+        }
+        if let cachedImage = cachedThumbnailImage(for: item, maxPixelSize: 360) {
+            let ratio = CGFloat(cachedImage.width) / CGFloat(max(1, cachedImage.height))
+            thumbnailAspectRatios[item.id] = ratio
+            return ratio
+        }
+        return fallbackAspectRatio(for: item)
+    }
+
+    func recordThumbnailAspectRatio(_ ratio: CGFloat, for itemID: String) {
+        if !ratio.isNaN && !ratio.isInfinite && ratio > 0 {
+            thumbnailAspectRatios[itemID] = ratio
+        }
+    }
+
+    func filmstripThumbnailSize(for item: MediaItem, dockPosition: FilmstripDockPosition? = nil) -> CGSize {
+        let position = dockPosition ?? self.filmstripDockPosition
+        let ratio = thumbnailAspectRatio(for: item)
+        return filmstripThumbnailSize(aspectRatio: ratio, dockPosition: position)
+    }
+
+
 
     @discardableResult
     func handleBorderTap(at location: CGPoint, in containerSize: CGSize) -> Bool {
@@ -294,6 +353,7 @@ final class CullingSession {
 
     func clearMediaCache() {
         mediaCache.clear()
+        thumbnailAspectRatios.removeAll()
         self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
         self.cacheGeneration &+= 1
     }

@@ -397,4 +397,181 @@ struct CullingSessionFilmstripAndShortcutTests {
         #expect(session.curationMetadata(for: item0).starRating == 2)
         #expect(session.selectedItemID == item0.id) // does not advance
     }
+
+    // MARK: - Slice 5: Dynamic Aspect-Ratio Sizing & Clean Framing (Issue #11)
+
+    @Test("Standard aspect ratios in bottom dock scale width dynamically clamped between 48pt and 128pt with 72pt height")
+    func filmstripThumbnailSizeBottomDockStandardAspectRatios() {
+        let session = CullingSession()
+
+        // 16:9 widescreen video (1.777) -> 128 x 72pt
+        let videoSize = session.filmstripThumbnailSize(aspectRatio: 1.777, dockPosition: .bottom)
+        #expect(videoSize.width == 128)
+        #expect(videoSize.height == 72)
+
+        // 3:2 DSLR RAW (1.5) -> 108 x 72pt
+        let dslrRawSize = session.filmstripThumbnailSize(aspectRatio: 1.5, dockPosition: .bottom)
+        #expect(dslrRawSize.width == 108)
+        #expect(dslrRawSize.height == 72)
+
+        // 4:3 standard photo (1.333) -> 96 x 72pt
+        let photo43Size = session.filmstripThumbnailSize(aspectRatio: 1.333, dockPosition: .bottom)
+        #expect(photo43Size.width == 96)
+        #expect(photo43Size.height == 72)
+
+        // 1:1 square crop (1.0) -> 72 x 72pt
+        let squareSize = session.filmstripThumbnailSize(aspectRatio: 1.0, dockPosition: .bottom)
+        #expect(squareSize.width == 72)
+        #expect(squareSize.height == 72)
+
+        // 2:3 portrait photo (0.667) -> 48 x 72pt
+        let portrait23Size = session.filmstripThumbnailSize(aspectRatio: 0.667, dockPosition: .bottom)
+        #expect(portrait23Size.width == 48)
+        #expect(portrait23Size.height == 72)
+    }
+
+    @Test("Standard aspect ratios in right dock scale height dynamically clamped between 64pt and 150pt with 112pt width")
+    func filmstripThumbnailSizeRightDockStandardAspectRatios() {
+        let session = CullingSession()
+
+        // 16:9 widescreen video (1.777) -> 112 x 64pt (clamped)
+        let videoSize = session.filmstripThumbnailSize(aspectRatio: 1.777, dockPosition: .right)
+        #expect(videoSize.width == 112)
+        #expect(videoSize.height == 64)
+
+        // 3:2 DSLR RAW (1.5) -> 112 x 75pt
+        let dslrRawSize = session.filmstripThumbnailSize(aspectRatio: 1.5, dockPosition: .right)
+        #expect(dslrRawSize.width == 112)
+        #expect(dslrRawSize.height == 75)
+
+        // 4:3 standard photo (1.333) -> 112 x 84pt
+        let photo43Size = session.filmstripThumbnailSize(aspectRatio: 1.333, dockPosition: .right)
+        #expect(photo43Size.width == 112)
+        #expect(photo43Size.height == 84)
+
+        // 1:1 square crop (1.0) -> 112 x 112pt
+        let squareSize = session.filmstripThumbnailSize(aspectRatio: 1.0, dockPosition: .right)
+        #expect(squareSize.width == 112)
+        #expect(squareSize.height == 112)
+
+        // 2:3 portrait photo (0.667) -> 112 x 150pt (clamped)
+        let portrait23Size = session.filmstripThumbnailSize(aspectRatio: 0.667, dockPosition: .right)
+        #expect(portrait23Size.width == 112)
+        #expect(portrait23Size.height == 150)
+    }
+
+    @Test("Boundary clamping and invalid aspect ratios safely clamp and fall back without throwing or crashing")
+    func filmstripThumbnailSizeBoundaryClampingAndSafeFallbacks() {
+        let session = CullingSession()
+
+        // Ultra-wide 3.5:1 panorama in bottom dock clamps to max width 128pt
+        let panoBottom = session.filmstripThumbnailSize(aspectRatio: 3.5, dockPosition: .bottom)
+        #expect(panoBottom.width == 128)
+        #expect(panoBottom.height == 72)
+
+        // Ultra-tall 1:3 vertical image in bottom dock clamps to min width 48pt
+        let tallBottom = session.filmstripThumbnailSize(aspectRatio: 1.0 / 3.0, dockPosition: .bottom)
+        #expect(tallBottom.width == 48)
+        #expect(tallBottom.height == 72)
+
+        // Ultra-tall 1:3 vertical image in right dock clamps to max height 150pt
+        let tallRight = session.filmstripThumbnailSize(aspectRatio: 1.0 / 3.0, dockPosition: .right)
+        #expect(tallRight.width == 112)
+        #expect(tallRight.height == 150)
+
+        // Ultra-wide 3.5:1 panorama in right dock clamps to min height 64pt
+        let panoRight = session.filmstripThumbnailSize(aspectRatio: 3.5, dockPosition: .right)
+        #expect(panoRight.width == 112)
+        #expect(panoRight.height == 64)
+
+        // Zero aspect ratio safely falls back to standard default dimensions (3:2 DSLR)
+        let zeroBottom = session.filmstripThumbnailSize(aspectRatio: 0.0, dockPosition: .bottom)
+        #expect(zeroBottom.width == 108)
+        #expect(zeroBottom.height == 72)
+
+        let zeroRight = session.filmstripThumbnailSize(aspectRatio: 0.0, dockPosition: .right)
+        #expect(zeroRight.width == 112)
+        #expect(zeroRight.height == 75)
+
+        // Negative aspect ratio safely falls back to standard default dimensions
+        let negativeBottom = session.filmstripThumbnailSize(aspectRatio: -1.5, dockPosition: .bottom)
+        #expect(negativeBottom.width == 108)
+        #expect(negativeBottom.height == 72)
+
+        // NaN aspect ratio safely falls back to standard default dimensions
+        let nanBottom = session.filmstripThumbnailSize(aspectRatio: CGFloat.nan, dockPosition: .bottom)
+        #expect(nanBottom.width == 108)
+        #expect(nanBottom.height == 72)
+
+        let nanRight = session.filmstripThumbnailSize(aspectRatio: CGFloat.nan, dockPosition: .right)
+        #expect(nanRight.width == 112)
+        #expect(nanRight.height == 75)
+
+        // Infinite aspect ratio safely falls back to standard default dimensions
+        let infiniteBottom = session.filmstripThumbnailSize(aspectRatio: CGFloat.infinity, dockPosition: .bottom)
+        #expect(infiniteBottom.width == 108)
+        #expect(infiniteBottom.height == 72)
+    }
+
+    @Test("Changing filmstripDockPosition toggles resolved dimensions and MediaItem fallbacks respect photo and video ratios")
+    func filmstripDockPositionSwitchingAndFallbackAspectRatios() {
+        let session = CullingSession()
+
+        #expect(session.fallbackAspectRatio(for: .photo) == 1.5)
+        #expect(session.fallbackAspectRatio(for: .video) == 1.777)
+
+        let photoFile = MediaFile(url: URL(fileURLWithPath: "/tmp/test.jpg"), formatKind: .raster)
+        let photoItem = MediaItem(
+            id: "/tmp/test.jpg",
+            baseName: "test",
+            directoryURL: URL(fileURLWithPath: "/tmp"),
+            relativeDirectoryPath: "",
+            kind: .photo,
+            primaryFile: photoFile,
+            mediaPair: nil,
+            sidecarURL: nil
+        )
+
+        let videoFile = MediaFile(url: URL(fileURLWithPath: "/tmp/clip.mov"), formatKind: .video)
+        let videoItem = MediaItem(
+            id: "/tmp/clip.mov",
+            baseName: "clip",
+            directoryURL: URL(fileURLWithPath: "/tmp"),
+            relativeDirectoryPath: "",
+            kind: .video,
+            primaryFile: videoFile,
+            mediaPair: nil,
+            sidecarURL: nil
+        )
+
+        #expect(session.fallbackAspectRatio(for: photoItem) == 1.5)
+        #expect(session.fallbackAspectRatio(for: videoItem) == 1.777)
+
+        // Bottom dock (default)
+        session.setFilmstripDockPosition(.bottom)
+        #expect(session.filmstripDockPosition == .bottom)
+
+        let photoBottomSize = session.filmstripThumbnailSize(for: photoItem)
+        #expect(photoBottomSize.width == 108)
+        #expect(photoBottomSize.height == 72)
+
+        let videoBottomSize = session.filmstripThumbnailSize(for: videoItem)
+        #expect(videoBottomSize.width == 128)
+        #expect(videoBottomSize.height == 72)
+
+        // Switch to Right dock
+        session.setFilmstripDockPosition(.right)
+        #expect(session.filmstripDockPosition == .right)
+
+        let photoRightSize = session.filmstripThumbnailSize(for: photoItem)
+        #expect(photoRightSize.width == 112)
+        #expect(photoRightSize.height == 75)
+
+        let videoRightSize = session.filmstripThumbnailSize(for: videoItem)
+        #expect(videoRightSize.width == 112)
+        #expect(videoRightSize.height == 64)
+    }
 }
+
+
+
