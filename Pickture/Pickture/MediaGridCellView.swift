@@ -21,8 +21,23 @@ struct MediaGridCellView: View {
         thumbnailImage ?? session.cachedThumbnailImage(for: item, maxPixelSize: 360)
     }
 
+    private var curation: CurationMetadata {
+        session.curationMetadata(for: item)
+    }
+
+    private var syncState: SyncState {
+        session.syncState(for: item)
+    }
+
     var body: some View {
-        Button(action: onSelect) {
+        Button(action: {
+            if syncState == .conflicted {
+                session.activeConflictItemID = item.id
+                session.isConflictSheetPresented = true
+            } else {
+                onSelect()
+            }
+        }) {
             VStack(alignment: .leading, spacing: 6) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 8)
@@ -52,6 +67,7 @@ struct MediaGridCellView: View {
 
                     // Overlay badges
                     VStack {
+                        // Top row: file format badge + sync state indicator
                         HStack(spacing: 6) {
                             if item.isMediaPair {
                                 Text(item.badgeText)
@@ -71,6 +87,52 @@ struct MediaGridCellView: View {
 
                             Spacer()
 
+                            syncStateBadgeView
+                        }
+                        .padding(6)
+
+                        Spacer()
+
+                        // Bottom row: curation badges (Pick, Rating, Color)
+                        HStack(spacing: 6) {
+                            if curation.pickFlag == .picked {
+                                Image(systemName: "flag.fill")
+                                    .font(.caption2)
+                                    .padding(4)
+                                    .background(.green, in: Circle())
+                                    .foregroundStyle(.white)
+                            } else if curation.pickFlag == .rejected {
+                                Image(systemName: "xmark")
+                                    .font(.caption2.weight(.bold))
+                                    .padding(4)
+                                    .background(.red, in: Circle())
+                                    .foregroundStyle(.white)
+                            }
+
+                            if curation.starRating.value > 0 {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "star.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.yellow)
+                                    Text("\(curation.starRating.value)")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(.white)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.black.opacity(0.75), in: Capsule())
+                            }
+
+                            if curation.colorLabel != .none {
+                                Circle()
+                                    .fill(curation.colorLabel.displayColor)
+                                    .frame(width: 8, height: 8)
+                                    .padding(4)
+                                    .background(.black.opacity(0.75), in: Circle())
+                            }
+
+                            Spacer()
+
                             Label(
                                 item.mediaTypeBadge,
                                 systemImage: item.kind == .video ? "video.fill" : "camera.fill"
@@ -82,8 +144,6 @@ struct MediaGridCellView: View {
                             .foregroundStyle(.white)
                         }
                         .padding(6)
-
-                        Spacer()
                     }
                 }
                 .aspectRatio(4.0 / 3.0, contentMode: .fit)
@@ -93,7 +153,8 @@ struct MediaGridCellView: View {
                         .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2.5)
                 )
 
-                VStack(alignment: .leading, spacing: 2) {
+                // Item info & Quick curation toolbar
+                VStack(alignment: .leading, spacing: 3) {
                     Text(item.displayFileName)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.primary)
@@ -107,6 +168,9 @@ struct MediaGridCellView: View {
                             .lineLimit(1)
                             .truncationMode(.head)
                     }
+
+                    // Interactive Curation Bar
+                    curationToolbarView
                 }
                 .padding(.horizontal, 2)
             }
@@ -118,8 +182,11 @@ struct MediaGridCellView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            contextMenuContent
+        }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(item.displayFileName), \(item.mediaTypeBadge)\(item.isMediaPair ? ", RAW+JPG pair" : "")")
+        .accessibilityLabel("\(item.displayFileName), \(item.mediaTypeBadge)\(item.isMediaPair ? ", RAW+JPG pair" : ""), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
         .task(id: taskKey) {
             isLoadingThumbnail = true
             defer { isLoadingThumbnail = false }
@@ -132,6 +199,155 @@ struct MediaGridCellView: View {
             }.value
             if !Task.isCancelled {
                 thumbnailImage = decoded
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var syncStateBadgeView: some View {
+        switch syncState {
+        case .conflicted:
+            Button {
+                session.activeConflictItemID = item.id
+                session.isConflictSheetPresented = true
+            } label: {
+                Label("Conflict", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2.weight(.bold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.orange, in: Capsule())
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .help("Click to resolve 3-way conflict")
+
+        case .pendingWrite:
+            Label("Pending", systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(.black.opacity(0.75), in: Capsule())
+                .foregroundStyle(.orange)
+
+        case .loading:
+            ProgressView()
+                .controlSize(.mini)
+                .padding(4)
+                .background(.black.opacity(0.65), in: Circle())
+
+        case .syncError:
+            Label("Sync Error", systemImage: "exclamationmark.circle.fill")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(.red, in: Capsule())
+                .foregroundStyle(.white)
+
+        case .synced:
+            EmptyView()
+        }
+    }
+
+    private var curationToolbarView: some View {
+        HStack(spacing: 4) {
+            // Pick / Unflag / Reject
+            Button {
+                let next: PickFlag = (curation.pickFlag == .picked) ? .unflagged : .picked
+                session.setPickFlag(next, for: item)
+            } label: {
+                Image(systemName: curation.pickFlag == .picked ? "flag.fill" : "flag")
+                    .font(.system(size: 11))
+                    .foregroundStyle(curation.pickFlag == .picked ? .green : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Flag as Picked")
+
+            Button {
+                let next: PickFlag = (curation.pickFlag == .rejected) ? .unflagged : .rejected
+                session.setPickFlag(next, for: item)
+            } label: {
+                Image(systemName: curation.pickFlag == .rejected ? "xmark.circle.fill" : "xmark.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(curation.pickFlag == .rejected ? .red : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Mark as Rejected")
+
+            Spacer()
+
+            // 1-5 Star Ratings
+            HStack(spacing: 1) {
+                ForEach(1...5, id: \.self) { star in
+                    Button {
+                        let newRating: StarRating = (curation.starRating.value == star) ? StarRating(0) : StarRating(star)
+                        session.setStarRating(newRating, for: item)
+                    } label: {
+                        Image(systemName: star <= curation.starRating.value ? "star.fill" : "star")
+                            .font(.system(size: 10))
+                            .foregroundStyle(star <= curation.starRating.value ? .yellow : .secondary.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Spacer()
+
+            // Color label menu
+            Menu {
+                ForEach(ColorLabel.allCases, id: \.self) { label in
+                    Button {
+                        session.setColorLabel(label, for: item)
+                    } label: {
+                        HStack {
+                            Circle()
+                                .fill(label.displayColor)
+                                .frame(width: 8, height: 8)
+                            Text(label.rawValue.capitalized)
+                            if curation.colorLabel == label {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Circle()
+                    .fill(curation.colorLabel == .none ? Color.secondary.opacity(0.3) : curation.colorLabel.displayColor)
+                    .frame(width: 9, height: 9)
+            }
+            .buttonStyle(.plain)
+            .help("Assign ColorLabel")
+        }
+        .padding(.top, 2)
+    }
+
+    @ViewBuilder
+    private var contextMenuContent: some View {
+        if syncState == .conflicted {
+            Button {
+                session.activeConflictItemID = item.id
+                session.isConflictSheetPresented = true
+            } label: {
+                Label("Resolve Conflict…", systemImage: "exclamationmark.triangle.fill")
+            }
+            Divider()
+        }
+
+        Menu("Star Rating") {
+            Button("0 Stars (Unrated)") { session.setStarRating(0, for: item) }
+            ForEach(1...5, id: \.self) { rating in
+                Button("\(rating) Stars") { session.setStarRating(StarRating(rating), for: item) }
+            }
+        }
+
+        Menu("Pick Flag") {
+            Button("Picked (P)") { session.setPickFlag(.picked, for: item) }
+            Button("Unflagged (U)") { session.setPickFlag(.unflagged, for: item) }
+            Button("Rejected (X)") { session.setPickFlag(.rejected, for: item) }
+        }
+
+        Menu("Color Label") {
+            ForEach(ColorLabel.allCases, id: \.self) { label in
+                Button(label.rawValue.capitalized) { session.setColorLabel(label, for: item) }
             }
         }
     }

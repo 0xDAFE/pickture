@@ -318,5 +318,25 @@ nonisolated enum ConflictResolutionStrategy: Hashable, Sendable {
     case cherryPick(CurationMetadata)
 }
 
+#if canImport(SwiftUI)
+import SwiftUI
+
+extension ColorLabel {
+    public var displayColor: Color {
+        switch self {
+        case .none: return .clear
+        case .red: return .red
+        case .orange: return .orange
+        case .yellow: return .yellow
+        case .green: return .green
+        case .blue: return .blue
+        case .purple: return .purple
+        case .grey: return .gray
+        }
+    }
+}
+#endif
+
+
 
 

@@ -50,6 +50,9 @@ struct ContentView: View {
         .sheet(isPresented: $isSettingsPresented) {
             SettingsSheetView(session: session)
         }
+        .sheet(isPresented: $session.isConflictSheetPresented) {
+            ConflictResolutionSheetView(session: session)
+        }
     }
 
     private var sidebarContent: some View {
@@ -200,6 +203,55 @@ struct ContentView: View {
                     Label("Open Folder", systemImage: "folder.badge.plus")
                 }
 
+                Button {
+                    Task {
+                        try? await session.refreshFolder()
+                    }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .help("Refresh Folder and re-check sidecars")
+
+                // Workspace-level Sync Summary Badge
+                Button {
+                    if session.conflictedItemsCount > 0 {
+                        session.activeConflictItemID = nil
+                        session.isConflictSheetPresented = true
+                    } else if session.pendingWritesCount > 0 {
+                        Task { await session.flushPendingWrites() }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        switch session.syncSummaryState {
+                        case .synced:
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        case .pendingWrite:
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .foregroundStyle(.orange)
+                        case .loading:
+                            ProgressView()
+                                .controlSize(.mini)
+                        case .conflicted:
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                        case .syncError:
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .foregroundStyle(.red)
+                        }
+                        Text(session.syncSummaryBadgeText)
+                            .font(.caption.weight(.medium))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(session.syncSummaryState == .conflicted ? Color.orange.opacity(0.2) : Color.secondary.opacity(0.12))
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Sync Status — Click to resolve conflicts or flush pending writes")
+
                 Menu {
                     if session.recentFolders.isEmpty {
                         Text("No Recent Folders")
@@ -307,6 +359,33 @@ struct ContentView: View {
 
     private var gridContentView: some View {
         VStack(spacing: 0) {
+            if session.conflictedItemsCount > 0 {
+                HStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.headline)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(session.conflictedItemsCount) Metadata Conflict\(session.conflictedItemsCount == 1 ? "" : "s") Detected")
+                            .font(.subheadline.weight(.semibold))
+                        Text("External edits on disk diverged from local changes. Review and resolve before syncing.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Resolve Conflicts…") {
+                        session.activeConflictItemID = nil
+                        session.isConflictSheetPresented = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.orange.opacity(0.15))
+                Divider()
+            }
+
             HStack(spacing: 12) {
                 Label("\(session.items.count) MediaItems", systemImage: "square.grid.3x3")
                     .font(.caption.weight(.medium))

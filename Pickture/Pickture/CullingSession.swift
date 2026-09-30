@@ -19,6 +19,18 @@ final class CullingSession {
     var lastErrorMessage: String?
     private var metadataByItemID: [String: CurationMetadata] = [:]
     private var syncStateByItemID: [String: SyncState] = [:]
+    private var baseSnapshotByItemID: [String: BaseSnapshot] = [:]
+    private var conflictsByItemID: [String: MetadataConflict] = [:]
+    private var isFlushingPendingWrites: Bool = false
+    var isSyncSuspended: Bool = false {
+        didSet {
+            if !isSyncSuspended {
+                scheduleFlushPendingWrites()
+            }
+        }
+    }
+    var isConflictSheetPresented: Bool = false
+    var activeConflictItemID: String?
     var subfolderMode: SubfolderMode = .immediate
     var previewSource: PreviewSource = .preferRaster
 
@@ -93,10 +105,38 @@ final class CullingSession {
         self.cacheGeneration &+= 1
     }
 
-    func stagePendingMetadata(_ metadata: CurationMetadata, for item: MediaItem) {
-        metadataSyncStore.stagePendingWrite(metadata, for: item.id)
+    func setStarRating(_ rating: StarRating, for item: MediaItem) {
+        var current = curationMetadata(for: item)
+        current.starRating = rating
+        updateCurationMetadata(current, for: item)
+    }
+
+    func setPickFlag(_ flag: PickFlag, for item: MediaItem) {
+        var current = curationMetadata(for: item)
+        current.pickFlag = flag
+        updateCurationMetadata(current, for: item)
+    }
+
+    func setColorLabel(_ label: ColorLabel, for item: MediaItem) {
+        var current = curationMetadata(for: item)
+        current.colorLabel = label
+        updateCurationMetadata(current, for: item)
+    }
+
+    func updateCurationMetadata(_ metadata: CurationMetadata, for item: MediaItem) {
+        let base = baseSnapshot(for: item)
         metadataByItemID[item.id] = metadata
         syncStateByItemID[item.id] = .pendingWrite
+        conflictsByItemID.removeValue(forKey: item.id)
+        metadataSyncStore.stagePendingWrite(metadata, baseSnapshot: base, for: item.id)
+
+        if !isSyncSuspended {
+            scheduleFlushPendingWrites()
+        }
+    }
+
+    func stagePendingMetadata(_ metadata: CurationMetadata, for item: MediaItem) {
+        updateCurationMetadata(metadata, for: item)
     }
 
     func curationMetadata(for item: MediaItem) -> CurationMetadata {
@@ -117,6 +157,227 @@ final class CullingSession {
             return persisted.syncState
         }
         return .synced
+    }
+
+    func baseSnapshot(for item: MediaItem) -> BaseSnapshot? {
+        if let local = baseSnapshotByItemID[item.id] {
+            return local
+        }
+        return metadataSyncStore.record(for: item.id)?.baseSnapshot
+    }
+
+    func conflict(for item: MediaItem) -> MetadataConflict? {
+        if let local = conflictsByItemID[item.id] {
+            return local
+        }
+        return metadataSyncStore.record(for: item.id)?.conflict
+    }
+
+    var pendingWritesCount: Int {
+        items.filter { syncState(for: $0) == .pendingWrite }.count
+    }
+
+    var conflictedItemsCount: Int {
+        items.filter { syncState(for: $0) == .conflicted }.count
+    }
+
+    var conflictedItems: [MediaItem] {
+        items.filter { syncState(for: $0) == .conflicted }
+    }
+
+    var activeConflictItem: MediaItem? {
+        guard let id = activeConflictItemID else { return conflictedItems.first }
+        return items.first { $0.id == id } ?? conflictedItems.first
+    }
+
+    var syncSummaryState: SyncState {
+        if conflictedItemsCount > 0 {
+            return .conflicted
+        }
+        if items.contains(where: { syncState(for: $0) == .syncError }) {
+            return .syncError
+        }
+        if items.contains(where: { syncState(for: $0) == .loading }) {
+            return .loading
+        }
+        if pendingWritesCount > 0 {
+            return .pendingWrite
+        }
+        return .synced
+    }
+
+    var syncSummaryBadgeText: String {
+        let conflicts = conflictedItemsCount
+        if conflicts > 0 {
+            return "\(conflicts) Conflict\(conflicts == 1 ? "" : "s")"
+        }
+        let pending = pendingWritesCount
+        if pending > 0 {
+            return "\(pending) Pending"
+        }
+        let errors = items.filter { syncState(for: $0) == .syncError }.count
+        if errors > 0 {
+            return "\(errors) Error\(errors == 1 ? "" : "s")"
+        }
+        return "Synced"
+    }
+
+    func flushPendingWrites() async {
+        guard !isFlushingPendingWrites else { return }
+        isFlushingPendingWrites = true
+        defer { isFlushingPendingWrites = false }
+
+        let pending = items.filter { syncState(for: $0) == .pendingWrite }
+        for item in pending {
+            do {
+                try await flushPendingWrite(for: item.id)
+            } catch {
+                syncStateByItemID[item.id] = .syncError
+                metadataSyncStore.updateSyncState(.syncError, for: item.id)
+                lastErrorMessage = "Sync error on \(item.displayFileName): \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func flushPendingWrite(for itemID: String) async throws {
+        guard let item = items.first(where: { $0.id == itemID }) else { return }
+        let pendingCuration = curationMetadata(for: item)
+        let base = baseSnapshot(for: item)
+
+        syncStateByItemID[item.id] = .loading
+
+        enum FlushOutcome: Sendable {
+            case conflict(MetadataConflict)
+            case success(BaseSnapshot)
+        }
+
+        let outcome = try await Task.detached(priority: .utility) { () -> FlushOutcome in
+            let readURL = SidecarCodec.resolveSidecarReadURL(for: item)
+            var diskCuration: CurationMetadata? = nil
+            var diskDigest = ""
+
+            if let readURL, let data = try? Data(contentsOf: readURL) {
+                diskDigest = SidecarCodec.computeDigest(for: data)
+                if let parsed = try? SidecarCodec.parse(data: data) {
+                    diskCuration = parsed.curation
+                }
+            }
+
+            let remoteDigestChanged = (base?.fileDigest != diskDigest)
+
+            if let diskCuration, remoteDigestChanged {
+                let conflict = XMPConflictEngine.evaluate(
+                    itemID: item.id,
+                    base: base,
+                    local: pendingCuration,
+                    remote: diskCuration,
+                    remoteDigestChanged: true
+                )
+                if let conflict {
+                    return .conflict(conflict)
+                }
+            }
+
+            let writtenTargets = try SidecarCodec.write(curation: pendingCuration, for: item)
+
+            if let primaryTarget = writtenTargets.first, let writtenData = try? Data(contentsOf: primaryTarget) {
+                let newDigest = SidecarCodec.computeDigest(for: writtenData)
+                let modDate = (try? primaryTarget.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                let newBase = BaseSnapshot(metadata: pendingCuration, fileDigest: newDigest, modificationDate: modDate)
+                return .success(newBase)
+            } else {
+                let fallbackBase = BaseSnapshot(metadata: pendingCuration, fileDigest: "")
+                return .success(fallbackBase)
+            }
+        }.value
+
+        switch outcome {
+        case .conflict(let conflict):
+            syncStateByItemID[item.id] = .conflicted
+            conflictsByItemID[item.id] = conflict
+            metadataSyncStore.recordConflict(conflict, for: item.id)
+
+        case .success(let newBase):
+            baseSnapshotByItemID[item.id] = newBase
+            syncStateByItemID[item.id] = .synced
+            conflictsByItemID.removeValue(forKey: item.id)
+            metadataSyncStore.markSynced(for: item.id, baseSnapshot: newBase)
+        }
+    }
+
+    func resolveConflict(for item: MediaItem, strategy: ConflictResolutionStrategy) async throws {
+        guard let conflict = conflict(for: item) else { return }
+
+        let resolvedMetadata: CurationMetadata
+        let newBase: BaseSnapshot
+
+        switch strategy {
+        case .useRemote:
+            resolvedMetadata = conflict.remote
+            let readURL = SidecarCodec.resolveSidecarReadURL(for: item)
+            let diskData = (try? readURL.flatMap { try? Data(contentsOf: $0) }) ?? Data()
+            let digest = SidecarCodec.computeDigest(for: diskData)
+            let modDate = readURL.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+            newBase = BaseSnapshot(metadata: resolvedMetadata, fileDigest: digest, modificationDate: modDate)
+
+        case .useLocal, .cherryPick:
+            let chosen: CurationMetadata
+            switch strategy {
+            case .useLocal:
+                chosen = conflict.local
+            case .cherryPick(let custom):
+                chosen = custom
+            case .useRemote:
+                chosen = conflict.remote
+            }
+            resolvedMetadata = chosen
+
+            let writtenTargets = try await Task.detached(priority: .utility) {
+                try SidecarCodec.write(curation: chosen, for: item)
+            }.value
+
+            let primaryTarget = writtenTargets.first ?? SidecarCodec.resolveSidecarReadURL(for: item)
+            let writtenData = (try? primaryTarget.flatMap { try? Data(contentsOf: $0) }) ?? Data()
+            let digest = SidecarCodec.computeDigest(for: writtenData)
+            let modDate = primaryTarget.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+            newBase = BaseSnapshot(metadata: resolvedMetadata, fileDigest: digest, modificationDate: modDate)
+        }
+
+        metadataByItemID[item.id] = resolvedMetadata
+        syncStateByItemID[item.id] = .synced
+        baseSnapshotByItemID[item.id] = newBase
+        conflictsByItemID.removeValue(forKey: item.id)
+        metadataSyncStore.resolveConflict(for: item.id, resolvedMetadata: resolvedMetadata, newBaseSnapshot: newBase)
+    }
+
+    func resolveAllConflicts(strategy: ConflictResolutionStrategy) async throws {
+        for item in conflictedItems {
+            try await resolveConflict(for: item, strategy: strategy)
+        }
+    }
+
+    func resolveAllConflictsWithLocal() async throws {
+        try await resolveAllConflicts(strategy: .useLocal)
+    }
+
+    func resolveAllConflictsWithRemote() async throws {
+        try await resolveAllConflicts(strategy: .useRemote)
+    }
+
+    private func scheduleFlushPendingWrites() {
+        guard !isSyncSuspended else { return }
+        Task { [weak self] in
+            await self?.flushPendingWrites()
+        }
+    }
+
+    func refreshFolder() async throws {
+        guard let currentFolderURL else { return }
+        self.items = try discoverItems(in: currentFolderURL.standardizedFileURL, mode: subfolderMode)
+        initializeMetadata(for: self.items)
+        if !isSyncSuspended {
+            await flushPendingWrites()
+        }
     }
 
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
@@ -155,12 +416,98 @@ final class CullingSession {
         self.recentFolders = updatedRecents
         self.currentFolderURL = resolvedURL
         self.items = try discoverItems(in: resolvedURL.standardizedFileURL, mode: subfolderMode)
+        initializeMetadata(for: self.items)
+        if !isSyncSuspended {
+            scheduleFlushPendingWrites()
+        }
     }
 
     func setSubfolderMode(_ mode: SubfolderMode) throws {
         self.subfolderMode = mode
         if let currentFolderURL {
             self.items = try discoverItems(in: currentFolderURL.standardizedFileURL, mode: mode)
+            initializeMetadata(for: self.items)
+            if !isSyncSuspended {
+                scheduleFlushPendingWrites()
+            }
+        }
+    }
+
+    private func initializeMetadata(for items: [MediaItem]) {
+        for item in items {
+            let persisted = metadataSyncStore.record(for: item.id)
+            let sidecarURL = SidecarCodec.resolveSidecarReadURL(for: item)
+
+            var diskData: Data? = nil
+            var diskCuration: CurationMetadata? = nil
+            var diskExif: ExifMetadata? = nil
+            var diskDigest = ""
+            var diskModDate: Date? = nil
+
+            if let sidecarURL, let data = try? Data(contentsOf: sidecarURL) {
+                diskData = data
+                diskDigest = SidecarCodec.computeDigest(for: data)
+                diskModDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if let parsed = try? SidecarCodec.parse(data: data) {
+                    diskCuration = parsed.curation
+                    diskExif = parsed.exif
+                }
+            }
+
+            if let persisted {
+                if persisted.syncState == .pendingWrite {
+                    metadataByItemID[item.id] = persisted.metadata
+                    syncStateByItemID[item.id] = .pendingWrite
+                    baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+
+                    // Check if external edit happened on disk while pending
+                    if let diskCuration, let base = persisted.baseSnapshot {
+                        let remoteChanged = diskDigest != base.fileDigest
+                        if remoteChanged, let conflict = XMPConflictEngine.evaluate(
+                            itemID: item.id,
+                            base: base,
+                            local: persisted.metadata,
+                            remote: diskCuration,
+                            remoteDigestChanged: true
+                        ) {
+                            syncStateByItemID[item.id] = .conflicted
+                            conflictsByItemID[item.id] = conflict
+                            metadataSyncStore.recordConflict(conflict, for: item.id)
+                        }
+                    }
+                } else if persisted.syncState == .conflicted, let conflict = persisted.conflict {
+                    metadataByItemID[item.id] = persisted.metadata
+                    syncStateByItemID[item.id] = .conflicted
+                    conflictsByItemID[item.id] = conflict
+                    baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                } else {
+                    if let diskCuration {
+                        let snapshot = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
+                        metadataByItemID[item.id] = diskCuration
+                        syncStateByItemID[item.id] = .synced
+                        baseSnapshotByItemID[item.id] = snapshot
+                        metadataSyncStore.recordBaseSnapshot(snapshot, exif: diskExif, for: item.id)
+                    } else {
+                        metadataByItemID[item.id] = persisted.metadata
+                        syncStateByItemID[item.id] = .synced
+                        baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                    }
+                }
+            } else {
+                if let diskCuration {
+                    let snapshot = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
+                    metadataByItemID[item.id] = diskCuration
+                    syncStateByItemID[item.id] = .synced
+                    baseSnapshotByItemID[item.id] = snapshot
+                    metadataSyncStore.recordBaseSnapshot(snapshot, exif: diskExif, for: item.id)
+                } else {
+                    let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+                    metadataByItemID[item.id] = CurationMetadata()
+                    syncStateByItemID[item.id] = .synced
+                    baseSnapshotByItemID[item.id] = emptySnapshot
+                    metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: nil, for: item.id)
+                }
+            }
         }
     }
 
