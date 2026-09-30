@@ -21,7 +21,7 @@ struct FilmstripView: View {
                     Divider()
 
                     thumbnailStrip(position: .bottom)
-                        .frame(height: 120)
+                        .frame(height: 138)
                         .background(.bar)
                 }
             case .right:
@@ -32,7 +32,7 @@ struct FilmstripView: View {
                     Divider()
 
                     thumbnailStrip(position: .right)
-                        .frame(width: 140)
+                        .frame(width: 144)
                         .background(.bar)
                 }
             }
@@ -500,18 +500,29 @@ struct FilmstripThumbnailCell: View {
         VStack(spacing: 4) {
             ZStack {
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.secondary.opacity(0.2))
+                    .fill(Color.black.opacity(0.85))
 
                 if let cgImage = displayedImage {
                     Image(decorative: cgImage, scale: 1.0, orientation: .up)
                         .resizable()
-                        .scaledToFill()
+                        .scaledToFit()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipped()
                 } else {
                     Image(systemName: item.kind == .video ? "film" : "photo")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                // Color label indicator: A sleek vertical accent stripe on the left edge
+                if curation.colorLabel != .none {
+                    HStack {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(curation.colorLabel.displayColor)
+                            .frame(width: 4)
+                            .padding(.vertical, 6)
+                            .padding(.leading, 3.5)
+                        Spacer()
+                    }
                 }
 
                 // Rating & Flag overlays
@@ -524,6 +535,12 @@ struct FilmstripThumbnailCell: View {
                                 .padding(.vertical, 2)
                                 .background(.black.opacity(0.8), in: Capsule())
                                 .foregroundStyle(.yellow)
+                        } else if item.kind == .video {
+                            Image(systemName: "video.fill")
+                                .font(.system(size: 8))
+                                .padding(3)
+                                .background(.black.opacity(0.8), in: Circle())
+                                .foregroundStyle(.white)
                         }
 
                         Spacer()
@@ -561,9 +578,9 @@ struct FilmstripThumbnailCell: View {
                                     .font(.system(size: 8, weight: .bold))
                                     .foregroundStyle(.white)
                             }
-                            .padding(.horizontal, 3)
-                            .padding(.vertical, 1)
-                            .background(.black.opacity(0.7), in: Capsule())
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(.black.opacity(0.8), in: Capsule())
                         }
 
                         Spacer()
@@ -573,36 +590,26 @@ struct FilmstripThumbnailCell: View {
                             Image(systemName: "flag.fill")
                                 .font(.system(size: 8))
                                 .foregroundStyle(.green)
-                                .padding(2)
-                                .background(.black.opacity(0.7), in: Circle())
+                                .padding(3)
+                                .background(.black.opacity(0.8), in: Circle())
                         case .rejected:
                             Image(systemName: "xmark")
                                 .font(.system(size: 8, weight: .bold))
                                 .foregroundStyle(.red)
-                                .padding(2)
-                                .background(.black.opacity(0.7), in: Circle())
+                                .padding(3)
+                                .background(.black.opacity(0.8), in: Circle())
                         case .unflagged:
                             EmptyView()
                         }
                     }
                 }
-                .padding(4)
-
-                // Color label indicator bar
-                if curation.colorLabel != .none {
-                    VStack {
-                        Spacer()
-                        Rectangle()
-                            .fill(curation.colorLabel.displayColor)
-                            .frame(height: 3)
-                    }
-                }
+                .padding(curation.colorLabel != .none ? EdgeInsets(top: 5, leading: 9, bottom: 5, trailing: 5) : EdgeInsets(top: 5, leading: 5, bottom: 5, trailing: 5))
             }
-            .frame(width: 88, height: 66)
+            .frame(width: 108, height: 76)
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
+                    .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2.5)
             )
 
             Text(item.baseName)
@@ -610,8 +617,10 @@ struct FilmstripThumbnailCell: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
-                .frame(width: 88)
+                .frame(width: 108)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(item.baseName), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
         .task(id: item.id) {
             if thumbnail == nil {
                 if let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) {

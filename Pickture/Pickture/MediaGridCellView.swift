@@ -41,14 +41,13 @@ struct MediaGridCellView: View {
             VStack(alignment: .leading, spacing: 6) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(.quaternary.opacity(0.5))
+                        .fill(Color.black.opacity(0.85))
 
                     if let cgImage = displayedThumbnail {
                         Image(decorative: cgImage, scale: 1.0, orientation: .up)
                             .resizable()
-                            .scaledToFill()
+                            .scaledToFit()
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .clipped()
                     } else {
                         VStack(spacing: 6) {
                             if isLoadingThumbnail {
@@ -65,7 +64,7 @@ struct MediaGridCellView: View {
                         }
                     }
 
-                    // Overlay badges
+                    // Overlay badges (Format & Sync state in corners)
                     VStack {
                         // Top row: file format badge + sync state indicator
                         HStack(spacing: 6) {
@@ -93,57 +92,19 @@ struct MediaGridCellView: View {
 
                         Spacer()
 
-                        // Bottom row: curation badges (Pick, Rating, Color)
-                        HStack(spacing: 6) {
-                            if curation.pickFlag == .picked {
-                                Image(systemName: "flag.fill")
+                        // Bottom row: Video format indicator if applicable
+                        if item.kind == .video {
+                            HStack {
+                                Spacer()
+                                Image(systemName: "video.fill")
                                     .font(.caption2)
-                                    .padding(4)
-                                    .background(.green, in: Circle())
-                                    .foregroundStyle(.white)
-                            } else if curation.pickFlag == .rejected {
-                                Image(systemName: "xmark")
-                                    .font(.caption2.weight(.bold))
-                                    .padding(4)
-                                    .background(.red, in: Circle())
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(.black.opacity(0.65), in: Capsule())
                                     .foregroundStyle(.white)
                             }
-
-                            if curation.starRating.value > 0 {
-                                HStack(spacing: 2) {
-                                    Image(systemName: "star.fill")
-                                        .font(.caption2)
-                                        .foregroundStyle(.yellow)
-                                    Text("\(curation.starRating.value)")
-                                        .font(.caption2.weight(.bold))
-                                        .foregroundStyle(.white)
-                                }
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(.black.opacity(0.75), in: Capsule())
-                            }
-
-                            if curation.colorLabel != .none {
-                                Circle()
-                                    .fill(curation.colorLabel.displayColor)
-                                    .frame(width: 8, height: 8)
-                                    .padding(4)
-                                    .background(.black.opacity(0.75), in: Circle())
-                            }
-
-                            Spacer()
-
-                            Label(
-                                item.mediaTypeBadge,
-                                systemImage: item.kind == .video ? "video.fill" : "camera.fill"
-                            )
-                            .font(.caption2.weight(.medium))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(.black.opacity(0.65), in: Capsule())
-                            .foregroundStyle(.white)
+                            .padding(6)
                         }
-                        .padding(6)
                     }
                 }
                 .aspectRatio(4.0 / 3.0, contentMode: .fit)
