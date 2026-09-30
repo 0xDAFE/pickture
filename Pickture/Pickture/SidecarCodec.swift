@@ -83,28 +83,51 @@ nonisolated enum SidecarCodec {
         return (curation: tree.extractCurationMetadata(), exif: tree.extractExifMetadata())
     }
 
-    // MARK: - XMP Round-Trip Serialization
+    // MARK: - XMP Round-Trip Serialization & Disk Persistence
+
+    @discardableResult
+    static func write(curation: CurationMetadata, for item: MediaItem) throws -> [URL] {
+        let targets = resolveSidecarWriteURLs(for: item)
+        let fm = FileManager.default
+        for url in targets {
+            let existingData = try? Data(contentsOf: url)
+            let updatedData = try update(xmlData: existingData, with: curation)
+            let dir = url.deletingLastPathComponent()
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try updatedData.write(to: url, options: .atomic)
+        }
+        return targets
+    }
 
     static func update(xmlData: Data?, with curation: CurationMetadata) throws -> Data {
         guard let xmlData, !xmlData.isEmpty else {
             return generateDefaultXMPData(with: curation)
         }
 
-        let tree: XMPDocumentTree
-        do {
-            tree = try XMPTreeParser.parse(data: xmlData)
-        } catch {
-            return generateDefaultXMPData(with: curation)
-        }
-
+        let tree = try XMPTreeParser.parse(data: xmlData)
         guard let desc = tree.findDescriptionNode() else {
-            return generateDefaultXMPData(with: curation)
+            throw CocoaError(.fileReadCorruptFile)
         }
 
-        // Apply curation changes to the XML tree
-        tree.apply(curation: curation, to: desc)
+        // Apply curation changes directly to the description node
+        desc.apply(curation: curation)
 
-        let serializedXML = tree.serialize()
+        var serializedXML = tree.serialize()
+
+        // Preserve <?xpacket ... ?> header/footer wrapper if present in source data
+        let sourceString = String(decoding: xmlData, as: UTF8.self)
+        if sourceString.contains("<?xpacket begin") {
+            let xpacketHeader: String
+            if let startRange = sourceString.range(of: "<?xpacket begin"),
+               let endTagRange = sourceString[startRange.lowerBound...].range(of: "?>") {
+                xpacketHeader = String(sourceString[startRange.lowerBound...endTagRange.upperBound]) + "\n"
+            } else {
+                xpacketHeader = "<?xpacket begin=\"﻿\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n"
+            }
+            let xpacketTrailer = "<?xpacket end=\"w\"?>\n"
+            serializedXML = xpacketHeader + serializedXML + xpacketTrailer
+        }
+
         return Data(serializedXML.utf8)
     }
 
@@ -114,12 +137,7 @@ nonisolated enum SidecarCodec {
     }
 
     private static func generateDefaultXMPData(with curation: CurationMetadata) -> Data {
-        let pickVal: Int
-        switch curation.pickFlag {
-        case .picked: pickVal = 1
-        case .rejected: pickVal = -1
-        case .unflagged: pickVal = 0
-        }
+        let pickVal = curation.pickFlag.xmpPickValue
 
         let labelAttr: String
         if curation.colorLabel != .none {
@@ -281,6 +299,57 @@ final class XMPNode {
            .replacingOccurrences(of: "<", with: "&lt;")
            .replacingOccurrences(of: ">", with: "&gt;")
     }
+    func apply(curation: CurationMetadata) {
+        if attributes["xmlns:xmp"] == nil {
+            attributes["xmlns:xmp"] = "http://ns.adobe.com/xap/1.0/"
+        }
+        if attributes["xmlns:crs"] == nil {
+            attributes["xmlns:crs"] = "http://ns.adobe.com/camera-raw-settings/1.0/"
+        }
+
+        let pickVal = curation.pickFlag.xmpPickValue
+
+        // crs:Pick
+        let crsPickChild = children.first(where: { matches(name: $0.name, target: "crs:Pick") || matches(name: $0.name, target: "Pick") })
+        if let crsPickChild {
+            crsPickChild.text = "\(pickVal)"
+        } else {
+            setAttribute(name: "crs:Pick", value: "\(pickVal)")
+        }
+
+        // xmpDM:pick
+        let dmPickChild = children.first(where: { matches(name: $0.name, target: "xmpDM:pick") || matches(name: $0.name, target: "pick") })
+        if let dmPickChild {
+            dmPickChild.text = "\(pickVal)"
+        } else {
+            setAttribute(name: "xmpDM:pick", value: "\(pickVal)")
+            if attributes["xmlns:xmpDM"] == nil {
+                attributes["xmlns:xmpDM"] = "http://ns.adobe.com/xmp/1.0/DynamicMedia/"
+            }
+        }
+
+        // xmp:Rating
+        let ratingChild = children.first(where: { matches(name: $0.name, target: "xmp:Rating") || matches(name: $0.name, target: "Rating") })
+        if let ratingChild {
+            ratingChild.text = "\(curation.starRating.value)"
+        } else {
+            setAttribute(name: "xmp:Rating", value: "\(curation.starRating.value)")
+        }
+
+        // xmp:Label
+        let labelChild = children.first(where: { matches(name: $0.name, target: "xmp:Label") || matches(name: $0.name, target: "Label") })
+        if curation.colorLabel != .none {
+            let labelName = curation.colorLabel.rawValue.capitalized
+            if let labelChild {
+                labelChild.text = labelName
+            } else {
+                setAttribute(name: "xmp:Label", value: labelName)
+            }
+        } else {
+            removeAttribute(matching: "xmp:Label")
+            children.removeAll(where: { matches(name: $0.name, target: "xmp:Label") || matches(name: $0.name, target: "Label") })
+        }
+    }
 }
 
 final class XMPDocumentTree {
@@ -300,49 +369,6 @@ final class XMPDocumentTree {
         return root.serialize(indent: 0)
     }
 
-    func apply(curation: CurationMetadata, to desc: XMPNode) {
-        if desc.attributes["xmlns:xmp"] == nil {
-            desc.attributes["xmlns:xmp"] = "http://ns.adobe.com/xap/1.0/"
-        }
-        if desc.attributes["xmlns:crs"] == nil {
-            desc.attributes["xmlns:crs"] = "http://ns.adobe.com/camera-raw-settings/1.0/"
-        }
-        if desc.attributes["xmlns:xmpDM"] == nil {
-            desc.attributes["xmlns:xmpDM"] = "http://ns.adobe.com/xmp/1.0/DynamicMedia/"
-        }
-
-        let pickVal: Int
-        switch curation.pickFlag {
-        case .picked: pickVal = 1
-        case .rejected: pickVal = -1
-        case .unflagged: pickVal = 0
-        }
-
-        desc.setAttribute(name: "crs:Pick", value: "\(pickVal)")
-        desc.setAttribute(name: "xmpDM:pick", value: "\(pickVal)")
-        desc.setAttribute(name: "xmp:Rating", value: "\(curation.starRating.value)")
-
-        if let pickChild = desc.children.first(where: { $0.matches(name: $0.name, target: "crs:Pick") || $0.matches(name: $0.name, target: "Pick") }) {
-            pickChild.text = "\(pickVal)"
-        }
-        if let dmPickChild = desc.children.first(where: { $0.matches(name: $0.name, target: "xmpDM:pick") || $0.matches(name: $0.name, target: "pick") }) {
-            dmPickChild.text = "\(pickVal)"
-        }
-        if let ratingChild = desc.children.first(where: { $0.matches(name: $0.name, target: "xmp:Rating") || $0.matches(name: $0.name, target: "Rating") }) {
-            ratingChild.text = "\(curation.starRating.value)"
-        }
-
-        if curation.colorLabel != .none {
-            let labelName = curation.colorLabel.rawValue.capitalized
-            desc.setAttribute(name: "xmp:Label", value: labelName)
-            if let labelChild = desc.children.first(where: { $0.matches(name: $0.name, target: "xmp:Label") || $0.matches(name: $0.name, target: "Label") }) {
-                labelChild.text = labelName
-            }
-        } else {
-            desc.removeAttribute(matching: "xmp:Label")
-            desc.children.removeAll(where: { $0.matches(name: $0.name, target: "xmp:Label") || $0.matches(name: $0.name, target: "Label") })
-        }
-    }
 
 
     func extractCurationMetadata() -> CurationMetadata {

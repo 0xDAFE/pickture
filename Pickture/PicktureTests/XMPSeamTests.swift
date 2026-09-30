@@ -364,8 +364,8 @@ struct XMPSeamTests {
     func conflictEngineDetectsFieldLevelConflict() {
         let baseMeta = CurationMetadata(starRating: 2, pickFlag: .unflagged, colorLabel: .none)
         let baseSnapshot = BaseSnapshot(metadata: baseMeta, fileDigest: "digest-1")
-        // Local: user picked item and gave 5 stars
-        let localMeta = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .none)
+        // Local: user picked item, gave 5 stars, labeled blue
+        let localMeta = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .blue)
         // Remote: desktop user rejected item, gave 1 star, and labeled red
         let remoteMeta = CurationMetadata(starRating: 1, pickFlag: .rejected, colorLabel: .red)
 
@@ -395,7 +395,7 @@ struct XMPSeamTests {
 
         // ColorLabel diff
         #expect(unwrapped.colorLabelDiff.base == ColorLabel.none)
-        #expect(unwrapped.colorLabelDiff.local == ColorLabel.none)
+        #expect(unwrapped.colorLabelDiff.local == ColorLabel.blue)
         #expect(unwrapped.colorLabelDiff.remote == ColorLabel.red)
         #expect(unwrapped.colorLabelDiff.isConflicted == true)
     }
@@ -534,5 +534,111 @@ struct XMPSeamTests {
         #expect(xmlString.contains("xmp:Rating=\"1\""))
         #expect(xmlString.contains("crs:Pick=\"-1\""))
         #expect(xmlString.contains("xmp:Label=\"Red\""))
+    }
+
+    @Test("SidecarCodec.write persists curation to <basename>.xmp and updates existing <filename>.<ext>.xmp on disk")
+    func sidecarCodecWriteDualConventionDiskPersistence() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let rawURL = root.appendingPathComponent("DSC0800.ARW")
+        let jpgURL = root.appendingPathComponent("DSC0800.JPG")
+        try Data("raw".utf8).write(to: rawURL)
+        try Data("jpg".utf8).write(to: jpgURL)
+
+        let rawFile = MediaFile(url: rawURL, formatKind: .raw)
+        let jpgFile = MediaFile(url: jpgURL, formatKind: .raster)
+        let pair = MediaPair(rawFile: rawFile, rasterFile: jpgFile)
+        let pairItem = MediaItem(
+            id: "\(root.path)#DSC0800",
+            baseName: "DSC0800",
+            directoryURL: root,
+            relativeDirectoryPath: "",
+            kind: .photo,
+            primaryFile: jpgFile,
+            mediaPair: pair,
+            sidecarURL: nil
+        )
+
+        let rawExtXmp = root.appendingPathComponent("DSC0800.ARW.xmp")
+        let externalCaptureOneXML = """
+        <x:xmpmeta xmlns:x="adobe:ns:meta/">
+         <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+          <rdf:Description rdf:about=""
+            xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+            xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+            crs:Exposure2012="+2.00"
+            crs:Pick="0"
+            xmp:Rating="1"/>
+         </rdf:RDF>
+        </x:xmpmeta>
+        """
+        try Data(externalCaptureOneXML.utf8).write(to: rawExtXmp)
+
+        let newCuration = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green)
+        let writtenURLs = try SidecarCodec.write(curation: newCuration, for: pairItem)
+
+        let basenameXmp = root.appendingPathComponent("DSC0800.xmp")
+        #expect(writtenURLs.contains { $0.standardizedFileURL.path == basenameXmp.standardizedFileURL.path })
+        #expect(writtenURLs.contains { $0.standardizedFileURL.path == rawExtXmp.standardizedFileURL.path })
+
+        // Check basename XMP was created
+        let baseParsed = try SidecarCodec.parse(data: Data(contentsOf: basenameXmp))
+        #expect(baseParsed.curation == newCuration)
+
+        // Check existing extension XMP was updated without losing develop settings
+        let extData = try Data(contentsOf: rawExtXmp)
+        let extString = String(decoding: extData, as: UTF8.self)
+        #expect(extString.contains("crs:Exposure2012=\"+2.00\""))
+        #expect(extString.contains("crs:Pick=\"1\""))
+        #expect(extString.contains("xmp:Rating=\"5\""))
+        let extParsed = try SidecarCodec.parse(data: extData)
+        #expect(extParsed.curation == newCuration)
+    }
+
+    @Test("SidecarCodec.update preserves <?xpacket?> wrapper when present in source data")
+    func updatePreservesXPacketWrapper() throws {
+        let originalXML = """
+        <?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+        <x:xmpmeta xmlns:x="adobe:ns:meta/">
+         <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+          <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="1"/>
+         </rdf:RDF>
+        </x:xmpmeta>
+        <?xpacket end="w"?>
+        """
+        let updatedData = try SidecarCodec.update(
+            xmlData: Data(originalXML.utf8),
+            with: CurationMetadata(starRating: 4, pickFlag: .picked, colorLabel: .none)
+        )
+        let updatedString = String(decoding: updatedData, as: UTF8.self)
+        #expect(updatedString.contains("<?xpacket begin"))
+        #expect(updatedString.contains("<?xpacket end"))
+    }
+
+    @Test("SidecarCodec.update throws an error on corrupt XML without overwriting")
+    func updateThrowsOnCorruptXML() {
+        let corruptData = Data("<<<not valid xml>>>".utf8)
+        #expect(throws: (any Error).self) {
+            try SidecarCodec.update(xmlData: corruptData, with: CurationMetadata(starRating: 3))
+        }
+    }
+
+    @Test("XMPConflictEngine reports no conflict when local has no uncommitted changes (local == base)")
+    func conflictEngineNoConflictWhenLocalEqualsBase() {
+        let baseMeta = CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .none)
+        let baseSnapshot = BaseSnapshot(metadata: baseMeta, fileDigest: "digest-1")
+        // Local has not changed from base
+        let localMeta = baseMeta
+        // Remote was modified externally to 5 stars
+        let remoteMeta = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .red)
+
+        let conflict = XMPConflictEngine.evaluate(
+            base: baseSnapshot,
+            local: localMeta,
+            remote: remoteMeta,
+            remoteDigestChanged: true
+        )
+        #expect(conflict == nil)
     }
 }

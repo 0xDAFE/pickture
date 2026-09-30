@@ -172,6 +172,14 @@ nonisolated enum PickFlag: String, Codable, CaseIterable, Hashable, Sendable {
     case picked
     case unflagged
     case rejected
+
+    var xmpPickValue: Int {
+        switch self {
+        case .picked: return 1
+        case .unflagged: return 0
+        case .rejected: return -1
+        }
+    }
 }
 
 nonisolated enum ColorLabel: String, Codable, CaseIterable, Hashable, Sendable {
@@ -265,7 +273,13 @@ nonisolated struct FieldDiff<T: Hashable & Codable & Sendable>: Hashable, Codabl
     let remote: T
 
     var isConflicted: Bool {
-        local != remote && remote != base
+        guard local != remote else {
+            return false
+        }
+        guard let base else {
+            return true
+        }
+        return local != base && remote != base
     }
 }
 
