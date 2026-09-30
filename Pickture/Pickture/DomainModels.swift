@@ -209,4 +209,100 @@ nonisolated enum SyncState: String, Codable, CaseIterable, Hashable, Sendable {
     case syncError
 }
 
+nonisolated struct ExifMetadata: Hashable, Codable, Sendable {
+    var cameraModel: String?
+    var lensModel: String?
+    var focalLength: Double?
+    var fNumber: Double?
+    var exposureTime: Double?
+    var isoSpeedRatings: [Int]
+    var dateTimeOriginal: Date?
+
+    init(
+        cameraModel: String? = nil,
+        lensModel: String? = nil,
+        focalLength: Double? = nil,
+        fNumber: Double? = nil,
+        exposureTime: Double? = nil,
+        isoSpeedRatings: [Int] = [],
+        dateTimeOriginal: Date? = nil
+    ) {
+        self.cameraModel = cameraModel
+        self.lensModel = lensModel
+        self.focalLength = focalLength
+        self.fNumber = fNumber
+        self.exposureTime = exposureTime
+        self.isoSpeedRatings = isoSpeedRatings
+        self.dateTimeOriginal = dateTimeOriginal
+    }
+
+    var isEmpty: Bool {
+        cameraModel == nil &&
+        lensModel == nil &&
+        focalLength == nil &&
+        fNumber == nil &&
+        exposureTime == nil &&
+        isoSpeedRatings.isEmpty &&
+        dateTimeOriginal == nil
+    }
+}
+
+nonisolated struct BaseSnapshot: Hashable, Codable, Sendable {
+    let metadata: CurationMetadata
+    let fileDigest: String
+    let modificationDate: Date?
+
+    init(metadata: CurationMetadata, fileDigest: String, modificationDate: Date? = nil) {
+        self.metadata = metadata
+        self.fileDigest = fileDigest
+        self.modificationDate = modificationDate
+    }
+}
+
+nonisolated struct FieldDiff<T: Hashable & Codable & Sendable>: Hashable, Codable, Sendable {
+    let base: T?
+    let local: T
+    let remote: T
+
+    var isConflicted: Bool {
+        local != remote && remote != base
+    }
+}
+
+nonisolated struct MetadataConflict: Hashable, Codable, Sendable {
+    let itemID: String
+    let base: CurationMetadata?
+    let local: CurationMetadata
+    let remote: CurationMetadata
+    let starRatingDiff: FieldDiff<StarRating>
+    let pickFlagDiff: FieldDiff<PickFlag>
+    let colorLabelDiff: FieldDiff<ColorLabel>
+
+    init(
+        itemID: String,
+        base: CurationMetadata?,
+        local: CurationMetadata,
+        remote: CurationMetadata
+    ) {
+        self.itemID = itemID
+        self.base = base
+        self.local = local
+        self.remote = remote
+        self.starRatingDiff = FieldDiff(base: base?.starRating, local: local.starRating, remote: remote.starRating)
+        self.pickFlagDiff = FieldDiff(base: base?.pickFlag, local: local.pickFlag, remote: remote.pickFlag)
+        self.colorLabelDiff = FieldDiff(base: base?.colorLabel, local: local.colorLabel, remote: remote.colorLabel)
+    }
+
+    var hasConflict: Bool {
+        starRatingDiff.isConflicted || pickFlagDiff.isConflicted || colorLabelDiff.isConflicted
+    }
+}
+
+nonisolated enum ConflictResolutionStrategy: Hashable, Sendable {
+    case useLocal
+    case useRemote
+    case cherryPick(CurationMetadata)
+}
+
+
 

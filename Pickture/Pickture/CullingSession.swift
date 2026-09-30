@@ -182,7 +182,8 @@ final class CullingSession {
             )
 
             var mediaFiles: [MediaFile] = []
-            var sidecarByLowerBase: [String: URL] = [:]
+            var sidecarsByLowerBase: [String: URL] = [:]
+            var sidecarsByLowerFullName: [String: URL] = [:]
 
             for fileURL in contents {
                 let values = try? fileURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
@@ -191,8 +192,12 @@ final class CullingSession {
                 }
                 let ext = fileURL.pathExtension.lowercased()
                 if ext == "xmp" {
-                    let baseLower = fileURL.deletingPathExtension().lastPathComponent.lowercased()
-                    sidecarByLowerBase[baseLower] = fileURL.standardizedFileURL
+                    let withoutXmp = fileURL.deletingPathExtension().lastPathComponent.lowercased()
+                    sidecarsByLowerFullName[withoutXmp] = fileURL.standardizedFileURL
+                    let baseStem = URL(fileURLWithPath: withoutXmp).deletingPathExtension().lastPathComponent.lowercased()
+                    if withoutXmp == baseStem {
+                        sidecarsByLowerBase[baseStem] = fileURL.standardizedFileURL
+                    }
                     continue
                 }
                 guard let formatKind = MediaFormatKind.classify(fileExtension: ext) else {
@@ -203,7 +208,8 @@ final class CullingSession {
 
             let dirItems = Self.pairDirectoryMediaFiles(
                 mediaFiles,
-                sidecarsByLowerBase: sidecarByLowerBase,
+                sidecarsByLowerBase: sidecarsByLowerBase,
+                sidecarsByLowerFullName: sidecarsByLowerFullName,
                 directoryURL: directoryURL,
                 rootURL: rootURL
             )
@@ -256,6 +262,7 @@ final class CullingSession {
     nonisolated static func pairDirectoryMediaFiles(
         _ files: [MediaFile],
         sidecarsByLowerBase: [String: URL],
+        sidecarsByLowerFullName: [String: URL] = [:],
         directoryURL: URL,
         rootURL: URL
     ) -> [MediaItem] {
@@ -276,6 +283,7 @@ final class CullingSession {
         for file in files {
             if file.formatKind == .video {
                 let lowerBase = file.baseName.lowercased()
+                let sidecar = sidecarsByLowerBase[lowerBase] ?? sidecarsByLowerFullName[file.fileName.lowercased()]
                 result.append(
                     MediaItem(
                         id: file.id,
@@ -285,7 +293,7 @@ final class CullingSession {
                         kind: .video,
                         primaryFile: file,
                         mediaPair: nil,
-                        sidecarURL: sidecarsByLowerBase[lowerBase]
+                        sidecarURL: sidecar
                     )
                 )
             } else {
@@ -306,11 +314,13 @@ final class CullingSession {
                     return $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending
                 }
 
-            let sidecarURL = sidecarsByLowerBase[lowerBase]
-
             if let primaryRaw = raws.first, let primaryRaster = rasters.first {
                 let pair = MediaPair(rawFile: primaryRaw, rasterFile: primaryRaster)
                 let itemID = "\(directoryURL.path)#pair:\(lowerBase)"
+                let sidecarURL = sidecarsByLowerBase[lowerBase]
+                    ?? sidecarsByLowerFullName[primaryRaw.fileName.lowercased()]
+                    ?? sidecarsByLowerFullName[primaryRaster.fileName.lowercased()]
+
                 result.append(
                     MediaItem(
                         id: itemID,
@@ -327,6 +337,7 @@ final class CullingSession {
                 // Preserve any additional unpaired files sharing the same basename in this directory
                 let remainingFiles = Array(raws.dropFirst()) + Array(rasters.dropFirst())
                 for extraFile in remainingFiles.sorted(by: { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }) {
+                    let extraSidecar = sidecarsByLowerBase[lowerBase] ?? sidecarsByLowerFullName[extraFile.fileName.lowercased()]
                     result.append(
                         MediaItem(
                             id: extraFile.id,
@@ -336,12 +347,13 @@ final class CullingSession {
                             kind: .photo,
                             primaryFile: extraFile,
                             mediaPair: nil,
-                            sidecarURL: sidecarURL
+                            sidecarURL: extraSidecar
                         )
                     )
                 }
             } else {
                 for single in candidates.sorted(by: { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }) {
+                    let singleSidecar = sidecarsByLowerBase[lowerBase] ?? sidecarsByLowerFullName[single.fileName.lowercased()]
                     result.append(
                         MediaItem(
                             id: single.id,
@@ -351,7 +363,7 @@ final class CullingSession {
                             kind: .photo,
                             primaryFile: single,
                             mediaPair: nil,
-                            sidecarURL: sidecarURL
+                            sidecarURL: singleSidecar
                         )
                     )
                 }
