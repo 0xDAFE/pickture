@@ -290,6 +290,7 @@ struct FilmstripView: View {
                     LazyVStack(spacing: 8) {
                         ForEach(session.items) { item in
                             thumbnailItemView(for: item, position: .right)
+                                .frame(maxWidth: .infinity)
                         }
                     }
                     .padding(.vertical, 12)
@@ -503,13 +504,17 @@ struct FilmstripThumbnailCell: View {
 
     private var currentAspectRatio: CGFloat {
         if let cgImage = displayedImage {
-            return CGFloat(cgImage.width) / CGFloat(max(1, cgImage.height))
+            return cgImage.aspectRatio
         }
         return session.thumbnailAspectRatio(for: item)
     }
 
     private var thumbnailSize: CGSize {
-        session.filmstripThumbnailSize(aspectRatio: currentAspectRatio, dockPosition: dockPosition)
+        session.filmstripThumbnailSize(
+            aspectRatio: currentAspectRatio,
+            dockPosition: dockPosition,
+            mediaKind: item.kind
+        )
     }
 
     private var neutralMattingColor: Color {
@@ -523,8 +528,6 @@ struct FilmstripThumbnailCell: View {
     var body: some View {
         let size = thumbnailSize
         let isCompact = size.width < 70
-        let leadingPad: CGFloat = (curation.colorLabel != .none) ? (isCompact ? 8 : 9) : (isCompact ? 3 : 4)
-        let trailingPad: CGFloat = isCompact ? 3 : 4
 
         VStack(spacing: 4) {
             ZStack {
@@ -560,6 +563,7 @@ struct FilmstripThumbnailCell: View {
 
                 // Rating & Flag overlays
                 VStack {
+                    // Top row: format and sync badges with 3pt spacing and corner offsets
                     HStack(spacing: 3) {
                         if item.isMediaPair {
                             Text("RAW+JPG")
@@ -598,9 +602,12 @@ struct FilmstripThumbnailCell: View {
                                 .foregroundStyle(.red)
                         }
                     }
+                    .padding(.top, 3)
+                    .padding(.horizontal, (curation.colorLabel != .none) ? 8 : 3)
 
                     Spacer()
 
+                    // Bottom row: star rating pill and pick flag circle with compact adjustments
                     HStack(spacing: isCompact ? 1 : 2) {
                         if curation.starRating > 0 {
                             HStack(spacing: 1) {
@@ -635,13 +642,9 @@ struct FilmstripThumbnailCell: View {
                             EmptyView()
                         }
                     }
+                    .padding(.bottom, 3)
+                    .padding(.horizontal, (curation.colorLabel != .none) ? (isCompact ? 8 : 9) : (isCompact ? 3 : 4))
                 }
-                .padding(EdgeInsets(
-                    top: 3,
-                    leading: leadingPad,
-                    bottom: 3,
-                    trailing: trailingPad
-                ))
             }
             .frame(width: size.width, height: size.height)
             .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -665,8 +668,7 @@ struct FilmstripThumbnailCell: View {
                 if let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) {
                     if let decoded = PreviewLoader.decodeCGImage(from: data) {
                         thumbnail = decoded
-                        let ratio = CGFloat(decoded.width) / CGFloat(max(1, decoded.height))
-                        session.recordThumbnailAspectRatio(ratio, for: item.id)
+                        session.recordThumbnailAspectRatio(decoded.aspectRatio, for: item.id)
                     }
                 }
             }

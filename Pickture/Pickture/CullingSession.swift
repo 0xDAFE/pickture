@@ -95,10 +95,14 @@ final class CullingSession {
         min(containerWidth * 0.12, 64.0)
     }
 
-    func filmstripThumbnailSize(aspectRatio: CGFloat, dockPosition: FilmstripDockPosition) -> CGSize {
+    func filmstripThumbnailSize(
+        aspectRatio: CGFloat,
+        dockPosition: FilmstripDockPosition,
+        mediaKind: MediaKind? = nil
+    ) -> CGSize {
         let safeRatio: CGFloat
         if aspectRatio.isNaN || aspectRatio.isInfinite || aspectRatio <= 0 {
-            safeRatio = 1.5
+            safeRatio = (mediaKind == .video) ? 1.777 : 1.5
         } else {
             safeRatio = aspectRatio
         }
@@ -132,7 +136,7 @@ final class CullingSession {
             return cachedRatio
         }
         if let cachedImage = cachedThumbnailImage(for: item, maxPixelSize: 360) {
-            let ratio = CGFloat(cachedImage.width) / CGFloat(max(1, cachedImage.height))
+            let ratio = cachedImage.aspectRatio
             thumbnailAspectRatios[item.id] = ratio
             return ratio
         }
@@ -148,7 +152,7 @@ final class CullingSession {
     func filmstripThumbnailSize(for item: MediaItem, dockPosition: FilmstripDockPosition? = nil) -> CGSize {
         let position = dockPosition ?? self.filmstripDockPosition
         let ratio = thumbnailAspectRatio(for: item)
-        return filmstripThumbnailSize(aspectRatio: ratio, dockPosition: position)
+        return filmstripThumbnailSize(aspectRatio: ratio, dockPosition: position, mediaKind: item.kind)
     }
 
 

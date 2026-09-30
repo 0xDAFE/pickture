@@ -259,3 +259,10 @@ nonisolated enum PreviewLoader {
         return mutableData as Data
     }
 }
+
+extension CGImage {
+    var aspectRatio: CGFloat {
+        CGFloat(width) / CGFloat(max(1, height))
+    }
+}
+
