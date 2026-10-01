@@ -94,7 +94,17 @@ nonisolated enum SidecarCodec {
             let updatedData = try update(xmlData: existingData, with: curation)
             let dir = url.deletingLastPathComponent()
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            try updatedData.write(to: url, options: .atomic)
+            do {
+                // Testing Hypothesis 1: Direct write without .atomic prevents Darwin _dirhelper ENODEV
+                // and avoids SMB auxiliary rename collisions over existing files.
+                try updatedData.write(to: url, options: [])
+                print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded directly for \(url.lastPathComponent)")
+            } catch {
+                let nsError = error as NSError
+                let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+                print("[DEBUG-SMB-SYNC] SidecarCodec.write direct failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
+                throw error
+            }
         }
         return targets
     }
