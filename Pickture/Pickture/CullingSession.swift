@@ -902,15 +902,20 @@ final class CullingSession {
 
             let writtenTargets = try SidecarCodec.write(curation: pendingCuration, for: item)
 
-            if let primaryTarget = writtenTargets.first, let writtenData = try? Data(contentsOf: primaryTarget) {
-                let newDigest = SidecarCodec.computeDigest(for: writtenData)
-                let modDate = (try? primaryTarget.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                let newBase = BaseSnapshot(metadata: pendingCuration, fileDigest: newDigest, modificationDate: modDate)
-                return .success(newBase)
-            } else {
+            guard let primaryTarget = writtenTargets.first else {
                 let fallbackBase = BaseSnapshot(metadata: pendingCuration, fileDigest: "")
                 return .success(fallbackBase)
             }
+
+            // Read back the written file to compute the digest for the new
+            // base snapshot. This uses a throwing call so that a failed
+            // read-back on a network volume properly surfaces as an error
+            // rather than silently marking the item as synced.
+            let writtenData = try Data(contentsOf: primaryTarget)
+            let newDigest = SidecarCodec.computeDigest(for: writtenData)
+            let modDate = (try? primaryTarget.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            let newBase = BaseSnapshot(metadata: pendingCuration, fileDigest: newDigest, modificationDate: modDate)
+            return .success(newBase)
         }.value
 
         switch outcome {

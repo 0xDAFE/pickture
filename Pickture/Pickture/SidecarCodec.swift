@@ -94,9 +94,37 @@ nonisolated enum SidecarCodec {
             let updatedData = try update(xmlData: existingData, with: curation)
             let dir = url.deletingLastPathComponent()
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            try updatedData.write(to: url, options: .atomic)
+            try writeWithAtomicFallback(updatedData, to: url)
         }
         return targets
+    }
+
+    /// Writes data to `url`, preferring an atomic write but falling back to a
+    /// plain write when the filesystem doesn't support the temporary-file dance
+    /// (e.g. SMB volumes on iOS where `_dirhelper_relative_internal` returns
+    /// `ENODEV`). After writing, reads the file back to verify the data landed.
+    private static func writeWithAtomicFallback(_ data: Data, to url: URL) throws {
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // Atomic writes require a temporary file in the same directory.
+            // On network-attached volumes (SMB) on iOS this can fail with
+            // ENODEV / ENOTSUP. Fall back to a plain (non-atomic) write.
+            try data.write(to: url)
+        }
+
+        // Verify the write actually persisted. Network filesystems can
+        // silently swallow writes or report success despite not flushing.
+        let readBack = try Data(contentsOf: url)
+        if readBack != data {
+            throw CocoaError(
+                .fileWriteUnknown,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Write verification failed for \(url.lastPathComponent): data on disk does not match what was written"
+                ]
+            )
+        }
     }
 
     static func update(xmlData: Data?, with curation: CurationMetadata) throws -> Data {
