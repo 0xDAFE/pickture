@@ -56,16 +56,18 @@ struct PicktureToolbarContent: ToolbarContent {
         Menu("More", systemImage: "ellipsis.circle") {
             if session.viewMode == .filmstrip {
                 Menu {
-                    Button {
-                        session.setFilmstripDockPosition(.bottom)
-                    } label: {
-                        Label("Bottom Dock", systemImage: session.filmstripDockPosition == .bottom ? "checkmark" : "")
+                    Picker(
+                        "Dock Position",
+                        selection: Binding(
+                            get: { session.filmstripDockPosition },
+                            set: { session.setFilmstripDockPosition($0) }
+                        )
+                    ) {
+                        ForEach(FilmstripDockPosition.allCases, id: \.self) { position in
+                            Text(position == .bottom ? "Bottom Dock" : "Right Dock").tag(position)
+                        }
                     }
-                    Button {
-                        session.setFilmstripDockPosition(.right)
-                    } label: {
-                        Label("Right Dock", systemImage: session.filmstripDockPosition == .right ? "checkmark" : "")
-                    }
+                    .pickerStyle(.inline)
                 } label: {
                     Label(
                         "Dock: \(session.filmstripDockPosition.displayName)",
@@ -274,16 +276,18 @@ struct PicktureToolbarContent: ToolbarContent {
     @ViewBuilder
     private var filmstripControls: some View {
         Menu {
-            Button {
-                session.setFilmstripDockPosition(.bottom)
-            } label: {
-                Label("Bottom Dock", systemImage: session.filmstripDockPosition == .bottom ? "checkmark" : "")
+            Picker(
+                "Dock Position",
+                selection: Binding(
+                    get: { session.filmstripDockPosition },
+                    set: { session.setFilmstripDockPosition($0) }
+                )
+            ) {
+                ForEach(FilmstripDockPosition.allCases, id: \.self) { position in
+                    Text(position == .bottom ? "Bottom Dock" : "Right Dock").tag(position)
+                }
             }
-            Button {
-                session.setFilmstripDockPosition(.right)
-            } label: {
-                Label("Right Dock", systemImage: session.filmstripDockPosition == .right ? "checkmark" : "")
-            }
+            .pickerStyle(.inline)
         } label: {
             Label(
                 "Dock: \(session.filmstripDockPosition.displayName)",

@@ -178,39 +178,38 @@ struct FilterCriteriaBarView: View {
 
         let currentMode = session.filterCriteria.starRatingFilter?.mode ?? .exact
         Section("Rating Filter Mode") {
-            Button {
-                var filter = session.filterCriteria.starRatingFilter ?? StarRatingFilter(mode: .minimum, minimumRating: 1)
-                filter.mode = .minimum
-                session.filterCriteria.starRatingFilter = filter
-            } label: {
-                Label("Minimum (≥)", systemImage: currentMode == .minimum ? "checkmark" : "")
+            Picker("Rating Filter Mode", selection: Binding(
+                get: { currentMode },
+                set: { newMode in
+                    var filter = session.filterCriteria.starRatingFilter ?? StarRatingFilter(mode: newMode, minimumRating: 1)
+                    filter.mode = newMode
+                    session.filterCriteria.starRatingFilter = filter
+                }
+            )) {
+                ForEach(StarRatingFilterMode.allCases, id: \.self) { mode in
+                    Text(mode == .minimum ? "Minimum (≥)" : "Exact Rating").tag(mode)
+                }
             }
-
-            Button {
-                var filter = session.filterCriteria.starRatingFilter ?? StarRatingFilter(mode: .exact)
-                filter.mode = .exact
-                session.filterCriteria.starRatingFilter = filter
-            } label: {
-                Label("Exact Rating", systemImage: currentMode == .exact ? "checkmark" : "")
-            }
+            .pickerStyle(.inline)
         }
 
         if currentMode == .minimum {
             Section("Minimum Star Rating (≥)") {
                 ForEach([1, 2, 3, 4, 5], id: \.self) { minVal in
                     let isSelected = session.filterCriteria.starRatingFilter?.minimumRating == minVal && isRatingActive
-                    Button {
-                        if isSelected {
-                            session.filterCriteria.starRatingFilter = nil
-                        } else {
-                            session.filterCriteria.starRatingFilter = .minimum(minVal)
-                        }
-                    } label: {
-                        Label(
-                            "≥ \(minVal) Star\(minVal == 1 ? "" : "s")",
-                            systemImage: isSelected ? "checkmark" : ""
+                    Toggle(
+                        "≥ \(minVal) Star\(minVal == 1 ? "" : "s")",
+                        isOn: Binding(
+                            get: { isSelected },
+                            set: { selected in
+                                if selected {
+                                    session.filterCriteria.starRatingFilter = .minimum(minVal)
+                                } else {
+                                    session.filterCriteria.starRatingFilter = nil
+                                }
+                            }
                         )
-                    }
+                    )
                 }
             }
         } else {
@@ -218,19 +217,23 @@ struct FilterCriteriaBarView: View {
                 ForEach([5, 4, 3, 2, 1, 0], id: \.self) { ratingVal in
                     let exactRatings = session.filterCriteria.starRatingFilter?.exactRatings ?? []
                     let isSelected = exactRatings.contains(ratingVal)
-                    Button {
-                        var filter = session.filterCriteria.starRatingFilter ?? StarRatingFilter(mode: .exact)
-                        filter.mode = .exact
-                        if isSelected {
-                            filter.exactRatings.remove(ratingVal)
-                        } else {
-                            filter.exactRatings.insert(ratingVal)
-                        }
-                        session.filterCriteria.starRatingFilter = filter.exactRatings.isEmpty ? nil : filter
-                    } label: {
-                        let labelText = ratingVal == 0 ? "0 Stars (Unrated)" : "\(ratingVal) Star\(ratingVal == 1 ? "" : "s")"
-                        Label(labelText, systemImage: isSelected ? "checkmark" : "")
-                    }
+                    let labelText = ratingVal == 0 ? "0 Stars (Unrated)" : "\(ratingVal) Star\(ratingVal == 1 ? "" : "s")"
+                    Toggle(
+                        labelText,
+                        isOn: Binding(
+                            get: { isSelected },
+                            set: { selected in
+                                var filter = session.filterCriteria.starRatingFilter ?? StarRatingFilter(mode: .exact)
+                                filter.mode = .exact
+                                if selected {
+                                    filter.exactRatings.insert(ratingVal)
+                                } else {
+                                    filter.exactRatings.remove(ratingVal)
+                                }
+                                session.filterCriteria.starRatingFilter = filter.exactRatings.isEmpty ? nil : filter
+                            }
+                        )
+                    )
                 }
             }
         }
@@ -238,15 +241,19 @@ struct FilterCriteriaBarView: View {
         Section("Pick Flags (OR)") {
             ForEach(PickFlag.allCases, id: \.self) { flag in
                 let isSelected = session.filterCriteria.pickFlags.contains(flag)
-                Button {
-                    if isSelected {
-                        session.filterCriteria.pickFlags.remove(flag)
-                    } else {
-                        session.filterCriteria.pickFlags.insert(flag)
-                    }
-                } label: {
-                    Label(flag.rawValue.capitalized, systemImage: isSelected ? "checkmark" : "")
-                }
+                Toggle(
+                    flag.rawValue.capitalized,
+                    isOn: Binding(
+                        get: { isSelected },
+                        set: { selected in
+                            if selected {
+                                session.filterCriteria.pickFlags.insert(flag)
+                            } else {
+                                session.filterCriteria.pickFlags.remove(flag)
+                            }
+                        }
+                    )
+                )
             }
         }
 
@@ -314,18 +321,19 @@ struct FilterCriteriaBarView: View {
         Section("Color Labels (OR)") {
             ForEach(ColorLabel.allCases, id: \.self) { label in
                 let isSelected = session.filterCriteria.colorLabels.contains(label)
-                Button {
-                    if isSelected {
-                        session.filterCriteria.colorLabels.remove(label)
-                    } else {
-                        session.filterCriteria.colorLabels.insert(label)
-                    }
-                } label: {
-                    Label(
-                        label == .none ? "None" : label.rawValue.capitalized,
-                        systemImage: isSelected ? "checkmark" : ""
+                Toggle(
+                    label == .none ? "None" : label.rawValue.capitalized,
+                    isOn: Binding(
+                        get: { isSelected },
+                        set: { selected in
+                            if selected {
+                                session.filterCriteria.colorLabels.insert(label)
+                            } else {
+                                session.filterCriteria.colorLabels.remove(label)
+                            }
+                        }
                     )
-                }
+                )
             }
         }
 
@@ -378,15 +386,19 @@ struct FilterCriteriaBarView: View {
             Section("Camera Models (OR)") {
                 ForEach(available, id: \.self) { model in
                     let isSelected = session.filterCriteria.cameraModels.contains(model)
-                    Button {
-                        if isSelected {
-                            session.filterCriteria.cameraModels.remove(model)
-                        } else {
-                            session.filterCriteria.cameraModels.insert(model)
-                        }
-                    } label: {
-                        Label(model, systemImage: isSelected ? "checkmark" : "")
-                    }
+                    Toggle(
+                        model,
+                        isOn: Binding(
+                            get: { isSelected },
+                            set: { selected in
+                                if selected {
+                                    session.filterCriteria.cameraModels.insert(model)
+                                } else {
+                                    session.filterCriteria.cameraModels.remove(model)
+                                }
+                            }
+                        )
+                    )
                 }
             }
         }
@@ -440,15 +452,19 @@ struct FilterCriteriaBarView: View {
             Section("Lens Models (OR)") {
                 ForEach(available, id: \.self) { lens in
                     let isSelected = session.filterCriteria.lensModels.contains(lens)
-                    Button {
-                        if isSelected {
-                            session.filterCriteria.lensModels.remove(lens)
-                        } else {
-                            session.filterCriteria.lensModels.insert(lens)
-                        }
-                    } label: {
-                        Label(lens, systemImage: isSelected ? "checkmark" : "")
-                    }
+                    Toggle(
+                        lens,
+                        isOn: Binding(
+                            get: { isSelected },
+                            set: { selected in
+                                if selected {
+                                    session.filterCriteria.lensModels.insert(lens)
+                                } else {
+                                    session.filterCriteria.lensModels.remove(lens)
+                                }
+                            }
+                        )
+                    )
                 }
             }
         }
@@ -498,15 +514,19 @@ struct FilterCriteriaBarView: View {
         Section("Media Type (OR)") {
             ForEach(MediaTypeFilter.allCases, id: \.self) { type in
                 let isSelected = session.filterCriteria.mediaTypes.contains(type)
-                Button {
-                    if isSelected {
-                        session.filterCriteria.mediaTypes.remove(type)
-                    } else {
-                        session.filterCriteria.mediaTypes.insert(type)
-                    }
-                } label: {
-                    Label(type.displayName, systemImage: isSelected ? "checkmark" : "")
-                }
+                Toggle(
+                    type.displayName,
+                    isOn: Binding(
+                        get: { isSelected },
+                        set: { selected in
+                            if selected {
+                                session.filterCriteria.mediaTypes.insert(type)
+                            } else {
+                                session.filterCriteria.mediaTypes.remove(type)
+                            }
+                        }
+                    )
+                )
             }
         }
 
@@ -555,15 +575,19 @@ struct FilterCriteriaBarView: View {
         Section("Sync State (OR)") {
             ForEach([SyncState.synced, .pendingWrite, .conflicted, .syncError], id: \.self) { state in
                 let isSelected = session.filterCriteria.syncStates.contains(state)
-                Button {
-                    if isSelected {
-                        session.filterCriteria.syncStates.remove(state)
-                    } else {
-                        session.filterCriteria.syncStates.insert(state)
-                    }
-                } label: {
-                    Label(stateDisplayName(state), systemImage: isSelected ? "checkmark" : "")
-                }
+                Toggle(
+                    stateDisplayName(state),
+                    isOn: Binding(
+                        get: { isSelected },
+                        set: { selected in
+                            if selected {
+                                session.filterCriteria.syncStates.insert(state)
+                            } else {
+                                session.filterCriteria.syncStates.remove(state)
+                            }
+                        }
+                    )
+                )
             }
         }
 
@@ -760,23 +784,21 @@ struct FilterCriteriaBarView: View {
 
     private var sortMenu: some View {
         Menu {
-            Section("Sort Field") {
+            Picker("Sort Field", selection: Binding(
+                get: { session.sortOption.field },
+                set: { session.setSortField($0) }
+            )) {
                 ForEach(SortField.allCases, id: \.self) { field in
-                    Button {
-                        session.setSortField(field)
-                    } label: {
-                        Label(field.displayName, systemImage: session.sortOption.field == field ? "checkmark" : "")
-                    }
+                    Text(field.displayName).tag(field)
                 }
             }
 
-            Section("Sort Direction") {
+            Picker("Sort Direction", selection: Binding(
+                get: { session.sortOption.order },
+                set: { session.setSortOrder($0) }
+            )) {
                 ForEach(SortOrder.allCases, id: \.self) { order in
-                    Button {
-                        session.setSortOrder(order)
-                    } label: {
-                        Label(order.displayName, systemImage: session.sortOption.order == order ? "checkmark" : "")
-                    }
+                    Text(order.displayName).tag(order)
                 }
             }
         } label: {
