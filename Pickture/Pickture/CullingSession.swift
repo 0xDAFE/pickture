@@ -26,7 +26,7 @@ final class CullingSession {
     var isAccessingFolder: Bool {
         folderAccessService.isAccessingFolder
     }
-    var isWriteQueueSuspended: Bool = false
+    /// Testing hook to simulate slow I/O or network file sync during session flush.
     var simulatedFlushDelayNanoseconds: UInt64 = 0
     var isSyncSuspended: Bool = false {
         didSet {
@@ -613,11 +613,6 @@ final class CullingSession {
         isFlushingPendingWrites = true
         defer { isFlushingPendingWrites = false }
 
-        while isWriteQueueSuspended && !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-        if Task.isCancelled { return }
-
         let pending = items.filter { syncState(for: $0) == .pendingWrite }
         for item in pending {
             if Task.isCancelled { break }
@@ -882,11 +877,12 @@ final class CullingSession {
 
     func openFolder(at url: URL) throws {
         do {
+            let (resolvedURL, updatedRecents) = try folderAccessService.beginAccessingAndRecordFolder(at: url)
             var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.standardizedFileURL.path, isDirectory: &isDir), isDir.boolValue else {
+            guard FileManager.default.fileExists(atPath: resolvedURL.standardizedFileURL.path, isDirectory: &isDir), isDir.boolValue else {
+                folderAccessService.stopAccessingCurrentFolder()
                 throw CocoaError(.fileReadNoSuchFile)
             }
-            let (resolvedURL, updatedRecents) = try folderAccessService.beginAccessingAndRecordFolder(at: url)
             try applyOpenedFolder(resolvedURL: resolvedURL, updatedRecents: updatedRecents)
         } catch {
             self.lastErrorMessage = error.localizedDescription

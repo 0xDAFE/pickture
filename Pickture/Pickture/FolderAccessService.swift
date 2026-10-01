@@ -66,10 +66,6 @@ final class FolderAccessService {
         activeFolderURL != nil
     }
 
-    var isAccessingSecurityScopedURL: Bool {
-        activeSecurityScopedURL != nil
-    }
-
     func stopAccessingCurrentFolder() {
         if let activeSecurityScopedURL {
             activeSecurityScopedURL.stopAccessingSecurityScopedResource()

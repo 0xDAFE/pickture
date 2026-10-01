@@ -94,8 +94,8 @@ struct CullingSessionSafeCloseAndNavigationTests {
         session.setPickFlag(.picked, for: item)
         #expect(session.pendingWritesCount == 1)
 
-        // Simulate stalled/suspended write queue
-        session.isWriteQueueSuspended = true
+        // Simulate slow write I/O exceeding the timeout
+        session.simulatedFlushDelayNanoseconds = 300_000_000
 
         // Unforced close with short timeout (100ms) to simulate slow/stalled remote NAS
         let unforcedResult = await session.closeFolder(force: false, timeoutNanoseconds: 100_000_000)

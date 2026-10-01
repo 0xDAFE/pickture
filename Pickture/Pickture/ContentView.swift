@@ -13,7 +13,9 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var session: CullingSession
-    @State private var preferredCompactColumn: NavigationSplitViewColumn
+    /// Intentional one-time state seed: on compact screens (iPhone / Slide Over), the app
+    /// always launches anchored to the sidebar (.sidebar) per ADR 0004.
+    @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var isFolderImporterPresented = false
     @State private var isSettingsPresented = false
     @State private var isCloseConfirmationPresented = false
@@ -22,7 +24,6 @@ struct ContentView: View {
     init(session: CullingSession? = nil) {
         let resolvedSession = session ?? CullingSession()
         _session = State(initialValue: resolvedSession)
-        _preferredCompactColumn = State(initialValue: resolvedSession.currentFolderURL == nil ? .sidebar : .detail)
     }
 
     private let gridColumns = [
@@ -66,7 +67,7 @@ struct ContentView: View {
             }
             Button("Keep Waiting", role: .cancel) {}
         } message: {
-            Text("\(pendingWritesCountForClose) pending edit\(pendingWritesCountForClose == 1 ? "" : "s") have not finished syncing to disk. If you close now, edits are safely preserved in the local journal and will sync when you reopen this folder.")
+            Text("\(pendingWritesCountForClose) pending write\(pendingWritesCountForClose == 1 ? "" : "s") have not finished syncing to disk. If you close now, curation metadata changes are safely preserved in the local journal and will sync when you reopen this folder.")
         }
         .sheet(isPresented: $isSettingsPresented) {
             SettingsSheetView(session: session)
@@ -77,7 +78,8 @@ struct ContentView: View {
     }
 
     private var sidebarContent: some View {
-        VStack(spacing: 0) {
+        @Bindable var session = session
+        return VStack(spacing: 0) {
             if let errorMessage = session.lastErrorMessage {
                 HStack {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -115,6 +117,7 @@ struct ContentView: View {
                             .padding(.vertical, 2)
 
                             Button {
+                                session.viewMode = .grid
                                 preferredCompactColumn = .detail
                             } label: {
                                 Label("Return to Grid", systemImage: "arrow.right.circle.fill")
@@ -144,6 +147,7 @@ struct ContentView: View {
                     }
 
                     Toggle(
+                        "SubfolderMode (Recursive)",
                         isOn: Binding(
                             get: { session.subfolderMode == .recursive },
                             set: { isRecursive in
@@ -154,15 +158,10 @@ struct ContentView: View {
                                 }
                             }
                         )
-                    ) {
-                        Label("SubfolderMode (Recursive)", systemImage: "list.bullet.indent")
-                    }
+                    )
 
                     Picker(
-                        selection: Binding(
-                            get: { session.previewSource },
-                            set: { session.previewSource = $0 }
-                        )
+                        selection: $session.previewSource
                     ) {
                         Text("Prefer Raster").tag(PreviewSource.preferRaster)
                         Text("Prefer RAW").tag(PreviewSource.preferRAW)
@@ -267,23 +266,6 @@ struct ContentView: View {
     @ViewBuilder
     private var detailContent: some View {
         VStack(spacing: 0) {
-            if let errorMessage = session.lastErrorMessage {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(errorMessage)
-                        .font(.caption)
-                    Spacer()
-                    Button("Dismiss") {
-                        session.lastErrorMessage = nil
-                    }
-                    .font(.caption.weight(.semibold))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.orange.opacity(0.15))
-            }
-
             if session.currentFolderURL == nil {
                 emptyWorkspaceView
             } else if session.items.isEmpty {
@@ -378,12 +360,19 @@ struct ContentView: View {
 
     @ViewBuilder
     private var viewModePicker: some View {
-        Picker("View Mode", selection: Binding(
-            get: { session.viewMode },
-            set: { session.setViewMode($0) }
-        )) {
-            Label("Grid (G)", systemImage: "square.grid.3x3").tag(ViewMode.grid)
-            Label("Filmstrip (E)", systemImage: "rectangle.split.3x1").tag(ViewMode.filmstrip)
+        @Bindable var session = session
+        Picker("View Mode", selection: $session.viewMode) {
+            if horizontalSizeClass == .compact {
+                Image(systemName: "square.grid.3x3")
+                    .accessibilityLabel("Grid")
+                    .tag(ViewMode.grid)
+                Image(systemName: "rectangle.split.3x1")
+                    .accessibilityLabel("Filmstrip")
+                    .tag(ViewMode.filmstrip)
+            } else {
+                Label("Grid (G)", systemImage: "square.grid.3x3").tag(ViewMode.grid)
+                Label("Filmstrip (E)", systemImage: "rectangle.split.3x1").tag(ViewMode.filmstrip)
+            }
         }
         .pickerStyle(.segmented)
         .help("Toggle between Grid View (G) and Filmstrip View (E or Space)")
@@ -399,7 +388,7 @@ struct ContentView: View {
                 Task { await session.flushPendingWrites() }
             }
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 switch session.syncSummaryState {
                 case .synced:
                     Image(systemName: "checkmark.circle.fill")
@@ -417,10 +406,18 @@ struct ContentView: View {
                     Image(systemName: "exclamationmark.circle.fill")
                         .foregroundStyle(.red)
                 }
-                Text(session.syncSummaryBadgeText)
-                    .font(.caption.weight(.medium))
+                if horizontalSizeClass != .compact {
+                    Text(session.syncSummaryBadgeText)
+                        .font(.caption.weight(.medium))
+                } else if session.conflictedItemsCount > 0 {
+                    Text("\(session.conflictedItemsCount)")
+                        .font(.caption2.weight(.bold))
+                } else if session.pendingWritesCount > 0 {
+                    Text("\(session.pendingWritesCount)")
+                        .font(.caption2.weight(.bold))
+                }
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, horizontalSizeClass == .compact ? 6 : 8)
             .padding(.vertical, 4)
             .background(
                 Capsule()
@@ -470,13 +467,6 @@ struct ContentView: View {
                         systemImage: session.isSwipeModeEnabled ? "hand.draw.fill" : "hand.draw"
                     )
                 }
-
-                Button {
-                    session.undoLastSwipe()
-                } label: {
-                    Label("Undo Swipe", systemImage: "arrow.uturn.backward")
-                }
-                .disabled(!session.canUndoSwipe)
             }
 
             Button {
@@ -501,14 +491,6 @@ struct ContentView: View {
                 isSettingsPresented = true
             } label: {
                 Label("Settings", systemImage: "gearshape")
-            }
-
-            Button {
-                Task {
-                    try? await session.refreshFolder()
-                }
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
             }
         }
         .help("More session options")
