@@ -1,14 +1,23 @@
 import CoreGraphics
 import SwiftUI
 
-struct MediaGridCellView: View {
+struct MediaGridCellView: View, Equatable {
     let item: MediaItem
+    let curation: CurationMetadata
+    let syncState: SyncState
     let isSelected: Bool
-    let isRecursiveMode: Bool
-    let previewSource: PreviewSource
-    let cacheGeneration: Int
-    let session: CullingSession
-    let onSelect: () -> Void
+    var isRecursiveMode: Bool = false
+    var previewSource: PreviewSource = .preferRaster
+    var cacheGeneration: Int = 0
+    var cachedThumbnail: CGImage? = nil
+    var aspectRatio: CGFloat? = nil
+    var metadataDeckHeight: CGFloat = CullingLayoutCalculator.defaultGridMetadataDeckHeight
+    var onSelect: (() -> Void)? = nil
+    var onDoubleClick: (() -> Void)? = nil
+    var onResolveConflict: (() -> Void)? = nil
+    var onCurationAction: ((CurationAction) -> Void)? = nil
+    var loadThumbnail: (() async -> CGImage?)? = nil
+    var onThumbnailLoaded: ((CGImage) -> Void)? = nil
 
     @State private var thumbnailImage: CGImage?
     @State private var isLoadingThumbnail = false
@@ -20,22 +29,15 @@ struct MediaGridCellView: View {
     }
 
     private var displayedThumbnail: CGImage? {
-        thumbnailImage ?? session.cachedThumbnailImage(for: item, maxPixelSize: 360)
+        thumbnailImage ?? cachedThumbnail
     }
 
     private var currentAspectRatio: CGFloat {
-        if let cgImage = displayedThumbnail {
-            return cgImage.aspectRatio
-        }
-        return session.thumbnailAspectRatio(for: item)
-    }
-
-    private var curation: CurationMetadata {
-        session.curationMetadata(for: item)
-    }
-
-    private var syncState: SyncState {
-        session.syncState(for: item)
+        CullingLayoutCalculator.resolveAspectRatio(
+            aspectRatio: aspectRatio,
+            displayedThumbnail: displayedThumbnail,
+            mediaKind: item.kind
+        )
     }
 
     private var floatingDropShadowColor: Color {
@@ -61,10 +63,9 @@ struct MediaGridCellView: View {
     var body: some View {
         Button(action: {
             if syncState == .conflicted {
-                session.activeConflictItemID = item.id
-                session.isConflictSheetPresented = true
+                onResolveConflict?()
             } else {
-                onSelect()
+                onSelect?()
             }
         }) {
             VStack(alignment: .leading, spacing: 6) {
@@ -93,8 +94,7 @@ struct MediaGridCellView: View {
         }
         .simultaneousGesture(
             TapGesture(count: 2).onEnded {
-                session.selectedItemID = item.id
-                session.setViewMode(.filmstrip)
+                onDoubleClick?()
             }
         )
         .contextMenu {
@@ -103,19 +103,17 @@ struct MediaGridCellView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.displayFileName), \(item.mediaTypeBadge)\(item.isMediaPair ? ", RAW+JPG pair" : ""), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
         .task(id: taskKey) {
+            guard let loadThumbnail else { return }
             isLoadingThumbnail = true
             defer { isLoadingThumbnail = false }
-            guard let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) else {
-                thumbnailImage = nil
-                return
-            }
-            let decoded = await Task.detached(priority: .utility) {
-                PreviewLoader.decodeCGImage(from: data)
-            }.value
-            if !Task.isCancelled {
-                thumbnailImage = decoded
-                if let decoded {
-                    session.recordThumbnailAspectRatio(decoded.aspectRatio, for: item.id)
+            if let decoded = await loadThumbnail() {
+                if !Task.isCancelled {
+                    thumbnailImage = decoded
+                    onThumbnailLoaded?(decoded)
+                }
+            } else {
+                if !Task.isCancelled {
+                    thumbnailImage = nil
                 }
             }
         }
@@ -128,7 +126,7 @@ struct MediaGridCellView: View {
         GeometryReader { proxy in
             let stageWidth = proxy.size.width
             let stageHeight = proxy.size.height
-            let silhouetteSize = session.gridItemSilhouetteSize(
+            let silhouetteSize = CullingLayoutCalculator.gridItemSilhouetteSize(
                 aspectRatio: currentAspectRatio,
                 stageWidth: stageWidth,
                 stageHeight: stageHeight,
@@ -239,8 +237,7 @@ struct MediaGridCellView: View {
         switch syncState {
         case .conflicted:
             Button {
-                session.activeConflictItemID = item.id
-                session.isConflictSheetPresented = true
+                onResolveConflict?()
             } label: {
                 Label("Conflict", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption2.weight(.bold))
@@ -304,7 +301,7 @@ struct MediaGridCellView: View {
             // Row 2: Interactive curation toolbar
             curationToolbarView
         }
-        .frame(height: session.gridMetadataDeckHeight, alignment: .top)
+        .frame(height: metadataDeckHeight, alignment: .top)
         .padding(.horizontal, 2)
     }
 
@@ -313,7 +310,7 @@ struct MediaGridCellView: View {
             // Pick / Unflag / Reject
             Button {
                 let next: PickFlag = (curation.pickFlag == .picked) ? .unflagged : .picked
-                session.setPickFlag(next, for: item)
+                onCurationAction?(.pickFlag(next))
             } label: {
                 Image(systemName: curation.pickFlag == .picked ? "flag.fill" : "flag")
                     .font(.system(size: 11))
@@ -324,7 +321,7 @@ struct MediaGridCellView: View {
 
             Button {
                 let next: PickFlag = (curation.pickFlag == .rejected) ? .unflagged : .rejected
-                session.setPickFlag(next, for: item)
+                onCurationAction?(.pickFlag(next))
             } label: {
                 Image(systemName: curation.pickFlag == .rejected ? "xmark.circle.fill" : "xmark.circle")
                     .font(.system(size: 11))
@@ -340,7 +337,7 @@ struct MediaGridCellView: View {
                 ForEach(1...5, id: \.self) { star in
                     Button {
                         let newRating: StarRating = (curation.starRating.value == star) ? StarRating(0) : StarRating(star)
-                        session.setStarRating(newRating, for: item)
+                        onCurationAction?(.starRating(newRating))
                     } label: {
                         Image(systemName: star <= curation.starRating.value ? "star.fill" : "star")
                             .font(.system(size: 10))
@@ -356,7 +353,7 @@ struct MediaGridCellView: View {
             Menu {
                 ForEach(ColorLabel.allCases, id: \.self) { label in
                     Button {
-                        session.setColorLabel(label, for: item)
+                        onCurationAction?(.colorLabel(label))
                     } label: {
                         HStack {
                             Circle()
@@ -386,8 +383,7 @@ struct MediaGridCellView: View {
     private var contextMenuContent: some View {
         if syncState == .conflicted {
             Button {
-                session.activeConflictItemID = item.id
-                session.isConflictSheetPresented = true
+                onResolveConflict?()
             } label: {
                 Label("Resolve Conflict…", systemImage: "exclamationmark.triangle.fill")
             }
@@ -395,22 +391,37 @@ struct MediaGridCellView: View {
         }
 
         Menu("Star Rating") {
-            Button("0 Stars (Unrated)") { session.setStarRating(0, for: item) }
+            Button("0 Stars (Unrated)") { onCurationAction?(.starRating(0)) }
             ForEach(1...5, id: \.self) { rating in
-                Button("\(rating) Stars") { session.setStarRating(StarRating(rating), for: item) }
+                Button("\(rating) Stars") { onCurationAction?(.starRating(StarRating(rating))) }
             }
         }
 
         Menu("Pick Flag") {
-            Button("Picked (P)") { session.setPickFlag(.picked, for: item) }
-            Button("Unflagged (U)") { session.setPickFlag(.unflagged, for: item) }
-            Button("Rejected (X)") { session.setPickFlag(.rejected, for: item) }
+            Button("Picked (P)") { onCurationAction?(.pickFlag(.picked)) }
+            Button("Unflagged (U)") { onCurationAction?(.pickFlag(.unflagged)) }
+            Button("Rejected (X)") { onCurationAction?(.pickFlag(.rejected)) }
         }
 
         Menu("Color Label") {
             ForEach(ColorLabel.allCases, id: \.self) { label in
-                Button(label.rawValue.capitalized) { session.setColorLabel(label, for: item) }
+                Button(label.rawValue.capitalized) { onCurationAction?(.colorLabel(label)) }
             }
         }
+    }
+}
+
+extension MediaGridCellView {
+    static func == (lhs: MediaGridCellView, rhs: MediaGridCellView) -> Bool {
+        lhs.item == rhs.item &&
+        lhs.curation == rhs.curation &&
+        lhs.syncState == rhs.syncState &&
+        lhs.isSelected == rhs.isSelected &&
+        lhs.isRecursiveMode == rhs.isRecursiveMode &&
+        lhs.previewSource == rhs.previewSource &&
+        lhs.cacheGeneration == rhs.cacheGeneration &&
+        lhs.aspectRatio == rhs.aspectRatio &&
+        lhs.metadataDeckHeight == rhs.metadataDeckHeight &&
+        lhs.cachedThumbnail === rhs.cachedThumbnail
     }
 }

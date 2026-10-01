@@ -10,14 +10,50 @@ final class CullingSession {
     let mediaCache: MediaCache
     let metadataSyncStore: MetadataSyncStore
     private(set) var currentFolderURL: URL?
-    private(set) var items: [MediaItem] = []
+    private(set) var items: [MediaItem] = [] {
+        didSet {
+            refreshDerivedCounts()
+        }
+    }
     private(set) var recentFolders: [RecentFolder] = []
     private(set) var mediaCacheTotalBytes: Int64 = 0
     private(set) var cacheSizeLimitBytes: Int64 = MediaCache.defaultQuotaBytes
     private(set) var cacheGeneration: Int = 0
+
+    var cacheSizeLimitMegabytes: Double {
+        get {
+            Double(cacheSizeLimitBytes) / (1_024.0 * 1_024.0)
+        }
+        set {
+            setUserConfiguredCacheSizeLimitBytes(Int64(newValue * 1_024.0 * 1_024.0))
+        }
+    }
+
+    var isRecursiveSubfolderMode: Bool {
+        get {
+            subfolderMode == .recursive
+        }
+        set {
+            do {
+                try setSubfolderMode(newValue ? .recursive : .immediate)
+            } catch {
+                lastErrorMessage = "Failed to switch subfolder mode: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private(set) var visibleMediaPairCount: Int = 0
+    private(set) var visibleVideoCount: Int = 0
+    private(set) var conflictedItemsCount: Int = 0
+    private(set) var pendingWritesCount: Int = 0
+
     var selectedItemID: String?
     var lastErrorMessage: String?
-    var filterCriteria: FilterCriteria = FilterCriteria()
+    var filterCriteria: FilterCriteria = FilterCriteria() {
+        didSet {
+            refreshDerivedCounts()
+        }
+    }
     var sortOption: SortOption = SortOption(field: .fileName, order: .ascending)
     var isSearchFieldFocused: Bool = false
     private var exifByItemID: [String: ExifMetadata] = [:]
@@ -135,31 +171,15 @@ final class CullingSession {
         dockPosition: FilmstripDockPosition,
         mediaKind: MediaKind? = nil
     ) -> CGSize {
-        let safeRatio: CGFloat
-        if aspectRatio.isNaN || aspectRatio.isInfinite || aspectRatio <= 0 {
-            safeRatio = (mediaKind == .video) ? 1.777 : 1.5
-        } else {
-            safeRatio = aspectRatio
-        }
-
-        switch dockPosition {
-        case .bottom:
-            let height: CGFloat = 72.0
-            let unroundedWidth = height * safeRatio
-            let clampedWidth = min(128.0, max(48.0, unroundedWidth.rounded()))
-            return CGSize(width: clampedWidth, height: height)
-
-        case .right:
-            let width: CGFloat = 112.0
-            let divisor = max(0.1, safeRatio)
-            let unroundedHeight = width / divisor
-            let clampedHeight = min(150.0, max(64.0, unroundedHeight.rounded()))
-            return CGSize(width: width, height: clampedHeight)
-        }
+        CullingLayoutCalculator.filmstripThumbnailSize(
+            aspectRatio: aspectRatio,
+            dockPosition: dockPosition,
+            mediaKind: mediaKind ?? .photo
+        )
     }
 
     func fallbackAspectRatio(for kind: MediaKind) -> CGFloat {
-        kind == .video ? 1.777 : 1.5
+        CullingLayoutCalculator.fallbackAspectRatio(for: kind)
     }
 
     func fallbackAspectRatio(for item: MediaItem) -> CGFloat {
@@ -202,10 +222,7 @@ final class CullingSession {
     /// The standard 4:3 stage ceiling provides balanced vertical headroom for both landscape
     /// and portrait media without layout explosion.
     func gridStageHeight(for columnWidth: CGFloat) -> CGFloat {
-        guard !columnWidth.isNaN, !columnWidth.isInfinite, columnWidth > 0 else {
-            return 140.0
-        }
-        return (columnWidth * 0.75).rounded()
+        CullingLayoutCalculator.gridStageHeight(for: columnWidth)
     }
 
     /// Computes the exact silhouette size of a media item floating inside the bounded Image Stage,
@@ -216,28 +233,12 @@ final class CullingSession {
         stageHeight: CGFloat,
         mediaKind: MediaKind? = nil
     ) -> CGSize {
-        let safeRatio: CGFloat
-        if aspectRatio.isNaN || aspectRatio.isInfinite || aspectRatio <= 0 {
-            safeRatio = fallbackAspectRatio(for: mediaKind ?? .photo)
-        } else {
-            safeRatio = aspectRatio
-        }
-
-        let safeStageWidth = max(1.0, stageWidth)
-        let safeStageHeight = max(1.0, stageHeight)
-        let stageRatio = safeStageWidth / safeStageHeight
-
-        if safeRatio >= stageRatio {
-            // Wider than or equal to stage ceiling: constrained by stageWidth
-            let width = safeStageWidth
-            let height = width / safeRatio
-            return CGSize(width: width, height: height)
-        } else {
-            // Taller than stage ceiling: constrained by stageHeight
-            let height = safeStageHeight
-            let width = height * safeRatio
-            return CGSize(width: width, height: height)
-        }
+        CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: aspectRatio,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: mediaKind ?? .photo
+        )
     }
 
     /// Convenience method to compute the silhouette size for a MediaItem given the column width.
@@ -523,6 +524,7 @@ final class CullingSession {
         syncStateByItemID[item.id] = .pendingWrite
         conflictsByItemID.removeValue(forKey: item.id)
         metadataSyncStore.stagePendingWrite(metadata, baseSnapshot: base, for: item.id)
+        refreshDerivedCounts()
 
         if !isSyncSuspended {
             scheduleFlushPendingWrites()
@@ -612,6 +614,9 @@ final class CullingSession {
             exifByItemID[itemID] = merged
             metadataSyncStore.recordExif(merged, for: itemID)
         }
+        if filterCriteria.isCameraModelActive || filterCriteria.isLensModelActive {
+            refreshDerivedCounts()
+        }
     }
 
     func captureDate(for item: MediaItem) -> Date? {
@@ -666,6 +671,25 @@ final class CullingSession {
         }
     }
 
+    func refreshDerivedCounts() {
+        var pending = 0
+        var conflicts = 0
+        for item in items {
+            let state = syncState(for: item)
+            if state == .pendingWrite {
+                pending += 1
+            } else if state == .conflicted {
+                conflicts += 1
+            }
+        }
+        pendingWritesCount = pending
+        conflictedItemsCount = conflicts
+
+        let current = visibleItems
+        visibleMediaPairCount = current.filter(\.isMediaPair).count
+        visibleVideoCount = current.filter { $0.kind == .video }.count
+    }
+
     var availableCameraModels: [String] {
         var set = Set<String>()
         for item in items {
@@ -709,14 +733,6 @@ final class CullingSession {
 
     func setSortOrder(_ order: SortOrder) {
         sortOption.order = order
-    }
-
-    var pendingWritesCount: Int {
-        items.filter { syncState(for: $0) == .pendingWrite }.count
-    }
-
-    var conflictedItemsCount: Int {
-        items.filter { syncState(for: $0) == .conflicted }.count
     }
 
     var conflictedItems: [MediaItem] {
@@ -778,6 +794,7 @@ final class CullingSession {
                 syncStateByItemID[item.id] = .syncError
                 metadataSyncStore.updateSyncState(.syncError, for: item.id)
                 lastErrorMessage = "Sync error on \(item.displayFileName): \(error.localizedDescription)"
+                refreshDerivedCounts()
             }
         }
     }
@@ -840,6 +857,7 @@ final class CullingSession {
         filterCriteria.reset()
         sortOption = SortOption(field: .fileName, order: .ascending)
         isSearchFieldFocused = false
+        refreshDerivedCounts()
     }
 
     func flushPendingWrite(for itemID: String) async throws {
@@ -848,6 +866,7 @@ final class CullingSession {
         let base = baseSnapshot(for: item)
 
         syncStateByItemID[item.id] = .loading
+        refreshDerivedCounts()
 
         enum FlushOutcome: Sendable {
             case conflict(MetadataConflict)
@@ -906,6 +925,7 @@ final class CullingSession {
             conflictsByItemID.removeValue(forKey: item.id)
             metadataSyncStore.markSynced(for: item.id, baseSnapshot: newBase)
         }
+        refreshDerivedCounts()
     }
 
     func resolveConflict(for item: MediaItem, strategy: ConflictResolutionStrategy) async throws {
@@ -951,6 +971,7 @@ final class CullingSession {
         baseSnapshotByItemID[item.id] = newBase
         conflictsByItemID.removeValue(forKey: item.id)
         metadataSyncStore.resolveConflict(for: item.id, resolvedMetadata: resolvedMetadata, newBaseSnapshot: newBase)
+        refreshDerivedCounts()
     }
 
     func resolveAllConflicts(strategy: ConflictResolutionStrategy) async throws {
@@ -1194,6 +1215,7 @@ final class CullingSession {
                 }
             }
         }
+        refreshDerivedCounts()
     }
 
     func toggleSubfolderMode() throws {
