@@ -689,4 +689,68 @@ struct CullingSessionFilterAndSortTests {
         _ = await session.closeFolder(force: true)
         #expect(!session.isSearchFieldFocused)
     }
+
+    @Test("Pre-computed visibleMediaPairCount and visibleVideoCount reflect filtered items without inline filter traversals")
+    func precomputedVisibleMediaPairAndVideoCounts() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Create 1 MediaPair: RAW + JPG
+        try Data("raw".utf8).write(to: root.appendingPathComponent("PAIR.ARW"))
+        try Data("jpg".utf8).write(to: root.appendingPathComponent("PAIR.JPG"))
+        // Create 1 Video
+        try Data("mov".utf8).write(to: root.appendingPathComponent("CLIP.MOV"))
+        // Create 1 standalone Photo
+        try Data("single".utf8).write(to: root.appendingPathComponent("SINGLE.JPG"))
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        try session.openFolder(at: root)
+
+        #expect(session.items.count == 3)
+        #expect(session.visibleItems.count == 3)
+        #expect(session.visibleMediaPairCount == 1)
+        #expect(session.visibleVideoCount == 1)
+
+        // Filter by filename to "PAIR"
+        session.filterCriteria.searchQuery = "PAIR"
+        #expect(session.visibleItems.count == 1)
+        #expect(session.visibleMediaPairCount == 1)
+        #expect(session.visibleVideoCount == 0)
+
+        // Filter by filename to "CLIP"
+        session.filterCriteria.searchQuery = "CLIP"
+        #expect(session.visibleItems.count == 1)
+        #expect(session.visibleMediaPairCount == 0)
+        #expect(session.visibleVideoCount == 1)
+
+
+        // Reset filter
+        session.filterCriteria.reset()
+        #expect(session.visibleItems.count == 3)
+        #expect(session.visibleMediaPairCount == 1)
+        #expect(session.visibleVideoCount == 1)
+    }
+
+    @Test("Settings direct binding properties: cacheSizeLimitMegabytes and isRecursiveSubfolderMode")
+    func settingsDirectBindingProperties() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        try session.openFolder(at: root)
+
+        // Initial default: 2048 MB (2 GB)
+        #expect(session.cacheSizeLimitMegabytes == 2048.0)
+        session.cacheSizeLimitMegabytes = 1024.0
+        #expect(session.cacheSizeLimitBytes == 1024 * 1024 * 1024)
+        #expect(session.cacheSizeLimitMegabytes == 1024.0)
+
+        // Subfolder mode binding
+        #expect(session.isRecursiveSubfolderMode == false)
+        session.isRecursiveSubfolderMode = true
+        #expect(session.subfolderMode == .recursive)
+        #expect(session.isRecursiveSubfolderMode == true)
+    }
 }
+
+

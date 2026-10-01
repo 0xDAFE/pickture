@@ -12,7 +12,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @State private var session: CullingSession
+    @Bindable var session: CullingSession
     /// Intentional one-time state seed: on compact screens (iPhone / Slide Over), the app
     /// always launches anchored to the sidebar (.sidebar) per ADR 0004.
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
@@ -21,9 +21,8 @@ struct ContentView: View {
     @State private var isCloseConfirmationPresented = false
     @State private var pendingWritesCountForClose = 0
 
-    init(session: CullingSession? = nil) {
-        let resolvedSession = session ?? CullingSession()
-        _session = State(initialValue: resolvedSession)
+    init(session: CullingSession) {
+        self.session = session
     }
 
     private let gridColumns = [
@@ -754,16 +753,14 @@ struct ContentView: View {
                         .font(.caption.weight(.medium))
                 }
 
-                let pairCount = session.visibleItems.filter(\.isMediaPair).count
-                if pairCount > 0 {
-                    Text("• \(pairCount) MediaPairs (RAW+JPG)")
+                if session.visibleMediaPairCount > 0 {
+                    Text("• \(session.visibleMediaPairCount) MediaPairs (RAW+JPG)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                let videoCount = session.visibleItems.filter { $0.kind == .video }.count
-                if videoCount > 0 {
-                    Text("• \(videoCount) Videos")
+                if session.visibleVideoCount > 0 {
+                    Text("• \(session.visibleVideoCount) Videos")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

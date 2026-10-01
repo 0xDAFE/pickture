@@ -268,8 +268,10 @@ struct FilmstripView: View {
     @ViewBuilder
     private func thumbnailStrip(position: FilmstripDockPosition) -> some View {
         ScrollViewReader { proxy in
-            if position == .bottom {
-                ScrollView(.horizontal, showsIndicators: true) {
+            let isHorizontal = position == .bottom
+            let axis: Axis.Set = isHorizontal ? .horizontal : .vertical
+            ScrollView(axis, showsIndicators: true) {
+                if isHorizontal {
                     LazyHStack(spacing: 8) {
                         ForEach(session.visibleItems) { item in
                             thumbnailItemView(for: item, position: .bottom)
@@ -277,16 +279,7 @@ struct FilmstripView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                }
-                .onChange(of: session.selectedItemID) { _, newID in
-                    if let newID {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            proxy.scrollTo(newID, anchor: .center)
-                        }
-                    }
-                }
-            } else {
-                ScrollView(.vertical, showsIndicators: true) {
+                } else {
                     LazyVStack(spacing: 8) {
                         ForEach(session.visibleItems) { item in
                             thumbnailItemView(for: item, position: .right)
@@ -296,11 +289,11 @@ struct FilmstripView: View {
                     .padding(.vertical, 12)
                     .padding(.horizontal, 8)
                 }
-                .onChange(of: session.selectedItemID) { _, newID in
-                    if let newID {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            proxy.scrollTo(newID, anchor: .center)
-                        }
+            }
+            .onChange(of: session.selectedItemID) { _, newID in
+                if let newID {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo(newID, anchor: .center)
                     }
                 }
             }
@@ -390,7 +383,7 @@ struct SwipeActionBadgeView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(direction == .right ? "SWIPE RIGHT" : "SWIPE LEFT")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.caption2.weight(.bold))
                     .foregroundStyle(.white.opacity(0.75))
                     .tracking(1)
 
@@ -563,12 +556,19 @@ struct FilmstripImageCanvasView: View {
                         }
                     }
             )
-            .task(id: "\(item.id)-\(session.previewSource.rawValue)") {
+            .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
                 isLoading = true
-                if let data = await session.loadPreviewImageData(for: item, maxPixelSize: 2048) {
-                    previewImage = PreviewLoader.decodeCGImage(from: data)
+                defer { isLoading = false }
+                guard let data = await session.loadPreviewImageData(for: item, maxPixelSize: 2048) else {
+                    previewImage = nil
+                    return
                 }
-                isLoading = false
+                let decoded = await Task.detached(priority: .utility) {
+                    PreviewLoader.decodeCGImage(from: data)
+                }.value
+                if !Task.isCancelled {
+                    previewImage = decoded
+                }
             }
         }
     }
@@ -593,9 +593,6 @@ struct FilmstripVideoCanvasView: View {
                 Group {
                     if let player {
                         VideoPlayer(player: player)
-                            .onDisappear {
-                                player.pause()
-                            }
                     } else {
                         ProgressView()
                             .tint(.white)
@@ -757,14 +754,14 @@ struct FilmstripThumbnailCell: View {
                     HStack(spacing: 3) {
                         if item.isMediaPair {
                             Text("RAW+JPG")
-                                .font(.system(size: 8, weight: .bold))
+                                .font(.caption2.weight(.bold))
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 2)
                                 .background(.black.opacity(0.8), in: Capsule())
                                 .foregroundStyle(.yellow)
                         } else if item.kind == .video {
                             Image(systemName: "video.fill")
-                                .font(.system(size: 8))
+                                .font(.caption2)
                                 .padding(3)
                                 .background(.black.opacity(0.8), in: Circle())
                                 .foregroundStyle(.white)
@@ -777,18 +774,18 @@ struct FilmstripThumbnailCell: View {
                             EmptyView()
                         case .pendingWrite:
                             Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 8))
+                                .font(.caption2)
                                 .foregroundStyle(.orange)
                         case .conflicted:
                             Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 9))
+                                .font(.caption2)
                                 .foregroundStyle(.orange)
                         case .loading:
                             ProgressView()
                                 .controlSize(.mini)
                         case .syncError:
                             Image(systemName: "exclamationmark.circle.fill")
-                                .font(.system(size: 8))
+                                .font(.caption2)
                                 .foregroundStyle(.red)
                         }
                     }
@@ -802,10 +799,10 @@ struct FilmstripThumbnailCell: View {
                         if curation.starRating > 0 {
                             HStack(spacing: 1) {
                                 Image(systemName: "star.fill")
-                                    .font(.system(size: 8))
+                                    .font(.caption2)
                                     .foregroundStyle(.yellow)
                                 Text("\(curation.starRating.value)")
-                                    .font(.system(size: 8, weight: .bold))
+                                    .font(.caption2.weight(.bold))
                                     .foregroundStyle(.white)
                             }
                             .padding(.horizontal, isCompact ? 2.5 : 4)
@@ -818,13 +815,13 @@ struct FilmstripThumbnailCell: View {
                         switch curation.pickFlag {
                         case .picked:
                             Image(systemName: "flag.fill")
-                                .font(.system(size: 8))
+                                .font(.caption2)
                                 .foregroundStyle(.green)
                                 .padding(isCompact ? 2 : 3)
                                 .background(.black.opacity(0.8), in: Circle())
                         case .rejected:
                             Image(systemName: "xmark")
-                                .font(.system(size: 8, weight: .bold))
+                                .font(.caption2.weight(.bold))
                                 .foregroundStyle(.red)
                                 .padding(isCompact ? 2 : 3)
                                 .background(.black.opacity(0.8), in: Circle())
@@ -844,7 +841,7 @@ struct FilmstripThumbnailCell: View {
             )
 
             Text(item.baseName)
-                .font(.system(size: 10, weight: isSelected ? .bold : .regular))
+                .font(.caption.weight(isSelected ? .bold : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .multilineTextAlignment(.center)
@@ -853,13 +850,18 @@ struct FilmstripThumbnailCell: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.baseName), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
-        .task(id: item.id) {
-            if thumbnail == nil {
-                if let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) {
-                    if let decoded = PreviewLoader.decodeCGImage(from: data) {
-                        thumbnail = decoded
-                        session.recordThumbnailAspectRatio(decoded.aspectRatio, for: item.id)
-                    }
+        .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
+            guard let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) else {
+                thumbnail = nil
+                return
+            }
+            let decoded = await Task.detached(priority: .utility) {
+                PreviewLoader.decodeCGImage(from: data)
+            }.value
+            if !Task.isCancelled {
+                thumbnail = decoded
+                if let decoded {
+                    session.recordThumbnailAspectRatio(decoded.aspectRatio, for: item.id)
                 }
             }
         }
