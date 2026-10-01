@@ -92,19 +92,7 @@ struct SidebarContentView: View {
                         Label("Open Folder…", systemImage: "folder.badge.plus")
                     }
 
-                    Toggle(
-                        "Subfolder Mode",
-                        isOn: Binding(
-                            get: { session.subfolderMode == .recursive },
-                            set: { isRecursive in
-                                do {
-                                    try session.setSubfolderMode(isRecursive ? .recursive : .immediate)
-                                } catch {
-                                    session.lastErrorMessage = error.localizedDescription
-                                }
-                            }
-                        )
-                    )
+                    Toggle("Subfolder Mode", isOn: $session.isRecursiveSubfolderMode)
 
                     Picker(
                         selection: $session.previewSource

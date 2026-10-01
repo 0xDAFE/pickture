@@ -44,19 +44,7 @@ struct PicktureToolbarContent: ToolbarContent {
     @ViewBuilder
     private var filterMenu: some View {
         Menu {
-            Toggle(
-                "Recursive Subfolders",
-                isOn: Binding(
-                    get: { session.subfolderMode == .recursive },
-                    set: { isRecursive in
-                        do {
-                            try session.setSubfolderMode(isRecursive ? .recursive : .immediate)
-                        } catch {
-                            session.lastErrorMessage = error.localizedDescription
-                        }
-                    }
-                )
-            )
+            Toggle("Subfolder Mode", isOn: $session.isRecursiveSubfolderMode)
         } label: {
             Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
         }

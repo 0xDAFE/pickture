@@ -108,7 +108,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             if session.currentFolderURL == nil {
                 EmptyWorkspaceView(
-                    recentFolders: session.recentFolders,
+                    session: session,
                     isFolderImporterPresented: $isFolderImporterPresented,
                     onReopenRecentFolder: handleReopenRecentFolder
                 )

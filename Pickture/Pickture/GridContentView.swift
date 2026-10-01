@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct GridContentView: View {
-    @Bindable var session: CullingSession
+    let session: CullingSession
     var gridColumns: [GridItem]
 
     init(

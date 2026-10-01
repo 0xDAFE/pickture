@@ -1,30 +1,35 @@
 import SwiftUI
 
 struct EmptyWorkspaceView: View {
-    let recentFolders: [RecentFolder]
+    let session: CullingSession?
+    var explicitRecentFolders: [RecentFolder]?
     @Binding var isFolderImporterPresented: Bool
     let onReopenRecentFolder: (RecentFolder) -> Void
-
-    init(
-        recentFolders: [RecentFolder],
-        isFolderImporterPresented: Binding<Bool> = .constant(false),
-        onReopenRecentFolder: @escaping (RecentFolder) -> Void = { _ in }
-    ) {
-        self.recentFolders = recentFolders
-        self._isFolderImporterPresented = isFolderImporterPresented
-        self.onReopenRecentFolder = onReopenRecentFolder
-    }
 
     init(
         session: CullingSession,
         isFolderImporterPresented: Binding<Bool> = .constant(false),
         onReopenRecentFolder: @escaping (RecentFolder) -> Void = { _ in }
     ) {
-        self.init(
-            recentFolders: session.recentFolders,
-            isFolderImporterPresented: isFolderImporterPresented,
-            onReopenRecentFolder: onReopenRecentFolder
-        )
+        self.session = session
+        self.explicitRecentFolders = nil
+        self._isFolderImporterPresented = isFolderImporterPresented
+        self.onReopenRecentFolder = onReopenRecentFolder
+    }
+
+    init(
+        recentFolders: [RecentFolder],
+        isFolderImporterPresented: Binding<Bool> = .constant(false),
+        onReopenRecentFolder: @escaping (RecentFolder) -> Void = { _ in }
+    ) {
+        self.session = nil
+        self.explicitRecentFolders = recentFolders
+        self._isFolderImporterPresented = isFolderImporterPresented
+        self.onReopenRecentFolder = onReopenRecentFolder
+    }
+
+    var recentFolders: [RecentFolder] {
+        explicitRecentFolders ?? session?.recentFolders ?? []
     }
 
     var body: some View {
@@ -54,11 +59,12 @@ struct EmptyWorkspaceView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
-                if !recentFolders.isEmpty {
+                let folders = recentFolders
+                if !folders.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Recent Folders")
                             .font(.headline)
-                        ForEach(recentFolders) { recent in
+                        ForEach(folders) { recent in
                             Button {
                                 onReopenRecentFolder(recent)
                             } label: {
