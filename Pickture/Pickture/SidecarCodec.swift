@@ -94,36 +94,34 @@ nonisolated enum SidecarCodec {
             let updatedData = try update(xmlData: existingData, with: curation)
             let dir = url.deletingLastPathComponent()
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            try writeWithAtomicFallback(updatedData, to: url)
+            try coordinatedWrite(updatedData, to: url)
         }
         return targets
     }
 
-    /// Writes data to `url`, preferring an atomic write but falling back to a
-    /// plain write when the filesystem doesn't support the temporary-file dance
-    /// (e.g. SMB volumes on iOS where `_dirhelper_relative_internal` returns
-    /// `ENODEV`). After writing, reads the file back to verify the data landed.
-    private static func writeWithAtomicFallback(_ data: Data, to url: URL) throws {
-        do {
-            try data.write(to: url, options: .atomic)
-        } catch {
-            // Atomic writes require a temporary file in the same directory.
-            // On network-attached volumes (SMB) on iOS this can fail with
-            // ENODEV / ENOTSUP. Fall back to a plain (non-atomic) write.
-            try data.write(to: url)
+    /// Writes data to `url` using `NSFileCoordinator` for proper file-provider
+    /// integration. On iOS, SMB shares are surfaced through a file provider
+    /// (`smbclientd`), which requires coordinated access for writes to be
+    /// reliably persisted. Without coordination, writes can fail or produce
+    /// spurious `_dirhelper_relative_internal` console errors.
+    private static func coordinatedWrite(_ data: Data, to url: URL) throws {
+        var coordinatorError: NSError?
+        var writeError: Error?
+
+        let coordinator = NSFileCoordinator()
+        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordinatorError) { coordinatedURL in
+            do {
+                try data.write(to: coordinatedURL, options: .atomic)
+            } catch {
+                writeError = error
+            }
         }
 
-        // Verify the write actually persisted. Network filesystems can
-        // silently swallow writes or report success despite not flushing.
-        let readBack = try Data(contentsOf: url)
-        if readBack != data {
-            throw CocoaError(
-                .fileWriteUnknown,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "Write verification failed for \(url.lastPathComponent): data on disk does not match what was written"
-                ]
-            )
+        if let coordinatorError {
+            throw coordinatorError
+        }
+        if let writeError {
+            throw writeError
         }
     }
 
