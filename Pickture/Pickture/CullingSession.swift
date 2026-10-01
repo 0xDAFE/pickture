@@ -19,6 +19,7 @@ final class CullingSession {
     var lastErrorMessage: String?
     var filterCriteria: FilterCriteria = FilterCriteria()
     var sortOption: SortOption = SortOption(field: .fileName, order: .ascending)
+    var isSearchFieldFocused: Bool = false
     private var exifByItemID: [String: ExifMetadata] = [:]
     private var headerSupplementedItemIDs: Set<String> = []
     private var metadataByItemID: [String: CurationMetadata] = [:]
@@ -787,6 +788,7 @@ final class CullingSession {
         timeoutNanoseconds: UInt64 = 2_500_000_000
     ) async -> CloseFolderResult {
         guard currentFolderURL != nil else {
+            cleanCloseSession()
             return .success
         }
 
@@ -837,6 +839,7 @@ final class CullingSession {
         headerSupplementedItemIDs.removeAll()
         filterCriteria.reset()
         sortOption = SortOption(field: .fileName, order: .ascending)
+        isSearchFieldFocused = false
     }
 
     func flushPendingWrite(for itemID: String) async throws {

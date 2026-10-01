@@ -302,6 +302,7 @@ struct ContentView: View {
                         }
                         .buttonStyle(.borderedProminent)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if session.viewMode == .grid {
                     gridContentView
                 } else {
@@ -309,8 +310,20 @@ struct ContentView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .focusable()
+        .focusEffectDisabled()
         .onKeyPress(phases: .down) { press in
+            // When search field is focused, do not intercept single-key curation shortcuts
+            if session.isSearchFieldFocused {
+                if press.key == .escape {
+                    session.filterCriteria.searchQuery = ""
+                    session.isSearchFieldFocused = false
+                    return .handled
+                }
+                return .ignored
+            }
+
             if press.modifiers.contains(.command) && press.characters.lowercased() == "z" {
                 if session.undoLastSwipe() { return .handled }
             }

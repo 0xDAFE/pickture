@@ -677,4 +677,16 @@ struct CullingSessionFilterAndSortTests {
         session.selectLastItem()
         #expect(session.selectedItemID == i3.id)
     }
+
+    @Test("Search field focus state is tracked and properly reset on session close")
+    func searchFieldFocusStateTrackingAndReset() async {
+        let session = CullingSession()
+        #expect(!session.isSearchFieldFocused)
+
+        session.isSearchFieldFocused = true
+        #expect(session.isSearchFieldFocused)
+
+        _ = await session.closeFolder(force: true)
+        #expect(!session.isSearchFieldFocused)
+    }
 }
