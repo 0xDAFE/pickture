@@ -1,0 +1,40 @@
+{
+  "configurations" : [
+    {
+      "id" : "6E0683DE-D8C5-44B5-B564-3563DAD98559",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "performanceAntipatternCheckerEnabled" : true,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:Pickture.xcodeproj",
+      "identifier" : "DFC101B830691083003945DD",
+      "name" : "Pickture"
+    },
+    "testInteropMode" : "complete"
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:Pickture.xcodeproj",
+        "identifier" : "DFC101C530691085003945DD",
+        "name" : "PicktureTests"
+      }
+    },
+    {
+      "enabled" : false,
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:Pickture.xcodeproj",
+        "identifier" : "DFC101CF30691085003945DD",
+        "name" : "PicktureUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

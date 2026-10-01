@@ -11,3 +11,7 @@ Default five canonical triage roles (`needs-triage`, `needs-info`, `ready-for-ag
 ### Domain docs
 
 Single-context layout (`CONTEXT.md` at repo root + `docs/adr/`). See `docs/agents/domain.md`.
+
+## Local instructions
+
+@[Local Agent Instructions](AGENTS.local.md)
