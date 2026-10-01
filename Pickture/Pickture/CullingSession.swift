@@ -27,8 +27,8 @@ final class CullingSession {
     private var baseSnapshotByItemID: [String: BaseSnapshot] = [:]
     private var conflictsByItemID: [String: MetadataConflict] = [:]
     private var thumbnailAspectRatios: [String: CGFloat] = [:]
-    private var isFlushingPendingWrites: Bool = false
-    private var hasPendingFlushRequest: Bool = false
+    private(set) var isFlushingPendingWrites: Bool = false
+    private var flushContinuations: [CheckedContinuation<Void, Never>] = []
     var isAccessingFolder: Bool {
         folderAccessService.isAccessingFolder
     }
@@ -745,6 +745,10 @@ final class CullingSession {
         return .synced
     }
 
+    var syncErrorItemsCount: Int {
+        items.filter { syncState(for: $0) == .syncError }.count
+    }
+
     var syncSummaryBadgeText: String {
         let conflicts = conflictedItemsCount
         if conflicts > 0 {
@@ -754,7 +758,7 @@ final class CullingSession {
         if pending > 0 {
             return "\(pending) Pending"
         }
-        let errors = items.filter { syncState(for: $0) == .syncError }.count
+        let errors = syncErrorItemsCount
         if errors > 0 {
             return "\(errors) Error\(errors == 1 ? "" : "s")"
         }
@@ -763,17 +767,22 @@ final class CullingSession {
 
     func flushPendingWrites() async {
         guard !isFlushingPendingWrites else {
-            hasPendingFlushRequest = true
+            await withCheckedContinuation { continuation in
+                flushContinuations.append(continuation)
+            }
             return
         }
         isFlushingPendingWrites = true
         defer {
             isFlushingPendingWrites = false
-            hasPendingFlushRequest = false
+            let continuations = flushContinuations
+            flushContinuations.removeAll()
+            for c in continuations {
+                c.resume()
+            }
         }
 
         while !Task.isCancelled {
-            hasPendingFlushRequest = false
             let pending = items.filter { syncState(for: $0) == .pendingWrite }
             guard !pending.isEmpty else { break }
 
@@ -798,6 +807,7 @@ final class CullingSession {
     }
 
     func retryFailedWrites() async {
+        lastErrorMessage = nil
         let failedItems = items.filter { syncState(for: $0) == .syncError }
         guard !failedItems.isEmpty else { return }
 
@@ -805,7 +815,6 @@ final class CullingSession {
             syncStateByItemID[item.id] = .pendingWrite
             metadataSyncStore.updateSyncState(.pendingWrite, for: item.id)
         }
-        lastErrorMessage = nil
         await flushPendingWrites()
     }
 
@@ -908,7 +917,7 @@ final class CullingSession {
                 }
             }
 
-            let writtenTargets = try SidecarCodec.write(curation: pendingCuration, for: item)
+            let writtenTargets = try await SidecarCodec.write(curation: pendingCuration, for: item)
 
             if let primaryTarget = writtenTargets.first, let writtenData = try? Data(contentsOf: primaryTarget) {
                 let newDigest = SidecarCodec.computeDigest(for: writtenData)
@@ -963,7 +972,7 @@ final class CullingSession {
             resolvedMetadata = chosen
 
             let writtenTargets = try await Task.detached(priority: .utility) {
-                try SidecarCodec.write(curation: chosen, for: item)
+                try await SidecarCodec.write(curation: chosen, for: item)
             }.value
 
             let primaryTarget = writtenTargets.first ?? SidecarCodec.resolveSidecarReadURL(for: item)

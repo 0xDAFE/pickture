@@ -436,15 +436,14 @@ struct ContentView: View {
                 } else if session.conflictedItemsCount > 0 {
                     Text("\(session.conflictedItemsCount)")
                         .font(.caption2.weight(.bold))
+                } else if session.syncSummaryState == .syncError {
+                    if session.syncErrorItemsCount > 0 {
+                        Text("\(session.syncErrorItemsCount)")
+                            .font(.caption2.weight(.bold))
+                    }
                 } else if session.pendingWritesCount > 0 {
                     Text("\(session.pendingWritesCount)")
                         .font(.caption2.weight(.bold))
-                } else if session.syncSummaryState == .syncError {
-                    let errors = session.items.filter { session.syncState(for: $0) == .syncError }.count
-                    if errors > 0 {
-                        Text("\(errors)")
-                            .font(.caption2.weight(.bold))
-                    }
                 }
             }
             .padding(.horizontal, horizontalSizeClass == .compact ? 6 : 8)

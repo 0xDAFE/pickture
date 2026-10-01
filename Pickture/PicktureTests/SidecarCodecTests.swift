@@ -307,7 +307,7 @@ struct SidecarCodecTests {
     }
 
     @Test("SidecarCodec.write persists curation to <basename>.xmp and updates existing <filename>.<ext>.xmp on disk")
-    func sidecarCodecWriteDualConventionDiskPersistence() throws {
+    func sidecarCodecWriteDualConventionDiskPersistence() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -346,7 +346,7 @@ struct SidecarCodecTests {
         try Data(externalCaptureOneXML.utf8).write(to: rawExtXmp)
 
         let newCuration = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green)
-        let writtenURLs = try SidecarCodec.write(curation: newCuration, for: pairItem)
+        let writtenURLs = try await SidecarCodec.write(curation: newCuration, for: pairItem)
 
         let basenameXmp = root.appendingPathComponent("DSC0800.xmp")
         #expect(writtenURLs.contains { $0.standardizedFileURL.path == basenameXmp.standardizedFileURL.path })
@@ -395,7 +395,7 @@ struct SidecarCodecTests {
     }
 
     @Test("SidecarCodec.write supports direct sequential overwrites on existing sidecar without auxiliary file collision")
-    func sidecarCodecWriteDirectSequentialOverwritesWithoutAuxiliaryCollision() throws {
+    func sidecarCodecWriteDirectSequentialOverwritesWithoutAuxiliaryCollision() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -418,7 +418,7 @@ struct SidecarCodecTests {
 
         // First write: creates TEST001.xmp
         let curation1 = CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .none)
-        let written1 = try SidecarCodec.write(curation: curation1, for: item)
+        let written1 = try await SidecarCodec.write(curation: curation1, for: item)
         #expect(written1.map(\.standardizedFileURL.path).contains(xmpURL.standardizedFileURL.path))
 
         let parsed1 = try SidecarCodec.parse(data: try Data(contentsOf: xmpURL))
@@ -426,7 +426,7 @@ struct SidecarCodecTests {
 
         // Second write (direct sequential overwrite on existing file)
         let curation2 = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .red)
-        let written2 = try SidecarCodec.write(curation: curation2, for: item)
+        let written2 = try await SidecarCodec.write(curation: curation2, for: item)
         #expect(written2.map(\.standardizedFileURL.path).contains(xmpURL.standardizedFileURL.path))
 
         let parsed2 = try SidecarCodec.parse(data: try Data(contentsOf: xmpURL))
@@ -434,7 +434,7 @@ struct SidecarCodecTests {
 
         // Third write (another immediate overwrite)
         let curation3 = CurationMetadata(starRating: 3, pickFlag: .rejected, colorLabel: .blue)
-        let written3 = try SidecarCodec.write(curation: curation3, for: item)
+        let written3 = try await SidecarCodec.write(curation: curation3, for: item)
         #expect(written3.map(\.standardizedFileURL.path).contains(xmpURL.standardizedFileURL.path))
 
         let parsed3 = try SidecarCodec.parse(data: try Data(contentsOf: xmpURL))

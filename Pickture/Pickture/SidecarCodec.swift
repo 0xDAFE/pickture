@@ -86,7 +86,7 @@ nonisolated enum SidecarCodec {
     // MARK: - XMP Round-Trip Serialization & Disk Persistence
 
     @discardableResult
-    static func write(curation: CurationMetadata, for item: MediaItem) throws -> [URL] {
+    static func write(curation: CurationMetadata, for item: MediaItem) async throws -> [URL] {
         let targets = resolveSidecarWriteURLs(for: item)
         let fm = FileManager.default
         for url in targets {
@@ -96,12 +96,12 @@ nonisolated enum SidecarCodec {
             if !fm.fileExists(atPath: dir.path) {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
-            try writeCoordinatedWithRetry(data: updatedData, to: url)
+            try await writeCoordinatedWithRetry(data: updatedData, to: url)
         }
         return targets
     }
 
-    static func writeCoordinatedWithRetry(data: Data, to url: URL) throws {
+    static func writeCoordinatedWithRetry(data: Data, to url: URL) async throws {
         let coordinator = NSFileCoordinator(filePresenter: nil)
 
         func attemptWrite() -> Error? {
@@ -120,8 +120,8 @@ nonisolated enum SidecarCodec {
         if let error = attemptWrite() {
             if isStaleFileHandleError(error) {
                 // Network shares (SMB/NFS) may intermittently report ESTALE (errno 70) during rapid bursts.
-                // Micro-backoff allows smbclientd to refresh its lease and invalidate stale handles.
-                Thread.sleep(forTimeInterval: 0.05)
+                // Non-blocking micro-backoff allows smbclientd to refresh its lease and invalidate stale handles.
+                try? await Task.sleep(nanoseconds: 50_000_000)
                 if let retryError = attemptWrite() {
                     let nsError = retryError as NSError
                     let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
@@ -139,12 +139,13 @@ nonisolated enum SidecarCodec {
     }
 
     static func isStaleFileHandleError(_ error: Error) -> Bool {
+        let staleCode = Int(POSIXError.Code.ESTALE.rawValue)
         let nsError = error as NSError
-        if nsError.domain == NSPOSIXErrorDomain && nsError.code == 70 {
+        if nsError.domain == NSPOSIXErrorDomain && nsError.code == staleCode {
             return true
         }
         if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
-            if underlying.domain == NSPOSIXErrorDomain && underlying.code == 70 {
+            if underlying.domain == NSPOSIXErrorDomain && underlying.code == staleCode {
                 return true
             }
         }
