@@ -602,15 +602,7 @@ final class CullingSession {
         }
         guard !itemsToLoad.isEmpty else { return }
 
-        let extracted: [(String, ExifMetadata)] = await Task.detached(priority: .utility) {
-            var results: [(String, ExifMetadata)] = []
-            for item in itemsToLoad {
-                if Task.isCancelled { break }
-                let exif = ExifHeaderExtractor.extractHeaderExif(for: item)
-                results.append((item.id, exif))
-            }
-            return results
-        }.value
+        let extracted = await ExifHeaderExtractor.extractBatch(for: itemsToLoad)
 
         for (itemID, headerExif) in extracted {
             let existing = exifByItemID[itemID] ?? metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
@@ -622,20 +614,14 @@ final class CullingSession {
     }
 
     func captureDate(for item: MediaItem) -> Date? {
-        if let dt = exifMetadata(for: item).dateTimeOriginal {
-            return dt
-        }
-        let url = item.primaryFile.url
-        if let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey]) {
-            return values.creationDate ?? values.contentModificationDate
-        }
-        return nil
+        exifMetadata(for: item).dateTimeOriginal
     }
 
     var visibleItems: [MediaItem] {
+        let needsExif = filterCriteria.isCameraModelActive || filterCriteria.isLensModelActive || sortOption.field == .captureDate
         let filtered = items.filter { item in
             let curation = curationMetadata(for: item)
-            let exif = exifMetadata(for: item)
+            let exif = needsExif ? exifMetadata(for: item) : (exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif)
             let sync = syncState(for: item)
             return filterCriteria.matches(item: item, curation: curation, exif: exif, syncState: sync)
         }
@@ -658,9 +644,9 @@ final class CullingSession {
                         return sortOption.order == .ascending ? (dA < dB) : (dA > dB)
                     }
                 case (_?, nil):
-                    return sortOption.order == .ascending
+                    return true
                 case (nil, _?):
-                    return sortOption.order != .ascending
+                    return false
                 case (nil, nil):
                     break
                 }

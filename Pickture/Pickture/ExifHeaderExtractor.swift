@@ -8,7 +8,15 @@ enum ExifHeaderExtractor {
     nonisolated static func extractHeaderExif(for item: MediaItem) -> ExifMetadata {
         if let pair = item.mediaPair {
             let rasterExif = extract(from: pair.rasterFile.url)
-            if !rasterExif.isEmpty && rasterExif.cameraModel != nil && rasterExif.dateTimeOriginal != nil {
+            let isRasterComplete = rasterExif.cameraModel != nil
+                && rasterExif.lensModel != nil
+                && rasterExif.focalLength != nil
+                && rasterExif.fNumber != nil
+                && rasterExif.exposureTime != nil
+                && !rasterExif.isoSpeedRatings.isEmpty
+                && rasterExif.dateTimeOriginal != nil
+
+            if isRasterComplete {
                 return rasterExif
             }
             // Supplement from RAW header if raster was missing information
@@ -17,6 +25,17 @@ enum ExifHeaderExtractor {
         } else {
             return extract(from: item.primaryFile.url)
         }
+    }
+
+    /// Asynchronously extracts ExifMetadata in batch off the caller's actor context.
+    nonisolated static func extractBatch(for items: [MediaItem]) async -> [(String, ExifMetadata)] {
+        var results: [(String, ExifMetadata)] = []
+        for item in items {
+            if Task.isCancelled { break }
+            let exif = extractHeaderExif(for: item)
+            results.append((item.id, exif))
+        }
+        return results
     }
 
     /// Header-only extraction from a single file URL using CGImageSourceCopyPropertiesAtIndex
@@ -28,11 +47,11 @@ enum ExifHeaderExtractor {
         ] as CFDictionary
 
         guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, options) else {
-            return extractFileDateFallback(for: fileURL)
+            return ExifMetadata()
         }
 
         guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options) as? [CFString: Any] else {
-            return extractFileDateFallback(for: fileURL)
+            return ExifMetadata()
         }
 
         var cameraModel: String?
@@ -106,12 +125,6 @@ enum ExifHeaderExtractor {
             }
         }
 
-        // 4. File-system Date Fallback if no EXIF date was present
-        if dateTimeOriginal == nil {
-            dateTimeOriginal = (try? fileURL.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey]))?.creationDate
-                ?? (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        }
-
         return ExifMetadata(
             cameraModel: cameraModel,
             lensModel: lensModel,
@@ -121,12 +134,6 @@ enum ExifHeaderExtractor {
             isoSpeedRatings: isoSpeedRatings,
             dateTimeOriginal: dateTimeOriginal
         )
-    }
-
-    private nonisolated static func extractFileDateFallback(for fileURL: URL) -> ExifMetadata {
-        let date = (try? fileURL.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey]))?.creationDate
-            ?? (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        return ExifMetadata(dateTimeOriginal: date)
     }
 
     private nonisolated static func parseDate(_ string: String) -> Date? {

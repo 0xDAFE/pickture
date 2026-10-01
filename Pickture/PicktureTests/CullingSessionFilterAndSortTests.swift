@@ -611,6 +611,29 @@ struct CullingSessionFilterAndSortTests {
         #expect(session.visibleItems.map(\.baseName) == ["LATE", "MID", "EARLY"])
     }
 
+    @Test("Capture date sorting places items with dates before items without dates in both ascending and descending orders")
+    func sortingByCaptureDateWithNilDates() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let datedURL = root.appendingPathComponent("A_DATED.JPG")
+        let undatedURL = root.appendingPathComponent("B_UNDATED.JPG")
+
+        try makeImageFileWithExif(at: datedURL, dateTimeOriginal: "2026:01:01 10:00:00")
+        try makeImageFileWithExif(at: undatedURL) // No dateTimeOriginal
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
+        try session.openFolder(at: root)
+
+        // Ascending
+        session.setSortOption(SortOption(field: .captureDate, order: .ascending))
+        #expect(session.visibleItems.first?.baseName == "A_DATED")
+
+        // Descending
+        session.setSortOption(SortOption(field: .captureDate, order: .descending))
+        #expect(session.visibleItems.first?.baseName == "A_DATED")
+    }
+
     @Test("Navigation commands adhere strictly to visibleItems after filtering and sorting")
     func navigationAdheresToVisibleItems() throws {
         let root = try makeTemporaryDirectory()
