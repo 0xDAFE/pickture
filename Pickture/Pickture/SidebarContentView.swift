@@ -93,15 +93,6 @@ struct SidebarContentView: View {
                     }
 
                     Toggle("Subfolder Mode", isOn: $session.isRecursiveSubfolderMode)
-
-                    Picker(
-                        selection: $session.previewSource
-                    ) {
-                        Text("Prefer Raster").tag(PreviewSource.preferRaster)
-                        Text("Prefer RAW").tag(PreviewSource.preferRAW)
-                    } label: {
-                        Label("PreviewSource", systemImage: "photo.stack")
-                    }
                 }
 
                 Section("Recent Folders") {
