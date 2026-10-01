@@ -158,7 +158,7 @@ struct SettingsSheetView: View {
                     }
 
                     Toggle(
-                        "Recursive SubfolderMode",
+                        "Subfolder Mode",
                         isOn: Binding(
                             get: { session.subfolderMode == .recursive },
                             set: { isRecursive in

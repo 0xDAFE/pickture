@@ -147,7 +147,7 @@ struct ContentView: View {
                     }
 
                     Toggle(
-                        "SubfolderMode (Recursive)",
+                        "Subfolder Mode",
                         isOn: Binding(
                             get: { session.subfolderMode == .recursive },
                             set: { isRecursive in
@@ -274,12 +274,12 @@ struct ContentView: View {
                 } description: {
                     Text(
                         session.subfolderMode == .immediate
-                            ? "No supported RAW, raster, or video files in this folder. Try enabling SubfolderMode to scan subdirectories."
+                            ? "No supported RAW, raster, or video files in this folder. Try enabling Subfolder Mode to scan subdirectories."
                             : "No supported RAW, raster, or video files were found in this folder or its subdirectories."
                     )
                 } actions: {
                     if session.subfolderMode == .immediate {
-                        Button("Enable SubfolderMode") {
+                        Button("Enable Subfolder Mode") {
                             try? session.setSubfolderMode(.recursive)
                         }
                         .buttonStyle(.borderedProminent)
@@ -343,11 +343,7 @@ struct ContentView: View {
             }
             return .ignored
         }
-        .navigationTitle(
-            session.currentFolderURL == nil
-                ? "Pickture"
-                : "\(session.currentFolderURL!.lastPathComponent) (\(session.viewMode == .grid ? "Grid" : "Filmstrip"))"
-        )
+        .navigationTitle(session.currentFolderURL?.lastPathComponent ?? "Pickture")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if horizontalSizeClass == .compact {
@@ -640,7 +636,7 @@ struct ContentView: View {
                     : "folder"
             )
         }
-        .help("Toggle recursive SubfolderMode")
+        .help("Toggle recursive Subfolder Mode")
 
         Button {
             isSettingsPresented = true
