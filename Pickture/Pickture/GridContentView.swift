@@ -90,14 +90,38 @@ struct GridContentView: View {
                     ForEach(session.visibleItems) { item in
                         MediaGridCellView(
                             item: item,
+                            curation: session.curationMetadata(for: item),
+                            syncState: session.syncState(for: item),
                             isSelected: session.selectedItemID == item.id,
                             isRecursiveMode: session.subfolderMode == .recursive,
                             previewSource: session.previewSource,
                             cacheGeneration: session.cacheGeneration,
-                            session: session
-                        ) {
-                            session.selectedItemID = item.id
-                        }
+                            cachedThumbnail: session.cachedThumbnailImage(for: item, maxPixelSize: 360),
+                            aspectRatio: session.thumbnailAspectRatio(for: item),
+                            metadataDeckHeight: session.gridMetadataDeckHeight,
+                            onSelect: {
+                                session.selectedItemID = item.id
+                            },
+                            onDoubleClick: {
+                                session.selectedItemID = item.id
+                                session.setViewMode(.filmstrip)
+                            },
+                            onResolveConflict: {
+                                session.activeConflictItemID = item.id
+                                session.isConflictSheetPresented = true
+                            },
+                            onCurationAction: { action in
+                                session.applyCurationAction(action, to: item)
+                            },
+                            loadThumbnail: { [session, item] in
+                                guard let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) else { return nil }
+                                return await PreviewLoader.decodeCGImageAsync(from: data)
+                            },
+                            onThumbnailLoaded: { [session, item] image in
+                                session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
+                            }
+                        )
+                        .equatable()
                         .id(item.id)
                     }
                 }

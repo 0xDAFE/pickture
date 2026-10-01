@@ -171,31 +171,15 @@ final class CullingSession {
         dockPosition: FilmstripDockPosition,
         mediaKind: MediaKind? = nil
     ) -> CGSize {
-        let safeRatio: CGFloat
-        if aspectRatio.isNaN || aspectRatio.isInfinite || aspectRatio <= 0 {
-            safeRatio = (mediaKind == .video) ? 1.777 : 1.5
-        } else {
-            safeRatio = aspectRatio
-        }
-
-        switch dockPosition {
-        case .bottom:
-            let height: CGFloat = 72.0
-            let unroundedWidth = height * safeRatio
-            let clampedWidth = min(128.0, max(48.0, unroundedWidth.rounded()))
-            return CGSize(width: clampedWidth, height: height)
-
-        case .right:
-            let width: CGFloat = 112.0
-            let divisor = max(0.1, safeRatio)
-            let unroundedHeight = width / divisor
-            let clampedHeight = min(150.0, max(64.0, unroundedHeight.rounded()))
-            return CGSize(width: width, height: clampedHeight)
-        }
+        CullingLayoutCalculator.filmstripThumbnailSize(
+            aspectRatio: aspectRatio,
+            dockPosition: dockPosition,
+            mediaKind: mediaKind ?? .photo
+        )
     }
 
     func fallbackAspectRatio(for kind: MediaKind) -> CGFloat {
-        kind == .video ? 1.777 : 1.5
+        CullingLayoutCalculator.fallbackAspectRatio(for: kind)
     }
 
     func fallbackAspectRatio(for item: MediaItem) -> CGFloat {
@@ -238,10 +222,7 @@ final class CullingSession {
     /// The standard 4:3 stage ceiling provides balanced vertical headroom for both landscape
     /// and portrait media without layout explosion.
     func gridStageHeight(for columnWidth: CGFloat) -> CGFloat {
-        guard !columnWidth.isNaN, !columnWidth.isInfinite, columnWidth > 0 else {
-            return 140.0
-        }
-        return (columnWidth * 0.75).rounded()
+        CullingLayoutCalculator.gridStageHeight(for: columnWidth)
     }
 
     /// Computes the exact silhouette size of a media item floating inside the bounded Image Stage,
@@ -252,28 +233,12 @@ final class CullingSession {
         stageHeight: CGFloat,
         mediaKind: MediaKind? = nil
     ) -> CGSize {
-        let safeRatio: CGFloat
-        if aspectRatio.isNaN || aspectRatio.isInfinite || aspectRatio <= 0 {
-            safeRatio = fallbackAspectRatio(for: mediaKind ?? .photo)
-        } else {
-            safeRatio = aspectRatio
-        }
-
-        let safeStageWidth = max(1.0, stageWidth)
-        let safeStageHeight = max(1.0, stageHeight)
-        let stageRatio = safeStageWidth / safeStageHeight
-
-        if safeRatio >= stageRatio {
-            // Wider than or equal to stage ceiling: constrained by stageWidth
-            let width = safeStageWidth
-            let height = width / safeRatio
-            return CGSize(width: width, height: height)
-        } else {
-            // Taller than stage ceiling: constrained by stageHeight
-            let height = safeStageHeight
-            let width = height * safeRatio
-            return CGSize(width: width, height: height)
-        }
+        CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: aspectRatio,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: mediaKind ?? .photo
+        )
     }
 
     /// Convenience method to compute the silhouette size for a MediaItem given the column width.
