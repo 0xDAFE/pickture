@@ -17,6 +17,8 @@ struct SettingsSheetView: View {
     }
 
     var body: some View {
+        @Bindable var session = session
+
         NavigationStack {
             Form {
                 Section {
@@ -76,29 +78,57 @@ struct SettingsSheetView: View {
                 }
 
                 Section {
-                    Picker(
-                        "Filmstrip Dock Position",
-                        selection: Binding(
-                            get: { session.filmstripDockPosition },
-                            set: { session.setFilmstripDockPosition($0) }
-                        )
-                    ) {
+                    Picker("Filmstrip Dock Position", selection: $session.filmstripDockPosition) {
                         ForEach(FilmstripDockPosition.allCases, id: \.self) { pos in
                             Text(pos.displayName).tag(pos)
                         }
                     }
 
-                    Toggle(
-                        "Border Tap Navigation",
-                        isOn: Binding(
-                            get: { session.isBorderTapNavigationEnabled },
-                            set: { _ in session.toggleBorderTapNavigation() }
-                        )
-                    )
+                    Toggle("Border Tap Navigation", isOn: $session.isBorderTapNavigationEnabled)
                 } header: {
                     Text("Filmstrip & Touch")
                 } footer: {
                     Text("When Border Tap Navigation is enabled, tapping within the left or right outer border zones (min(width * 0.12, 64pt)) navigates to the previous or next item. Disable to prevent accidental navigation from hand/thumb grip.")
+                }
+
+                Section {
+                    Toggle("SwipeMode Culling", isOn: $session.isSwipeModeEnabled)
+
+                    NavigationLink {
+                        SwipeActionDetailEditorView(
+                            title: "Swipe Right Action",
+                            direction: .right,
+                            action: $session.swipeRightAction
+                        )
+                    } label: {
+                        HStack {
+                            Label("Swipe Right", systemImage: "arrow.right.circle.fill")
+                                .foregroundStyle(.green)
+                            Spacer()
+                            Text(session.swipeRightAction.displayName)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    NavigationLink {
+                        SwipeActionDetailEditorView(
+                            title: "Swipe Left Action",
+                            direction: .left,
+                            action: $session.swipeLeftAction
+                        )
+                    } label: {
+                        HStack {
+                            Label("Swipe Left", systemImage: "arrow.left.circle.fill")
+                                .foregroundStyle(.red)
+                            Spacer()
+                            Text(session.swipeLeftAction.displayName)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("SwipeMode Culling")
+                } footer: {
+                    Text("Swipe left or right on the central canvas in Filmstrip View to rapidly execute single or compound curation actions (e.g. Picked + 5 Stars or Rejected + Red Label) with auto-advancement. Pinch to zoom (1x – 4x) remains active; panning when zoomed will not trigger a swipe. Undo anytime with ⌘Z.")
                 }
 
                 Section {
@@ -114,13 +144,7 @@ struct SettingsSheetView: View {
                         }
                     }
 
-                    Toggle(
-                        "Auto-Advance Selection (A)",
-                        isOn: Binding(
-                            get: { session.isAutoAdvanceEnabled },
-                            set: { _ in session.toggleAutoAdvance() }
-                        )
-                    )
+                    Toggle("Auto-Advance Selection (A)", isOn: $session.isAutoAdvanceEnabled)
                 } header: {
                     Text("Shortcuts & Auto-Advance")
                 } footer: {
@@ -128,13 +152,7 @@ struct SettingsSheetView: View {
                 }
 
                 Section("Preview & Discovery Defaults") {
-                    Picker(
-                        "Default PreviewSource",
-                        selection: Binding(
-                            get: { session.previewSource },
-                            set: { session.previewSource = $0 }
-                        )
-                    ) {
+                    Picker("Default PreviewSource", selection: $session.previewSource) {
                         Text("Prefer Raster (JPEG/HEIC)").tag(PreviewSource.preferRaster)
                         Text("Prefer RAW Embedded Preview").tag(PreviewSource.preferRAW)
                     }
@@ -163,3 +181,177 @@ struct SettingsSheetView: View {
         .frame(minWidth: 440, minHeight: 380)
     }
 }
+
+// MARK: - Swipe Action Detail Editor View
+
+private enum PickFlagSelection: Hashable {
+    case unchanged
+    case flag(PickFlag)
+}
+
+private enum StarRatingSelection: Hashable {
+    case unchanged
+    case rating(Int)
+}
+
+private enum ColorLabelSelection: Hashable {
+    case unchanged
+    case color(ColorLabel)
+}
+
+struct SwipeActionDetailEditorView: View {
+    let title: String
+    let direction: SwipeDirection
+    @Binding var action: CurationAction
+
+    private var pickFlagBinding: Binding<PickFlagSelection> {
+        Binding(
+            get: {
+                if let flag = action.pickFlagValue {
+                    return .flag(flag)
+                }
+                return .unchanged
+            },
+            set: { newSelection in
+                let flag: PickFlag? = switch newSelection {
+                case .unchanged: nil
+                case .flag(let f): f
+                }
+                action = CurationAction.make(
+                    starRating: action.starRatingValue,
+                    pickFlag: flag,
+                    colorLabel: action.colorLabelValue
+                )
+            }
+        )
+    }
+
+    private var starRatingBinding: Binding<StarRatingSelection> {
+        Binding(
+            get: {
+                if let rating = action.starRatingValue {
+                    return .rating(rating.value)
+                }
+                return .unchanged
+            },
+            set: { newSelection in
+                let rating: StarRating? = switch newSelection {
+                case .unchanged: nil
+                case .rating(let r): StarRating(r)
+                }
+                action = CurationAction.make(
+                    starRating: rating,
+                    pickFlag: action.pickFlagValue,
+                    colorLabel: action.colorLabelValue
+                )
+            }
+        )
+    }
+
+    private var colorLabelBinding: Binding<ColorLabelSelection> {
+        Binding(
+            get: {
+                if let label = action.colorLabelValue {
+                    return .color(label)
+                }
+                return .unchanged
+            },
+            set: { newSelection in
+                let label: ColorLabel? = switch newSelection {
+                case .unchanged: nil
+                case .color(let c): c
+                }
+                action = CurationAction.make(
+                    starRating: action.starRatingValue,
+                    pickFlag: action.pickFlagValue,
+                    colorLabel: label
+                )
+            }
+        )
+    }
+
+    var body: some View {
+        Form {
+            Section("Current Configuration") {
+                HStack {
+                    Text("Action Summary")
+                    Spacer()
+                    Text(action.displayName)
+                        .font(.headline)
+                        .foregroundStyle(direction == .right ? .green : .red)
+                }
+
+                HStack {
+                    Text("Action Badge Preview")
+                    Spacer()
+                    SwipeActionBadgeView(action: action, direction: direction)
+                        .scaleEffect(0.8)
+                }
+            }
+
+            Section("Quick Presets") {
+                if direction == .right {
+                    Button("Default: Picked") {
+                        action = .setPickFlag(.picked)
+                    }
+                    Button("Compound: Picked + 5 Stars") {
+                        action = .compound(starRating: 5, pickFlag: .picked)
+                    }
+                    Button("Single: 5 Stars") {
+                        action = .setStarRating(5)
+                    }
+                    Button("Compound: Picked + Green Label") {
+                        action = .compound(pickFlag: .picked, colorLabel: .green)
+                    }
+                } else {
+                    Button("Default: Rejected") {
+                        action = .setPickFlag(.rejected)
+                    }
+                    Button("Compound: Rejected + Red Label") {
+                        action = .compound(pickFlag: .rejected, colorLabel: .red)
+                    }
+                    Button("Single: Red Label") {
+                        action = .setColorLabel(.red)
+                    }
+                    Button("Single: Unflagged") {
+                        action = .setPickFlag(.unflagged)
+                    }
+                }
+            }
+
+            Section("Attributes (Combine for Compound Action)") {
+                Picker("Pick Flag", selection: pickFlagBinding) {
+                    Text("-- (Unchanged)").tag(PickFlagSelection.unchanged)
+                    Text("Picked (P)").tag(PickFlagSelection.flag(.picked))
+                    Text("Rejected (X)").tag(PickFlagSelection.flag(.rejected))
+                    Text("Unflagged (U)").tag(PickFlagSelection.flag(.unflagged))
+                }
+
+                Picker("Star Rating", selection: starRatingBinding) {
+                    Text("-- (Unchanged)").tag(StarRatingSelection.unchanged)
+                    Text("0 Stars (Unrated)").tag(StarRatingSelection.rating(0))
+                    ForEach(1...5, id: \.self) { star in
+                        Text("\(star) Star\(star == 1 ? "" : "s")").tag(StarRatingSelection.rating(star))
+                    }
+                }
+
+                Picker("Color Label", selection: colorLabelBinding) {
+                    Text("-- (Unchanged)").tag(ColorLabelSelection.unchanged)
+                    Text("Clear Color (None)").tag(ColorLabelSelection.color(.none))
+                    ForEach(ColorLabel.allCases.filter { $0 != .none }, id: \.self) { label in
+                        HStack {
+                            Circle()
+                                .fill(label.displayColor)
+                                .frame(width: 10, height: 10)
+                            Text(label.rawValue.capitalized)
+                        }
+                        .tag(ColorLabelSelection.color(label))
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle(title)
+    }
+}
+

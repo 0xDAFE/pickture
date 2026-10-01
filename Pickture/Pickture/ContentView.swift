@@ -200,6 +200,9 @@ struct ContentView: View {
         }
         .focusable()
         .onKeyPress(phases: .down) { press in
+            if press.modifiers.contains(.command) && press.characters.lowercased() == "z" {
+                if session.undoLastSwipe() { return .handled }
+            }
             if session.handleShortcutKey(press.characters) {
                 return .handled
             }
@@ -234,7 +237,7 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
                 .help("Toggle between Grid View (G) and Filmstrip View (E or Space)")
 
-                // Filmstrip Dock Position (when in Filmstrip view)
+                // Filmstrip Controls (when in Filmstrip view)
                 if session.viewMode == .filmstrip {
                     Menu {
                         Button {
@@ -265,6 +268,26 @@ struct ContentView: View {
                         .foregroundStyle(session.isBorderTapNavigationEnabled ? Color.accentColor : Color.secondary)
                     }
                     .help("Toggle BorderTapNavigation edge touch zones")
+
+                    Button {
+                        session.toggleSwipeMode()
+                    } label: {
+                        Label(
+                            session.isSwipeModeEnabled ? "SwipeMode: On" : "SwipeMode: Off",
+                            systemImage: session.isSwipeModeEnabled ? "hand.draw.fill" : "hand.draw"
+                        )
+                        .foregroundStyle(session.isSwipeModeEnabled ? Color.accentColor : Color.primary)
+                    }
+                    .help("Toggle SwipeMode Culling (Swipe left/right to cull)")
+
+                    Button {
+                        session.undoLastSwipe()
+                    } label: {
+                        Label("Undo Swipe", systemImage: "arrow.uturn.backward")
+                    }
+                    .keyboardShortcut("z", modifiers: .command)
+                    .disabled(!session.canUndoSwipe)
+                    .help("Undo Last Swipe (⌘Z)")
                 }
 
                 // PreviewSource Toggle Button (J)

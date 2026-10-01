@@ -55,7 +55,7 @@ struct FilmstripView: View {
                         .ignoresSafeArea()
 
                     if currentItem.kind == .video {
-                        FilmstripVideoCanvasView(url: currentItem.primaryFile.url)
+                        FilmstripVideoCanvasView(url: currentItem.primaryFile.url, item: currentItem, session: session)
                             .id(currentItem.id)
                     } else {
                         FilmstripImageCanvasView(item: currentItem, session: session)
@@ -350,6 +350,71 @@ struct FilmstripView: View {
 
 // MARK: - Filmstrip Image Canvas View
 
+// MARK: - Swipe Action Badge View
+
+struct SwipeActionBadgeView: View {
+    let action: CurationAction
+    let direction: SwipeDirection
+
+    private var badgeColor: Color {
+        switch direction {
+        case .right:
+            return .green
+        case .left:
+            return .red
+        }
+    }
+
+    private var iconName: String {
+        if let flag = action.pickFlagValue {
+            switch flag {
+            case .picked: return "flag.fill"
+            case .rejected: return "xmark"
+            case .unflagged: return "flag.slash"
+            }
+        }
+        if let star = action.starRatingValue, star.value > 0 {
+            return "star.fill"
+        }
+        if let label = action.colorLabelValue, label != .none {
+            return "tag.fill"
+        }
+        return direction == .right ? "checkmark.circle.fill" : "xmark.circle.fill"
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: iconName)
+                .font(.title2.weight(.bold))
+                .foregroundStyle(badgeColor)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(direction == .right ? "SWIPE RIGHT" : "SWIPE LEFT")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .tracking(1)
+
+                Text(action.displayName)
+                    .font(.headline.weight(.heavy))
+                    .foregroundStyle(.white)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.black.opacity(0.85))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(badgeColor, lineWidth: 2.5)
+                )
+                .shadow(color: badgeColor.opacity(0.5), radius: 14, x: 0, y: 4)
+        )
+    }
+}
+
+// MARK: - Filmstrip Image Canvas View
+
 struct FilmstripImageCanvasView: View {
     let item: MediaItem
     let session: CullingSession
@@ -359,6 +424,7 @@ struct FilmstripImageCanvasView: View {
     @State private var pinchScale: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
     @State private var dragOffset: CGSize = .zero
+    @State private var swipeTranslation: CGFloat = 0.0
     @State private var isLoading = false
 
     private var effectiveScale: CGFloat {
@@ -373,6 +439,9 @@ struct FilmstripImageCanvasView: View {
 
     var body: some View {
         GeometryReader { geo in
+            let threshold = min(max(80.0, geo.size.width * 0.22), 140.0)
+            let isSwipeActive = session.isSwipeModeEnabled && effectiveScale <= 1.0
+
             ZStack {
                 Color.clear
 
@@ -382,13 +451,39 @@ struct FilmstripImageCanvasView: View {
                         .scaledToFit()
                         .scaleEffect(effectiveScale)
                         .offset(
-                            x: panOffset.width + dragOffset.width,
+                            x: panOffset.width + dragOffset.width + (isSwipeActive ? swipeTranslation : 0),
                             y: panOffset.height + dragOffset.height
+                        )
+                        .rotationEffect(
+                            Angle.degrees(
+                                isSwipeActive
+                                    ? Double(min(12.0, max(-12.0, swipeTranslation / 25.0)))
+                                    : 0
+                            )
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if isLoading {
                     ProgressView()
                         .tint(.white)
+                }
+
+                // Overlay action badge when swiping horizontally at 1.0x zoom
+                if isSwipeActive {
+                    if swipeTranslation > 20 {
+                        let progress = min(1.0, (swipeTranslation - 20) / max(1.0, threshold - 20))
+                        SwipeActionBadgeView(action: session.swipeRightAction, direction: .right)
+                            .opacity(Double(progress))
+                            .scaleEffect(0.85 + 0.15 * progress)
+                            .padding(.top, 40)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    } else if swipeTranslation < -20 {
+                        let progress = min(1.0, (-swipeTranslation - 20) / max(1.0, threshold - 20))
+                        SwipeActionBadgeView(action: session.swipeLeftAction, direction: .left)
+                            .opacity(Double(progress))
+                            .scaleEffect(0.85 + 0.15 * progress)
+                            .padding(.top, 40)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    }
                 }
             }
             .contentShape(Rectangle())
@@ -411,6 +506,9 @@ struct FilmstripImageCanvasView: View {
                 MagnifyGesture()
                     .onChanged { value in
                         pinchScale = value.magnification
+                        if swipeTranslation != 0 {
+                            swipeTranslation = 0
+                        }
                     }
                     .onEnded { value in
                         zoomScale = min(4.0, max(1.0, zoomScale * value.magnification))
@@ -421,12 +519,16 @@ struct FilmstripImageCanvasView: View {
                         }
                     }
             )
-            // Pan gesture with boundary clamping when zoomed
+            // Pan gesture when zoomed (> 1.0x) OR Swipe curation when at 1.0x
             .simultaneousGesture(
                 DragGesture()
                     .onChanged { value in
                         if effectiveScale > 1.0 {
+                            // Zoomed: inspect focus sharpness by panning
                             dragOffset = value.translation
+                        } else if session.isSwipeModeEnabled && pinchScale == 1.0 {
+                            // 1.0x zoom: swipe curation
+                            swipeTranslation = value.translation.width
                         }
                     }
                     .onEnded { value in
@@ -438,6 +540,26 @@ struct FilmstripImageCanvasView: View {
                             panOffset.width = min(maxPanX, max(-maxPanX, newX))
                             panOffset.height = min(maxPanY, max(-maxPanY, newY))
                             dragOffset = .zero
+                        } else if session.isSwipeModeEnabled && pinchScale == 1.0 {
+                            if value.translation.width >= threshold {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = geo.size.width + 100
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.executeSwipe(.right, for: item)
+                            } else if value.translation.width <= -threshold {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = -geo.size.width - 100
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.executeSwipe(.left, for: item)
+                            } else {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                    swipeTranslation = 0
+                                }
+                            }
                         }
                     }
             )
@@ -456,26 +578,94 @@ struct FilmstripImageCanvasView: View {
 
 struct FilmstripVideoCanvasView: View {
     let url: URL
+    var item: MediaItem? = nil
+    var session: CullingSession? = nil
+
     @State private var player: AVPlayer?
+    @State private var swipeTranslation: CGFloat = 0.0
 
     var body: some View {
-        Group {
-            if let player {
-                VideoPlayer(player: player)
-                    .onDisappear {
-                        player.pause()
+        GeometryReader { geo in
+            let threshold = min(max(80.0, geo.size.width * 0.22), 140.0)
+            let isSwipeActive = (session?.isSwipeModeEnabled == true) && item != nil
+
+            ZStack {
+                Group {
+                    if let player {
+                        VideoPlayer(player: player)
+                            .onDisappear {
+                                player.pause()
+                            }
+                    } else {
+                        ProgressView()
+                            .tint(.white)
                     }
-            } else {
-                ProgressView()
-                    .tint(.white)
+                }
+                .offset(x: isSwipeActive ? swipeTranslation : 0)
+                .rotationEffect(
+                    Angle.degrees(
+                        isSwipeActive
+                            ? Double(min(12.0, max(-12.0, swipeTranslation / 25.0)))
+                            : 0
+                    )
+                )
+
+                if isSwipeActive, let session {
+                    if swipeTranslation > 20 {
+                        let progress = min(1.0, (swipeTranslation - 20) / max(1.0, threshold - 20))
+                        SwipeActionBadgeView(action: session.swipeRightAction, direction: .right)
+                            .opacity(Double(progress))
+                            .scaleEffect(0.85 + 0.15 * progress)
+                            .padding(.top, 40)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    } else if swipeTranslation < -20 {
+                        let progress = min(1.0, (-swipeTranslation - 20) / max(1.0, threshold - 20))
+                        SwipeActionBadgeView(action: session.swipeLeftAction, direction: .left)
+                            .opacity(Double(progress))
+                            .scaleEffect(0.85 + 0.15 * progress)
+                            .padding(.top, 40)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    }
+                }
             }
-        }
-        .onAppear {
-            player = AVPlayer(url: url)
-        }
-        .onDisappear {
-            player?.pause()
-            player = nil
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture()
+                    .onChanged { value in
+                        if isSwipeActive {
+                            swipeTranslation = value.translation.width
+                        }
+                    }
+                    .onEnded { value in
+                        guard isSwipeActive, let session, let item else { return }
+                        if value.translation.width >= threshold {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                swipeTranslation = geo.size.width + 100
+                            } completion: {
+                                swipeTranslation = 0
+                            }
+                            session.executeSwipe(.right, for: item)
+                        } else if value.translation.width <= -threshold {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                swipeTranslation = -geo.size.width - 100
+                            } completion: {
+                                swipeTranslation = 0
+                            }
+                            session.executeSwipe(.left, for: item)
+                        } else {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                swipeTranslation = 0
+                            }
+                        }
+                    }
+            )
+            .onAppear {
+                player = AVPlayer(url: url)
+            }
+            .onDisappear {
+                player?.pause()
+                player = nil
+            }
         }
     }
 }

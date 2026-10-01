@@ -40,6 +40,14 @@ final class CullingSession {
     var shortcutProfileKind: ShortcutProfileKind = .lightroom
     var customShortcutMappings: [String: SessionCommand] = [:]
     var isAutoAdvanceEnabled: Bool = false
+    var isSwipeModeEnabled: Bool = false
+    var swipeRightAction: CurationAction = .setPickFlag(.picked)
+    var swipeLeftAction: CurationAction = .setPickFlag(.rejected)
+    private(set) var swipeHistory: [SwipeRecord] = []
+
+    var canUndoSwipe: Bool {
+        !swipeHistory.isEmpty
+    }
 
     var activeShortcutProfile: ShortcutProfile {
         switch shortcutProfileKind {
@@ -89,6 +97,22 @@ final class CullingSession {
 
     func toggleBorderTapNavigation() {
         isBorderTapNavigationEnabled.toggle()
+    }
+
+    func toggleSwipeMode() {
+        isSwipeModeEnabled.toggle()
+    }
+
+    func setSwipeMode(_ enabled: Bool) {
+        isSwipeModeEnabled = enabled
+    }
+
+    func setSwipeRightAction(_ action: CurationAction) {
+        swipeRightAction = action
+    }
+
+    func setSwipeLeftAction(_ action: CurationAction) {
+        swipeLeftAction = action
     }
 
     func borderTapZoneWidth(for containerWidth: CGFloat) -> CGFloat {
@@ -323,6 +347,17 @@ final class CullingSession {
         case .toggleBorderTapNavigation:
             toggleBorderTapNavigation()
             return true
+
+        case .toggleSwipeMode:
+            toggleSwipeMode()
+            return true
+
+        case .setSwipeMode(let enabled):
+            setSwipeMode(enabled)
+            return true
+
+        case .undoLastSwipe:
+            return undoLastSwipe()
         }
     }
 
@@ -334,7 +369,7 @@ final class CullingSession {
         return executeCommand(command)
     }
 
-    func applyCurationAction(_ action: CurationAction, to item: MediaItem) {
+    func applyCurationAction(_ action: CurationAction, to item: MediaItem, shouldAutoAdvance: Bool = true) {
         var current = curationMetadata(for: item)
         switch action {
         case .starRating(let rating):
@@ -349,9 +384,40 @@ final class CullingSession {
             if let label { current.colorLabel = label }
         }
         updateCurationMetadata(current, for: item)
-        if isAutoAdvanceEnabled && (selectedItemID == nil || selectedItemID == item.id) {
+        if shouldAutoAdvance && isAutoAdvanceEnabled && (selectedItemID == nil || selectedItemID == item.id) {
             selectNextItem()
         }
+    }
+
+    @discardableResult
+    func executeSwipe(_ direction: SwipeDirection) -> Bool {
+        guard let item = selectedItem else { return false }
+        return executeSwipe(direction, for: item)
+    }
+
+    @discardableResult
+    func executeSwipe(_ direction: SwipeDirection, for item: MediaItem) -> Bool {
+        let action = (direction == .right) ? swipeRightAction : swipeLeftAction
+        let prev = curationMetadata(for: item)
+        applyCurationAction(action, to: item, shouldAutoAdvance: false)
+        let record = SwipeRecord(
+            itemID: item.id,
+            previousMetadata: prev,
+            appliedAction: action,
+            direction: direction
+        )
+        swipeHistory.append(record)
+        selectNextItem()
+        return true
+    }
+
+    @discardableResult
+    func undoLastSwipe() -> Bool {
+        guard let last = swipeHistory.popLast() else { return false }
+        guard let item = items.first(where: { $0.id == last.itemID }) else { return false }
+        updateCurationMetadata(last.previousMetadata, for: item)
+        selectedItemID = last.itemID
+        return true
     }
 
     var formattedCacheUsage: String {

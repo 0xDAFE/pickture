@@ -354,6 +354,33 @@ nonisolated enum FilmstripDockPosition: String, Codable, CaseIterable, Hashable,
     }
 }
 
+nonisolated enum SwipeDirection: String, Codable, CaseIterable, Hashable, Sendable {
+    case left
+    case right
+}
+
+nonisolated struct SwipeRecord: Hashable, Codable, Sendable {
+    public let itemID: String
+    public let previousMetadata: CurationMetadata
+    public let appliedAction: CurationAction
+    public let direction: SwipeDirection
+    public let timestamp: Date
+
+    public init(
+        itemID: String,
+        previousMetadata: CurationMetadata,
+        appliedAction: CurationAction,
+        direction: SwipeDirection,
+        timestamp: Date = Date()
+    ) {
+        self.itemID = itemID
+        self.previousMetadata = previousMetadata
+        self.appliedAction = appliedAction
+        self.direction = direction
+        self.timestamp = timestamp
+    }
+}
+
 nonisolated enum CurationAction: Hashable, Codable, Sendable {
     case starRating(StarRating)
     case pickFlag(PickFlag)
@@ -371,6 +398,73 @@ nonisolated enum CurationAction: Hashable, Codable, Sendable {
     public static func setColorLabel(_ label: ColorLabel) -> CurationAction {
         .colorLabel(label)
     }
+
+    public var starRatingValue: StarRating? {
+        switch self {
+        case .starRating(let r): return r
+        case .compound(let r, _, _): return r
+        default: return nil
+        }
+    }
+
+    public var pickFlagValue: PickFlag? {
+        switch self {
+        case .pickFlag(let f): return f
+        case .compound(_, let f, _): return f
+        default: return nil
+        }
+    }
+
+    public var colorLabelValue: ColorLabel? {
+        switch self {
+        case .colorLabel(let l): return l
+        case .compound(_, _, let l): return l
+        default: return nil
+        }
+    }
+
+    public var displayName: String {
+        var parts: [String] = []
+        if let flag = pickFlagValue {
+            switch flag {
+            case .picked: parts.append("Picked")
+            case .rejected: parts.append("Rejected")
+            case .unflagged: parts.append("Unflagged")
+            }
+        }
+        if let star = starRatingValue {
+            if star.value > 0 {
+                parts.append("\(star.value) Star\(star.value == 1 ? "" : "s")")
+            } else {
+                parts.append("0 Stars (Unrated)")
+            }
+        }
+        if let label = colorLabelValue {
+            if label != .none {
+                parts.append("\(label.rawValue.capitalized) Label")
+            } else {
+                parts.append("No Color")
+            }
+        }
+        if parts.isEmpty {
+            return "No Action"
+        }
+        return parts.joined(separator: " + ")
+    }
+
+    public static func make(
+        starRating: StarRating? = nil,
+        pickFlag: PickFlag? = nil,
+        colorLabel: ColorLabel? = nil
+    ) -> CurationAction {
+        let nonNilCount = (starRating != nil ? 1 : 0) + (pickFlag != nil ? 1 : 0) + (colorLabel != nil ? 1 : 0)
+        if nonNilCount == 1 {
+            if let starRating { return .starRating(starRating) }
+            if let pickFlag { return .pickFlag(pickFlag) }
+            if let colorLabel { return .colorLabel(colorLabel) }
+        }
+        return .compound(starRating: starRating, pickFlag: pickFlag, colorLabel: colorLabel)
+    }
 }
 
 nonisolated enum SessionCommand: Hashable, Codable, Sendable {
@@ -386,6 +480,9 @@ nonisolated enum SessionCommand: Hashable, Codable, Sendable {
     case toggleAutoAdvance
     case setAutoAdvance(Bool)
     case toggleBorderTapNavigation
+    case toggleSwipeMode
+    case setSwipeMode(Bool)
+    case undoLastSwipe
 }
 
 nonisolated enum ShortcutProfileKind: String, Codable, CaseIterable, Hashable, Sendable {
