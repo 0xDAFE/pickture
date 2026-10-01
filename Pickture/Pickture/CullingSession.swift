@@ -28,6 +28,7 @@ final class CullingSession {
     private var conflictsByItemID: [String: MetadataConflict] = [:]
     private var thumbnailAspectRatios: [String: CGFloat] = [:]
     private var isFlushingPendingWrites: Bool = false
+    private var hasPendingFlushRequest: Bool = false
     var isAccessingFolder: Bool {
         folderAccessService.isAccessingFolder
     }
@@ -761,28 +762,51 @@ final class CullingSession {
     }
 
     func flushPendingWrites() async {
-        guard !isFlushingPendingWrites else { return }
+        guard !isFlushingPendingWrites else {
+            hasPendingFlushRequest = true
+            return
+        }
         isFlushingPendingWrites = true
-        defer { isFlushingPendingWrites = false }
+        defer {
+            isFlushingPendingWrites = false
+            hasPendingFlushRequest = false
+        }
 
-        let pending = items.filter { syncState(for: $0) == .pendingWrite }
-        for item in pending {
-            if Task.isCancelled { break }
-            if simulatedFlushDelayNanoseconds > 0 {
-                try? await Task.sleep(nanoseconds: simulatedFlushDelayNanoseconds)
-            }
-            if Task.isCancelled { break }
-            do {
-                try await flushPendingWrite(for: item.id)
-            } catch {
-                syncStateByItemID[item.id] = .syncError
-                metadataSyncStore.updateSyncState(.syncError, for: item.id)
-                let nsError = error as NSError
-                let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-                print("[DEBUG-SMB-SYNC] Flush error on \(item.displayFileName): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1)) desc=\(error.localizedDescription)")
-                lastErrorMessage = "Sync error on \(item.displayFileName): \(error.localizedDescription)"
+        while !Task.isCancelled {
+            hasPendingFlushRequest = false
+            let pending = items.filter { syncState(for: $0) == .pendingWrite }
+            guard !pending.isEmpty else { break }
+
+            for item in pending {
+                if Task.isCancelled { break }
+                if simulatedFlushDelayNanoseconds > 0 {
+                    try? await Task.sleep(nanoseconds: simulatedFlushDelayNanoseconds)
+                }
+                if Task.isCancelled { break }
+                do {
+                    try await flushPendingWrite(for: item.id)
+                } catch {
+                    syncStateByItemID[item.id] = .syncError
+                    metadataSyncStore.updateSyncState(.syncError, for: item.id)
+                    let nsError = error as NSError
+                    let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+                    print("[DEBUG-SMB-SYNC] Flush error on \(item.displayFileName): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1)) desc=\(error.localizedDescription)")
+                    lastErrorMessage = "Sync error on \(item.displayFileName): \(error.localizedDescription)"
+                }
             }
         }
+    }
+
+    func retryFailedWrites() async {
+        let failedItems = items.filter { syncState(for: $0) == .syncError }
+        guard !failedItems.isEmpty else { return }
+
+        for item in failedItems {
+            syncStateByItemID[item.id] = .pendingWrite
+            metadataSyncStore.updateSyncState(.pendingWrite, for: item.id)
+        }
+        lastErrorMessage = nil
+        await flushPendingWrites()
     }
 
     @discardableResult

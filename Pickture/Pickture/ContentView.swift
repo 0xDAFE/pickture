@@ -406,6 +406,8 @@ struct ContentView: View {
             if session.conflictedItemsCount > 0 {
                 session.activeConflictItemID = nil
                 session.isConflictSheetPresented = true
+            } else if session.syncSummaryState == .syncError {
+                Task { await session.retryFailedWrites() }
             } else if session.pendingWritesCount > 0 {
                 Task { await session.flushPendingWrites() }
             }
@@ -437,17 +439,43 @@ struct ContentView: View {
                 } else if session.pendingWritesCount > 0 {
                     Text("\(session.pendingWritesCount)")
                         .font(.caption2.weight(.bold))
+                } else if session.syncSummaryState == .syncError {
+                    let errors = session.items.filter { session.syncState(for: $0) == .syncError }.count
+                    if errors > 0 {
+                        Text("\(errors)")
+                            .font(.caption2.weight(.bold))
+                    }
                 }
             }
             .padding(.horizontal, horizontalSizeClass == .compact ? 6 : 8)
             .padding(.vertical, 4)
             .background(
                 Capsule()
-                    .fill(session.syncSummaryState == .conflicted ? Color.orange.opacity(0.2) : Color.secondary.opacity(0.12))
+                    .fill(
+                        session.syncSummaryState == .conflicted
+                            ? Color.orange.opacity(0.2)
+                            : (session.syncSummaryState == .syncError ? Color.red.opacity(0.15) : Color.secondary.opacity(0.12))
+                    )
             )
         }
         .buttonStyle(.plain)
-        .help("Sync Status — Click to resolve conflicts or flush pending writes")
+        .accessibilityLabel(syncBadgeHelpText)
+        .help(syncBadgeHelpText)
+    }
+
+    private var syncBadgeHelpText: String {
+        switch session.syncSummaryState {
+        case .conflicted:
+            return "Sync Conflicts — Click to resolve conflicts"
+        case .syncError:
+            return "Sync Error — Click to retry failed writes"
+        case .pendingWrite:
+            return "Pending Writes — Click to flush pending writes"
+        case .loading:
+            return "Syncing..."
+        case .synced:
+            return "Sync Status — All changes saved"
+        }
     }
 
     @ViewBuilder

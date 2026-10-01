@@ -440,4 +440,27 @@ struct SidecarCodecTests {
         let parsed3 = try SidecarCodec.parse(data: try Data(contentsOf: xmpURL))
         #expect(parsed3.curation == curation3)
     }
+
+    @Test("SidecarCodec classifies ESTALE (errno 70) correctly across direct and underlying error containers")
+    func classifiesESTALECorrectly() {
+        // Direct POSIX 70 error
+        let directStale = NSError(domain: NSPOSIXErrorDomain, code: 70)
+        #expect(SidecarCodec.isStaleFileHandleError(directStale))
+
+        // CocoaError 512 wrapping POSIX 70 in NSUnderlyingErrorKey
+        let wrappedStale = NSError(
+            domain: NSCocoaErrorDomain,
+            code: 512,
+            userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: 70)]
+        )
+        #expect(SidecarCodec.isStaleFileHandleError(wrappedStale))
+
+        // Non-stale POSIX error (e.g. ENOENT = 2 or EACCES = 13)
+        let otherPOSIX = NSError(domain: NSPOSIXErrorDomain, code: 2)
+        #expect(!SidecarCodec.isStaleFileHandleError(otherPOSIX))
+
+        // Generic error without underlying error
+        let genericError = NSError(domain: NSCocoaErrorDomain, code: 512)
+        #expect(!SidecarCodec.isStaleFileHandleError(genericError))
+    }
 }

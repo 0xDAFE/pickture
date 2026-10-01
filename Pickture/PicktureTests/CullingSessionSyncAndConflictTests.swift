@@ -374,4 +374,117 @@ struct CullingSessionSyncAndConflictTests {
         #expect(session.curationMetadata(for: item1) == newRemote1)
         #expect(session.curationMetadata(for: item2) == newRemote2)
     }
+
+    // MARK: - Slice 6: Retry Failed Writes (Spec #21)
+
+    @Test("retryFailedWrites re-queues syncError items to pendingWrite, flushes to disk, and transitions to synced")
+    func retryFailedWritesRequeuesAndFlushesToDisk() async throws {
+        let root = try makeTemporaryDirectory()
+        defer {
+            // Restore write permissions on cleanup if needed
+            let xmp = root.appendingPathComponent("RETRY01.xmp")
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: xmp.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let jpgURL = root.appendingPathComponent("RETRY01.JPG")
+        try Data("jpg-bytes".utf8).write(to: jpgURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        session.isSyncSuspended = true
+        try session.openFolder(at: root)
+
+        let item = try #require(session.items.first)
+        let curation = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green)
+
+        // Create a read-only sidecar file with valid initial XMP to induce a disk write permission error
+        let xmpURL = root.appendingPathComponent("RETRY01.xmp")
+        let initialXMP = try SidecarCodec.update(xmlData: nil, with: CurationMetadata())
+        try initialXMP.write(to: xmpURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: xmpURL.path)
+
+        session.updateCurationMetadata(curation, for: item)
+        #expect(session.syncState(for: item) == .pendingWrite)
+
+        // Flush writes while file is read-only -> fails and sets syncError
+        await session.flushPendingWrites()
+
+        #expect(session.syncState(for: item) == .syncError)
+        #expect(session.syncSummaryState == .syncError)
+        #expect(session.syncSummaryBadgeText == "1 Error")
+        #expect(session.lastErrorMessage != nil)
+
+        // Make sidecar writable again and retry failed writes
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: xmpURL.path)
+        await session.retryFailedWrites()
+
+        #expect(session.syncState(for: item) == .synced)
+        #expect(session.syncSummaryState == .synced)
+        #expect(session.syncSummaryBadgeText == "Synced")
+        #expect(session.lastErrorMessage == nil)
+
+        // Verify sidecar file on disk contains the curation
+        let diskData = try Data(contentsOf: xmpURL)
+        let parsed = try SidecarCodec.parse(data: diskData)
+        #expect(parsed.curation == curation)
+    }
+
+    // MARK: - Slice 7: Re-entrant Flush Queuing (Spec #21)
+
+    @Test("Re-entrant mutations during active flush automatically queue and flush to disk without dropping writes")
+    func reentrantMutationsDuringActiveFlushAreFlushed() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpg1 = root.appendingPathComponent("REENTRANT_1.JPG")
+        let jpg2 = root.appendingPathComponent("REENTRANT_2.JPG")
+        try Data("jpg1".utf8).write(to: jpg1)
+        try Data("jpg2".utf8).write(to: jpg2)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        session.isSyncSuspended = true
+        try session.openFolder(at: root)
+
+        let item1 = try #require(session.items.first { $0.baseName == "REENTRANT_1" })
+        let item2 = try #require(session.items.first { $0.baseName == "REENTRANT_2" })
+
+        // Enable slow flush delay
+        session.simulatedFlushDelayNanoseconds = 50_000_000 // 50ms per item
+        session.isSyncSuspended = false
+
+        // First mutation: triggers background flush of item1
+        session.setStarRating(4, for: item1)
+
+        // Wait a short slice so flush has started processing item1
+        try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+
+        // Second mutation while flush is in-flight: should be queued re-entrantly
+        session.setStarRating(2, for: item2)
+
+        // Wait for all flushes to complete (up to 1.5 seconds)
+        for _ in 0..<30 {
+            if session.pendingWritesCount == 0 && session.syncSummaryState == .synced {
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        #expect(session.pendingWritesCount == 0)
+        #expect(session.syncState(for: item1) == .synced)
+        #expect(session.syncState(for: item2) == .synced)
+        #expect(session.syncSummaryState == .synced)
+
+        // Verify both sidecars were persisted on disk
+        let xmp1 = root.appendingPathComponent("REENTRANT_1.xmp")
+        let xmp2 = root.appendingPathComponent("REENTRANT_2.xmp")
+        #expect(FileManager.default.fileExists(atPath: xmp1.path))
+        #expect(FileManager.default.fileExists(atPath: xmp2.path))
+
+        let parsed1 = try SidecarCodec.parse(data: try Data(contentsOf: xmp1))
+        let parsed2 = try SidecarCodec.parse(data: try Data(contentsOf: xmp2))
+        #expect(parsed1.curation.starRating == 4)
+        #expect(parsed2.curation.starRating == 2)
+    }
 }

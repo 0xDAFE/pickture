@@ -93,20 +93,62 @@ nonisolated enum SidecarCodec {
             let existingData = try? Data(contentsOf: url)
             let updatedData = try update(xmlData: existingData, with: curation)
             let dir = url.deletingLastPathComponent()
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            do {
-                // Testing Hypothesis 1: Direct write without .atomic prevents Darwin _dirhelper ENODEV
-                // and avoids SMB auxiliary rename collisions over existing files.
-                try updatedData.write(to: url, options: [])
-                print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded directly for \(url.lastPathComponent)")
-            } catch {
+            if !fm.fileExists(atPath: dir.path) {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            try writeCoordinatedWithRetry(data: updatedData, to: url)
+        }
+        return targets
+    }
+
+    static func writeCoordinatedWithRetry(data: Data, to url: URL) throws {
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+
+        func attemptWrite() -> Error? {
+            var coordError: NSError?
+            var writeError: Error?
+            coordinator.coordinate(writingItemAt: url, options: [], error: &coordError) { targetURL in
+                do {
+                    try data.write(to: targetURL, options: [])
+                } catch {
+                    writeError = error
+                }
+            }
+            return coordError ?? writeError
+        }
+
+        if let error = attemptWrite() {
+            if isStaleFileHandleError(error) {
+                // Network shares (SMB/NFS) may intermittently report ESTALE (errno 70) during rapid bursts.
+                // Micro-backoff allows smbclientd to refresh its lease and invalidate stale handles.
+                Thread.sleep(forTimeInterval: 0.05)
+                if let retryError = attemptWrite() {
+                    let nsError = retryError as NSError
+                    let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+                    print("[DEBUG-SMB-SYNC] SidecarCodec.write retry failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
+                    throw retryError
+                }
+                print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded on ESTALE retry for \(url.lastPathComponent)")
+            } else {
                 let nsError = error as NSError
                 let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
                 print("[DEBUG-SMB-SYNC] SidecarCodec.write direct failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
                 throw error
             }
         }
-        return targets
+    }
+
+    static func isStaleFileHandleError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain && nsError.code == 70 {
+            return true
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            if underlying.domain == NSPOSIXErrorDomain && underlying.code == 70 {
+                return true
+            }
+        }
+        return false
     }
 
     static func update(xmlData: Data?, with curation: CurationMetadata) throws -> Data {
