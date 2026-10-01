@@ -120,7 +120,7 @@ struct SettingsSheetView: View {
 
                 Section {
                     Picker("Shortcut Profile", selection: $session.shortcutProfileKind) {
-                        ForEach(ShortcutProfileKind.allCases.filter { $0 != .custom }, id: \.self) { kind in
+                        ForEach(ShortcutProfileKind.allCases.filter { $0 != .custom || session.shortcutProfileKind == .custom }, id: \.self) { kind in
                             Text(kind.displayName).tag(kind)
                         }
                     }
@@ -174,72 +174,76 @@ private enum ColorLabelSelection: Hashable {
     case color(ColorLabel)
 }
 
-private extension CurationAction {
-    var pickFlagSelection: PickFlagSelection {
-        get {
-            if let flag = pickFlagValue {
-                return .flag(flag)
-            }
-            return .unchanged
-        }
-        set {
-            let flag: PickFlag? = switch newValue {
-            case .unchanged: nil
-            case .flag(let f): f
-            }
-            self = CurationAction.make(
-                starRating: starRatingValue,
-                pickFlag: flag,
-                colorLabel: colorLabelValue
-            )
-        }
-    }
-
-    var starRatingSelection: StarRatingSelection {
-        get {
-            if let rating = starRatingValue {
-                return .rating(rating.value)
-            }
-            return .unchanged
-        }
-        set {
-            let rating: StarRating? = switch newValue {
-            case .unchanged: nil
-            case .rating(let r): StarRating(r)
-            }
-            self = CurationAction.make(
-                starRating: rating,
-                pickFlag: pickFlagValue,
-                colorLabel: colorLabelValue
-            )
-        }
-    }
-
-    var colorLabelSelection: ColorLabelSelection {
-        get {
-            if let label = colorLabelValue {
-                return .color(label)
-            }
-            return .unchanged
-        }
-        set {
-            let label: ColorLabel? = switch newValue {
-            case .unchanged: nil
-            case .color(let c): c
-            }
-            self = CurationAction.make(
-                starRating: starRatingValue,
-                pickFlag: pickFlagValue,
-                colorLabel: label
-            )
-        }
-    }
-}
-
 struct SwipeActionDetailEditorView: View {
     let title: String
     let direction: SwipeDirection
     @Binding var action: CurationAction
+
+    private var pickFlagBinding: Binding<PickFlagSelection> {
+        Binding(
+            get: {
+                if let flag = action.pickFlagValue {
+                    return .flag(flag)
+                }
+                return .unchanged
+            },
+            set: { newSelection in
+                let flag: PickFlag? = switch newSelection {
+                case .unchanged: nil
+                case .flag(let f): f
+                }
+                action = CurationAction.make(
+                    starRating: action.starRatingValue,
+                    pickFlag: flag,
+                    colorLabel: action.colorLabelValue
+                )
+            }
+        )
+    }
+
+    private var starRatingBinding: Binding<StarRatingSelection> {
+        Binding(
+            get: {
+                if let rating = action.starRatingValue {
+                    return .rating(rating.value)
+                }
+                return .unchanged
+            },
+            set: { newSelection in
+                let rating: StarRating? = switch newSelection {
+                case .unchanged: nil
+                case .rating(let r): StarRating(r)
+                }
+                action = CurationAction.make(
+                    starRating: rating,
+                    pickFlag: action.pickFlagValue,
+                    colorLabel: action.colorLabelValue
+                )
+            }
+        )
+    }
+
+    private var colorLabelBinding: Binding<ColorLabelSelection> {
+        Binding(
+            get: {
+                if let label = action.colorLabelValue {
+                    return .color(label)
+                }
+                return .unchanged
+            },
+            set: { newSelection in
+                let label: ColorLabel? = switch newSelection {
+                case .unchanged: nil
+                case .color(let c): c
+                }
+                action = CurationAction.make(
+                    starRating: action.starRatingValue,
+                    pickFlag: action.pickFlagValue,
+                    colorLabel: label
+                )
+            }
+        )
+    }
 
     var body: some View {
         Form {
@@ -291,14 +295,14 @@ struct SwipeActionDetailEditorView: View {
             }
 
             Section("Attributes (Combine for Compound Action)") {
-                Picker("Pick Flag", selection: $action.pickFlagSelection) {
+                Picker("Pick Flag", selection: pickFlagBinding) {
                     Text("-- (Unchanged)").tag(PickFlagSelection.unchanged)
                     Text("Picked (P)").tag(PickFlagSelection.flag(.picked))
                     Text("Rejected (X)").tag(PickFlagSelection.flag(.rejected))
                     Text("Unflagged (U)").tag(PickFlagSelection.flag(.unflagged))
                 }
 
-                Picker("Star Rating", selection: $action.starRatingSelection) {
+                Picker("Star Rating", selection: starRatingBinding) {
                     Text("-- (Unchanged)").tag(StarRatingSelection.unchanged)
                     Text("0 Stars (Unrated)").tag(StarRatingSelection.rating(0))
                     ForEach(1...5, id: \.self) { star in
@@ -306,7 +310,7 @@ struct SwipeActionDetailEditorView: View {
                     }
                 }
 
-                Picker("Color Label", selection: $action.colorLabelSelection) {
+                Picker("Color Label", selection: colorLabelBinding) {
                     Text("-- (Unchanged)").tag(ColorLabelSelection.unchanged)
                     Text("Clear Color (None)").tag(ColorLabelSelection.color(.none))
                     ForEach(ColorLabel.allCases.filter { $0 != .none }, id: \.self) { label in

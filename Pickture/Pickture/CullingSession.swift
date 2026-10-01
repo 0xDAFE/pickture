@@ -12,8 +12,7 @@ final class CullingSession {
     private(set) var currentFolderURL: URL?
     private(set) var items: [MediaItem] = [] {
         didSet {
-            recalculateSyncCounts()
-            recomputeVisibleItems()
+            refreshDerivedCounts()
         }
     }
     private(set) var recentFolders: [RecentFolder] = []
@@ -35,11 +34,14 @@ final class CullingSession {
             subfolderMode == .recursive
         }
         set {
-            try? setSubfolderMode(newValue ? .recursive : .immediate)
+            do {
+                try setSubfolderMode(newValue ? .recursive : .immediate)
+            } catch {
+                lastErrorMessage = "Failed to switch subfolder mode: \(error.localizedDescription)"
+            }
         }
     }
 
-    private(set) var visibleItems: [MediaItem] = []
     private(set) var visibleMediaPairCount: Int = 0
     private(set) var visibleVideoCount: Int = 0
     private(set) var conflictedItemsCount: Int = 0
@@ -49,14 +51,10 @@ final class CullingSession {
     var lastErrorMessage: String?
     var filterCriteria: FilterCriteria = FilterCriteria() {
         didSet {
-            recomputeVisibleItems()
+            refreshDerivedCounts()
         }
     }
-    var sortOption: SortOption = SortOption(field: .fileName, order: .ascending) {
-        didSet {
-            recomputeVisibleItems()
-        }
-    }
+    var sortOption: SortOption = SortOption(field: .fileName, order: .ascending)
     var isSearchFieldFocused: Bool = false
     private var exifByItemID: [String: ExifMetadata] = [:]
     private var headerSupplementedItemIDs: Set<String> = []
@@ -561,8 +559,7 @@ final class CullingSession {
         syncStateByItemID[item.id] = .pendingWrite
         conflictsByItemID.removeValue(forKey: item.id)
         metadataSyncStore.stagePendingWrite(metadata, baseSnapshot: base, for: item.id)
-        recalculateSyncCounts()
-        recomputeVisibleItems()
+        refreshDerivedCounts()
 
         if !isSyncSuspended {
             scheduleFlushPendingWrites()
@@ -652,36 +649,25 @@ final class CullingSession {
             exifByItemID[itemID] = merged
             metadataSyncStore.recordExif(merged, for: itemID)
         }
+        if filterCriteria.isCameraModelActive || filterCriteria.isLensModelActive {
+            refreshDerivedCounts()
+        }
     }
 
     func captureDate(for item: MediaItem) -> Date? {
         exifMetadata(for: item).dateTimeOriginal
     }
 
-    func recomputeVisibleItems() {
+    var visibleItems: [MediaItem] {
         let needsExif = filterCriteria.isCameraModelActive || filterCriteria.isLensModelActive || sortOption.field == .captureDate
-        var pairCount = 0
-        var vidCount = 0
         let filtered = items.filter { item in
             let curation = curationMetadata(for: item)
             let exif = needsExif ? exifMetadata(for: item) : (exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif)
             let sync = syncState(for: item)
-            let matches = filterCriteria.matches(item: item, curation: curation, exif: exif, syncState: sync)
-            if matches {
-                if item.isMediaPair {
-                    pairCount += 1
-                }
-                if item.kind == .video {
-                    vidCount += 1
-                }
-            }
-            return matches
+            return filterCriteria.matches(item: item, curation: curation, exif: exif, syncState: sync)
         }
 
-        visibleMediaPairCount = pairCount
-        visibleVideoCount = vidCount
-
-        visibleItems = filtered.sorted { itemA, itemB in
+        return filtered.sorted { itemA, itemB in
             switch sortOption.field {
             case .fileName:
                 let comp = itemA.primaryFile.fileName.localizedStandardCompare(itemB.primaryFile.fileName)
@@ -720,7 +706,7 @@ final class CullingSession {
         }
     }
 
-    func recalculateSyncCounts() {
+    func refreshDerivedCounts() {
         var pending = 0
         var conflicts = 0
         for item in items {
@@ -733,6 +719,10 @@ final class CullingSession {
         }
         pendingWritesCount = pending
         conflictedItemsCount = conflicts
+
+        let current = visibleItems
+        visibleMediaPairCount = current.filter(\.isMediaPair).count
+        visibleVideoCount = current.filter { $0.kind == .video }.count
     }
 
     var availableCameraModels: [String] {
@@ -839,8 +829,7 @@ final class CullingSession {
                 syncStateByItemID[item.id] = .syncError
                 metadataSyncStore.updateSyncState(.syncError, for: item.id)
                 lastErrorMessage = "Sync error on \(item.displayFileName): \(error.localizedDescription)"
-                recalculateSyncCounts()
-                recomputeVisibleItems()
+                refreshDerivedCounts()
             }
         }
     }
@@ -903,8 +892,7 @@ final class CullingSession {
         filterCriteria.reset()
         sortOption = SortOption(field: .fileName, order: .ascending)
         isSearchFieldFocused = false
-        recalculateSyncCounts()
-        recomputeVisibleItems()
+        refreshDerivedCounts()
     }
 
     func flushPendingWrite(for itemID: String) async throws {
@@ -913,8 +901,7 @@ final class CullingSession {
         let base = baseSnapshot(for: item)
 
         syncStateByItemID[item.id] = .loading
-        recalculateSyncCounts()
-        recomputeVisibleItems()
+        refreshDerivedCounts()
 
         enum FlushOutcome: Sendable {
             case conflict(MetadataConflict)
@@ -973,8 +960,7 @@ final class CullingSession {
             conflictsByItemID.removeValue(forKey: item.id)
             metadataSyncStore.markSynced(for: item.id, baseSnapshot: newBase)
         }
-        recalculateSyncCounts()
-        recomputeVisibleItems()
+        refreshDerivedCounts()
     }
 
     func resolveConflict(for item: MediaItem, strategy: ConflictResolutionStrategy) async throws {
@@ -1020,8 +1006,7 @@ final class CullingSession {
         baseSnapshotByItemID[item.id] = newBase
         conflictsByItemID.removeValue(forKey: item.id)
         metadataSyncStore.resolveConflict(for: item.id, resolvedMetadata: resolvedMetadata, newBaseSnapshot: newBase)
-        recalculateSyncCounts()
-        recomputeVisibleItems()
+        refreshDerivedCounts()
     }
 
     func resolveAllConflicts(strategy: ConflictResolutionStrategy) async throws {
@@ -1265,8 +1250,7 @@ final class CullingSession {
                 }
             }
         }
-        recalculateSyncCounts()
-        recomputeVisibleItems()
+        refreshDerivedCounts()
     }
 
     func toggleSubfolderMode() throws {

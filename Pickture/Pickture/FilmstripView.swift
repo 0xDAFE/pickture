@@ -563,9 +563,7 @@ struct FilmstripImageCanvasView: View {
                     previewImage = nil
                     return
                 }
-                let decoded = await Task.detached(priority: .utility) {
-                    PreviewLoader.decodeCGImage(from: data)
-                }.value
+                let decoded = await PreviewLoader.decodeCGImageAsync(from: data)
                 if !Task.isCancelled {
                     previewImage = decoded
                 }
@@ -855,9 +853,7 @@ struct FilmstripThumbnailCell: View {
                 thumbnail = nil
                 return
             }
-            let decoded = await Task.detached(priority: .utility) {
-                PreviewLoader.decodeCGImage(from: data)
-            }.value
+            let decoded = await PreviewLoader.decodeCGImageAsync(from: data)
             if !Task.isCancelled {
                 thumbnail = decoded
                 if let decoded {
