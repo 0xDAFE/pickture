@@ -289,7 +289,20 @@ struct ContentView: View {
                     }
                 }
             } else {
-                if session.viewMode == .grid {
+                FilterCriteriaBarView(session: session)
+
+                if session.visibleItems.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Matching MediaItems", systemImage: "line.3.horizontal.decrease.circle")
+                    } description: {
+                        Text("No items match your active filter criteria. Try adjusting or resetting filters.")
+                    } actions: {
+                        Button("Reset Filters") {
+                            session.resetFilters()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } else if session.viewMode == .grid {
                     gridContentView
                 } else {
                     FilmstripView(session: session)
@@ -723,17 +736,23 @@ struct ContentView: View {
             }
 
             HStack(spacing: 12) {
-                Label("\(session.items.count) MediaItems", systemImage: "square.grid.3x3")
-                    .font(.caption.weight(.medium))
+                if session.filterCriteria.isActive {
+                    Label("\(session.visibleItems.count) of \(session.items.count) MediaItems", systemImage: "square.grid.3x3")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                } else {
+                    Label("\(session.items.count) MediaItems", systemImage: "square.grid.3x3")
+                        .font(.caption.weight(.medium))
+                }
 
-                let pairCount = session.items.filter(\.isMediaPair).count
+                let pairCount = session.visibleItems.filter(\.isMediaPair).count
                 if pairCount > 0 {
                     Text("• \(pairCount) MediaPairs (RAW+JPG)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                let videoCount = session.items.filter { $0.kind == .video }.count
+                let videoCount = session.visibleItems.filter { $0.kind == .video }.count
                 if videoCount > 0 {
                     Text("• \(videoCount) Videos")
                         .font(.caption)
@@ -751,7 +770,7 @@ struct ContentView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVGrid(columns: gridColumns, spacing: 12) {
-                        ForEach(session.items) { item in
+                        ForEach(session.visibleItems) { item in
                             MediaGridCellView(
                                 item: item,
                                 isSelected: session.selectedItemID == item.id,

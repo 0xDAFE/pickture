@@ -92,6 +92,23 @@ final class MetadataSyncStore {
         persistJournal()
     }
 
+    func recordExif(_ exif: ExifMetadata, for itemID: String) {
+        if var existing = recordsByItemID[itemID] {
+            existing.exif = existing.exif?.supplementing(with: exif) ?? exif
+            existing.updatedAt = Date()
+            recordsByItemID[itemID] = existing
+        } else {
+            recordsByItemID[itemID] = MetadataSyncRecord(
+                itemID: itemID,
+                metadata: CurationMetadata(),
+                exif: exif,
+                syncState: .synced,
+                updatedAt: Date()
+            )
+        }
+        persistJournal()
+    }
+
     func updateSyncState(_ syncState: SyncState, for itemID: String, conflict: MetadataConflict? = nil) {
         guard var existing = recordsByItemID[itemID] else { return }
         existing.syncState = syncState

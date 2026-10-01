@@ -253,6 +253,18 @@ nonisolated struct ExifMetadata: Hashable, Codable, Sendable {
         isoSpeedRatings.isEmpty &&
         dateTimeOriginal == nil
     }
+
+    func supplementing(with fallback: ExifMetadata) -> ExifMetadata {
+        ExifMetadata(
+            cameraModel: self.cameraModel ?? fallback.cameraModel,
+            lensModel: self.lensModel ?? fallback.lensModel,
+            focalLength: self.focalLength ?? fallback.focalLength,
+            fNumber: self.fNumber ?? fallback.fNumber,
+            exposureTime: self.exposureTime ?? fallback.exposureTime,
+            isoSpeedRatings: !self.isoSpeedRatings.isEmpty ? self.isoSpeedRatings : fallback.isoSpeedRatings,
+            dateTimeOriginal: self.dateTimeOriginal ?? fallback.dateTimeOriginal
+        )
+    }
 }
 
 nonisolated struct BaseSnapshot: Hashable, Codable, Sendable {
@@ -630,7 +642,276 @@ nonisolated struct ShortcutProfile: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
+// MARK: - Multi-Facet FilterCriteria & Sorting Models
 
+nonisolated enum StarRatingFilterMode: String, Codable, CaseIterable, Hashable, Sendable {
+    case exact
+    case minimum
 
+    public var displayName: String {
+        switch self {
+        case .exact: return "Exact"
+        case .minimum: return "Minimum (≥)"
+        }
+    }
+}
 
+nonisolated struct StarRatingFilter: Codable, Hashable, Sendable {
+    public var mode: StarRatingFilterMode
+    public var exactRatings: Set<Int>
+    public var minimumRating: Int
 
+    public init(mode: StarRatingFilterMode = .exact, exactRatings: Set<Int> = [], minimumRating: Int = 1) {
+        self.mode = mode
+        self.exactRatings = exactRatings
+        self.minimumRating = minimumRating
+    }
+
+    public static func exact(_ ratings: Set<Int>) -> StarRatingFilter {
+        StarRatingFilter(mode: .exact, exactRatings: ratings)
+    }
+
+    public static func exact(_ rating: Int) -> StarRatingFilter {
+        StarRatingFilter(mode: .exact, exactRatings: [rating])
+    }
+
+    public static func minimum(_ min: Int) -> StarRatingFilter {
+        StarRatingFilter(mode: .minimum, minimumRating: min)
+    }
+
+    public func matches(_ rating: Int) -> Bool {
+        switch mode {
+        case .exact:
+            if exactRatings.isEmpty { return true }
+            return exactRatings.contains(rating)
+        case .minimum:
+            return rating >= minimumRating
+        }
+    }
+}
+
+nonisolated enum MediaTypeFilter: String, Codable, CaseIterable, Hashable, Sendable {
+    case photo
+    case video
+    case mediaPair
+
+    public var displayName: String {
+        switch self {
+        case .photo: return "Photo"
+        case .video: return "Video"
+        case .mediaPair: return "RAW+JPG"
+        }
+    }
+}
+
+nonisolated struct FilterCriteria: Codable, Hashable, Sendable {
+    public var searchQuery: String = ""
+    public var starRatingFilter: StarRatingFilter? = nil
+    public var pickFlags: Set<PickFlag> = []
+    public var colorLabels: Set<ColorLabel> = []
+    public var cameraModels: Set<String> = []
+    public var lensModels: Set<String> = []
+    public var mediaTypes: Set<MediaTypeFilter> = []
+    public var syncStates: Set<SyncState> = []
+
+    public init(
+        searchQuery: String = "",
+        starRatingFilter: StarRatingFilter? = nil,
+        pickFlags: Set<PickFlag> = [],
+        colorLabels: Set<ColorLabel> = [],
+        cameraModels: Set<String> = [],
+        lensModels: Set<String> = [],
+        mediaTypes: Set<MediaTypeFilter> = [],
+        syncStates: Set<SyncState> = []
+    ) {
+        self.searchQuery = searchQuery
+        self.starRatingFilter = starRatingFilter
+        self.pickFlags = pickFlags
+        self.colorLabels = colorLabels
+        self.cameraModels = cameraModels
+        self.lensModels = lensModels
+        self.mediaTypes = mediaTypes
+        self.syncStates = syncStates
+    }
+
+    public var isSearchActive: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public var isStarRatingActive: Bool {
+        guard let starRatingFilter else { return false }
+        switch starRatingFilter.mode {
+        case .exact:
+            return !starRatingFilter.exactRatings.isEmpty
+        case .minimum:
+            return starRatingFilter.minimumRating > 0
+        }
+    }
+
+    public var isPickFlagActive: Bool {
+        !pickFlags.isEmpty
+    }
+
+    public var isColorLabelActive: Bool {
+        !colorLabels.isEmpty
+    }
+
+    public var isCameraModelActive: Bool {
+        !cameraModels.isEmpty
+    }
+
+    public var isLensModelActive: Bool {
+        !lensModels.isEmpty
+    }
+
+    public var isMediaTypeActive: Bool {
+        !mediaTypes.isEmpty
+    }
+
+    public var isSyncStateActive: Bool {
+        !syncStates.isEmpty
+    }
+
+    public var activeFilterCount: Int {
+        var count = 0
+        if isSearchActive { count += 1 }
+        if isStarRatingActive { count += 1 }
+        if isPickFlagActive { count += 1 }
+        if isColorLabelActive { count += 1 }
+        if isCameraModelActive { count += 1 }
+        if isLensModelActive { count += 1 }
+        if isMediaTypeActive { count += 1 }
+        if isSyncStateActive { count += 1 }
+        return count
+    }
+
+    public var isActive: Bool {
+        activeFilterCount > 0
+    }
+
+    public mutating func reset() {
+        searchQuery = ""
+        starRatingFilter = nil
+        pickFlags.removeAll()
+        colorLabels.removeAll()
+        cameraModels.removeAll()
+        lensModels.removeAll()
+        mediaTypes.removeAll()
+        syncStates.removeAll()
+    }
+
+    public func matches(
+        item: MediaItem,
+        curation: CurationMetadata,
+        exif: ExifMetadata?,
+        syncState: SyncState
+    ) -> Bool {
+        // 1. Search Query (filename substring, case-insensitive)
+        if isSearchActive {
+            let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let matchesPrimary = item.primaryFile.fileName.lowercased().contains(query)
+            let matchesBase = item.baseName.lowercased().contains(query)
+            let matchesDisplay = item.displayFileName.lowercased().contains(query)
+            let matchesRaw = item.mediaPair?.rawFile.fileName.lowercased().contains(query) ?? false
+            let matchesRaster = item.mediaPair?.rasterFile.fileName.lowercased().contains(query) ?? false
+            if !matchesPrimary && !matchesBase && !matchesDisplay && !matchesRaw && !matchesRaster {
+                return false
+            }
+        }
+
+        // 2. Star Rating (exact or minimum >=)
+        if isStarRatingActive, let filter = starRatingFilter {
+            if !filter.matches(curation.starRating.value) {
+                return false
+            }
+        }
+
+        // 3. Pick Flag (OR within category)
+        if isPickFlagActive {
+            if !pickFlags.contains(curation.pickFlag) {
+                return false
+            }
+        }
+
+        // 4. Color Label (OR within category)
+        if isColorLabelActive {
+            if !colorLabels.contains(curation.colorLabel) {
+                return false
+            }
+        }
+
+        // 5. Camera Model (OR within category)
+        if isCameraModelActive {
+            guard let cam = exif?.cameraModel, cameraModels.contains(cam) else {
+                return false
+            }
+        }
+
+        // 6. Lens Model (OR within category)
+        if isLensModelActive {
+            guard let lens = exif?.lensModel, lensModels.contains(lens) else {
+                return false
+            }
+        }
+
+        // 7. Media Type (Photo, Video, MediaPair) (OR within category)
+        if isMediaTypeActive {
+            var matchedType = false
+            if item.isMediaPair && mediaTypes.contains(.mediaPair) {
+                matchedType = true
+            } else if item.kind == .photo && !item.isMediaPair && mediaTypes.contains(.photo) {
+                matchedType = true
+            } else if item.kind == .video && mediaTypes.contains(.video) {
+                matchedType = true
+            }
+            if !matchedType {
+                return false
+            }
+        }
+
+        // 8. Sync State (OR within category)
+        if isSyncStateActive {
+            if !syncStates.contains(syncState) {
+                return false
+            }
+        }
+
+        return true
+    }
+}
+
+nonisolated enum SortField: String, Codable, CaseIterable, Hashable, Sendable {
+    case fileName
+    case captureDate
+    case starRating
+
+    public var displayName: String {
+        switch self {
+        case .fileName: return "Filename"
+        case .captureDate: return "Capture Date"
+        case .starRating: return "Star Rating"
+        }
+    }
+}
+
+nonisolated enum SortOrder: String, Codable, CaseIterable, Hashable, Sendable {
+    case ascending
+    case descending
+
+    public var displayName: String {
+        switch self {
+        case .ascending: return "Ascending"
+        case .descending: return "Descending"
+        }
+    }
+}
+
+nonisolated struct SortOption: Codable, Hashable, Sendable {
+    public var field: SortField = .fileName
+    public var order: SortOrder = .ascending
+
+    public init(field: SortField = .fileName, order: SortOrder = .ascending) {
+        self.field = field
+        self.order = order
+    }
+}

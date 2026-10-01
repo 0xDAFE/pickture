@@ -271,7 +271,7 @@ struct FilmstripView: View {
             if position == .bottom {
                 ScrollView(.horizontal, showsIndicators: true) {
                     LazyHStack(spacing: 8) {
-                        ForEach(session.items) { item in
+                        ForEach(session.visibleItems) { item in
                             thumbnailItemView(for: item, position: .bottom)
                         }
                     }
@@ -288,7 +288,7 @@ struct FilmstripView: View {
             } else {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(spacing: 8) {
-                        ForEach(session.items) { item in
+                        ForEach(session.visibleItems) { item in
                             thumbnailItemView(for: item, position: .right)
                                 .frame(maxWidth: .infinity)
                         }

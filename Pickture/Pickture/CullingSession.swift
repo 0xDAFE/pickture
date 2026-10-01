@@ -17,6 +17,10 @@ final class CullingSession {
     private(set) var cacheGeneration: Int = 0
     var selectedItemID: String?
     var lastErrorMessage: String?
+    var filterCriteria: FilterCriteria = FilterCriteria()
+    var sortOption: SortOption = SortOption(field: .fileName, order: .ascending)
+    private var exifByItemID: [String: ExifMetadata] = [:]
+    private var headerSupplementedItemIDs: Set<String> = []
     private var metadataByItemID: [String: CurationMetadata] = [:]
     private var syncStateByItemID: [String: SyncState] = [:]
     private var baseSnapshotByItemID: [String: BaseSnapshot] = [:]
@@ -66,10 +70,11 @@ final class CullingSession {
     }
 
     var selectedItem: MediaItem? {
-        if let id = selectedItemID, let found = items.first(where: { $0.id == id }) {
+        let currentVisible = visibleItems
+        if let id = selectedItemID, let found = currentVisible.first(where: { $0.id == id }) {
             return found
         }
-        return items.first
+        return currentVisible.first
     }
 
     func setViewMode(_ mode: ViewMode) {
@@ -266,37 +271,39 @@ final class CullingSession {
     }
 
     func selectNextItem() {
-        guard !items.isEmpty else { return }
+        let currentVisible = visibleItems
+        guard !currentVisible.isEmpty else { return }
         guard let currentID = selectedItemID,
-              let currentIndex = items.firstIndex(where: { $0.id == currentID }) else {
-            selectedItemID = items.first?.id
+              let currentIndex = currentVisible.firstIndex(where: { $0.id == currentID }) else {
+            selectedItemID = currentVisible.first?.id
             return
         }
-        if currentIndex + 1 < items.count {
-            selectedItemID = items[currentIndex + 1].id
+        if currentIndex + 1 < currentVisible.count {
+            selectedItemID = currentVisible[currentIndex + 1].id
         }
     }
 
     func selectPreviousItem() {
-        guard !items.isEmpty else { return }
+        let currentVisible = visibleItems
+        guard !currentVisible.isEmpty else { return }
         guard let currentID = selectedItemID,
-              let currentIndex = items.firstIndex(where: { $0.id == currentID }) else {
-            selectedItemID = items.first?.id
+              let currentIndex = currentVisible.firstIndex(where: { $0.id == currentID }) else {
+            selectedItemID = currentVisible.first?.id
             return
         }
         if currentIndex > 0 {
-            selectedItemID = items[currentIndex - 1].id
+            selectedItemID = currentVisible[currentIndex - 1].id
         }
     }
 
     func selectFirstItem() {
-        if let first = items.first {
+        if let first = visibleItems.first {
             selectedItemID = first.id
         }
     }
 
     func selectLastItem() {
-        if let last = items.last {
+        if let last = visibleItems.last {
             selectedItemID = last.id
         }
     }
@@ -559,6 +566,164 @@ final class CullingSession {
         return metadataSyncStore.record(for: item.id)?.conflict
     }
 
+    func exifMetadata(for item: MediaItem) -> ExifMetadata {
+        if headerSupplementedItemIDs.contains(item.id) {
+            return exifByItemID[item.id] ?? ExifMetadata()
+        }
+
+        let existing = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif ?? ExifMetadata()
+        // If already completely populated across all fields, no header read needed
+        if existing.cameraModel != nil && existing.lensModel != nil && existing.dateTimeOriginal != nil && !existing.isoSpeedRatings.isEmpty && existing.focalLength != nil {
+            headerSupplementedItemIDs.insert(item.id)
+            exifByItemID[item.id] = existing
+            return existing
+        }
+
+        // Lazy supplementation via header-only extraction (preferring raster in MediaPair or RAW header bytes)
+        let headerExif = ExifHeaderExtractor.extractHeaderExif(for: item)
+        let resolved = existing.supplementing(with: headerExif)
+
+        headerSupplementedItemIDs.insert(item.id)
+        exifByItemID[item.id] = resolved
+        metadataSyncStore.recordExif(resolved, for: item.id)
+        return resolved
+    }
+
+    func preloadExifMetadata(for targetItems: [MediaItem]) async {
+        let itemsToLoad = targetItems.filter { item in
+            if headerSupplementedItemIDs.contains(item.id) { return false }
+            let existing = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif ?? ExifMetadata()
+            if existing.cameraModel != nil && existing.lensModel != nil && existing.dateTimeOriginal != nil && !existing.isoSpeedRatings.isEmpty && existing.focalLength != nil {
+                headerSupplementedItemIDs.insert(item.id)
+                exifByItemID[item.id] = existing
+                return false
+            }
+            return true
+        }
+        guard !itemsToLoad.isEmpty else { return }
+
+        let extracted: [(String, ExifMetadata)] = await Task.detached(priority: .utility) {
+            var results: [(String, ExifMetadata)] = []
+            for item in itemsToLoad {
+                if Task.isCancelled { break }
+                let exif = ExifHeaderExtractor.extractHeaderExif(for: item)
+                results.append((item.id, exif))
+            }
+            return results
+        }.value
+
+        for (itemID, headerExif) in extracted {
+            let existing = exifByItemID[itemID] ?? metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
+            let merged = existing.supplementing(with: headerExif)
+            headerSupplementedItemIDs.insert(itemID)
+            exifByItemID[itemID] = merged
+            metadataSyncStore.recordExif(merged, for: itemID)
+        }
+    }
+
+    func captureDate(for item: MediaItem) -> Date? {
+        if let dt = exifMetadata(for: item).dateTimeOriginal {
+            return dt
+        }
+        let url = item.primaryFile.url
+        if let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey]) {
+            return values.creationDate ?? values.contentModificationDate
+        }
+        return nil
+    }
+
+    var visibleItems: [MediaItem] {
+        let filtered = items.filter { item in
+            let curation = curationMetadata(for: item)
+            let exif = exifMetadata(for: item)
+            let sync = syncState(for: item)
+            return filterCriteria.matches(item: item, curation: curation, exif: exif, syncState: sync)
+        }
+
+        return filtered.sorted { itemA, itemB in
+            switch sortOption.field {
+            case .fileName:
+                let comp = itemA.primaryFile.fileName.localizedStandardCompare(itemB.primaryFile.fileName)
+                if comp != .orderedSame {
+                    return sortOption.order == .ascending ? (comp == .orderedAscending) : (comp == .orderedDescending)
+                }
+                return itemA.id < itemB.id
+
+            case .captureDate:
+                let dateA = captureDate(for: itemA)
+                let dateB = captureDate(for: itemB)
+                switch (dateA, dateB) {
+                case let (dA?, dB?):
+                    if dA != dB {
+                        return sortOption.order == .ascending ? (dA < dB) : (dA > dB)
+                    }
+                case (_?, nil):
+                    return sortOption.order == .ascending
+                case (nil, _?):
+                    return sortOption.order != .ascending
+                case (nil, nil):
+                    break
+                }
+                let comp = itemA.primaryFile.fileName.localizedStandardCompare(itemB.primaryFile.fileName)
+                return sortOption.order == .ascending ? (comp == .orderedAscending) : (comp == .orderedDescending)
+
+            case .starRating:
+                let ratingA = curationMetadata(for: itemA).starRating.value
+                let ratingB = curationMetadata(for: itemB).starRating.value
+                if ratingA != ratingB {
+                    return sortOption.order == .ascending ? (ratingA < ratingB) : (ratingA > ratingB)
+                }
+                let comp = itemA.primaryFile.fileName.localizedStandardCompare(itemB.primaryFile.fileName)
+                return sortOption.order == .ascending ? (comp == .orderedAscending) : (comp == .orderedDescending)
+            }
+        }
+    }
+
+    var availableCameraModels: [String] {
+        var set = Set<String>()
+        for item in items {
+            if let model = exifMetadata(for: item).cameraModel, !model.isEmpty {
+                set.insert(model)
+            }
+        }
+        return set.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    var availableLensModels: [String] {
+        var set = Set<String>()
+        for item in items {
+            if let lens = exifMetadata(for: item).lensModel, !lens.isEmpty {
+                set.insert(lens)
+            }
+        }
+        return set.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    func setFilterCriteria(_ criteria: FilterCriteria) {
+        filterCriteria = criteria
+    }
+
+    func resetFilters() {
+        filterCriteria.reset()
+    }
+
+    func setSortOption(_ option: SortOption) {
+        sortOption = option
+    }
+
+    func setSortField(_ field: SortField) {
+        if sortOption.field == field {
+            sortOption.order = (sortOption.order == .ascending) ? .descending : .ascending
+        } else {
+            sortOption.field = field
+            sortOption.order = .ascending
+        }
+    }
+
+    func setSortOrder(_ order: SortOrder) {
+        sortOption.order = order
+    }
+
     var pendingWritesCount: Int {
         items.filter { syncState(for: $0) == .pendingWrite }.count
     }
@@ -682,6 +847,10 @@ final class CullingSession {
         activeConflictItemID = nil
         isConflictSheetPresented = false
         lastErrorMessage = nil
+        exifByItemID.removeAll()
+        headerSupplementedItemIDs.removeAll()
+        filterCriteria.reset()
+        sortOption = SortOption(field: .fileName, order: .ascending)
     }
 
     func flushPendingWrite(for itemID: String) async throws {
@@ -823,6 +992,7 @@ final class CullingSession {
         if !isSyncSuspended {
             await flushPendingWrites()
         }
+        await preloadExifMetadata(for: self.items)
     }
 
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
@@ -920,6 +1090,10 @@ final class CullingSession {
             if !isSyncSuspended {
                 scheduleFlushPendingWrites()
             }
+            Task { [weak self] in
+                guard let self else { return }
+                await self.preloadExifMetadata(for: self.items)
+            }
         } catch {
             folderAccessService.stopAccessingCurrentFolder()
             throw error
@@ -933,6 +1107,10 @@ final class CullingSession {
             initializeMetadata(for: self.items)
             if !isSyncSuspended {
                 scheduleFlushPendingWrites()
+            }
+            Task { [weak self] in
+                guard let self else { return }
+                await self.preloadExifMetadata(for: self.items)
             }
         }
     }
@@ -959,6 +1137,16 @@ final class CullingSession {
             }
 
             if let persisted {
+                if let diskExif, !diskExif.isEmpty {
+                    if let persistedExif = persisted.exif {
+                        exifByItemID[item.id] = diskExif.supplementing(with: persistedExif)
+                    } else {
+                        exifByItemID[item.id] = diskExif
+                    }
+                } else if let persistedExif = persisted.exif {
+                    exifByItemID[item.id] = persistedExif
+                }
+
                 if persisted.syncState == .pendingWrite {
                     metadataByItemID[item.id] = persisted.metadata
                     syncStateByItemID[item.id] = .pendingWrite
@@ -990,7 +1178,7 @@ final class CullingSession {
                         metadataByItemID[item.id] = diskCuration
                         syncStateByItemID[item.id] = .synced
                         baseSnapshotByItemID[item.id] = snapshot
-                        metadataSyncStore.recordBaseSnapshot(snapshot, exif: diskExif, for: item.id)
+                        metadataSyncStore.recordBaseSnapshot(snapshot, exif: exifByItemID[item.id] ?? diskExif, for: item.id)
                     } else {
                         metadataByItemID[item.id] = persisted.metadata
                         syncStateByItemID[item.id] = .synced
@@ -998,6 +1186,10 @@ final class CullingSession {
                     }
                 }
             } else {
+                if let diskExif {
+                    exifByItemID[item.id] = diskExif
+                }
+
                 if let diskCuration {
                     let snapshot = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
                     metadataByItemID[item.id] = diskCuration
@@ -1009,7 +1201,7 @@ final class CullingSession {
                     metadataByItemID[item.id] = CurationMetadata()
                     syncStateByItemID[item.id] = .synced
                     baseSnapshotByItemID[item.id] = emptySnapshot
-                    metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: nil, for: item.id)
+                    metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: exifByItemID[item.id], for: item.id)
                 }
             }
         }

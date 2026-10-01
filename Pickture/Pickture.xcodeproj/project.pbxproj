@@ -24,6 +24,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		DF604FE2306E638A00D3309B /* Pickture-NoUI.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Pickture-NoUI.xctestplan"; sourceTree = "<group>"; };
 		DFC101B930691083003945DD /* Pickture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Pickture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DFC101C630691085003945DD /* PicktureTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PicktureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DFC101D030691085003945DD /* PicktureUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PicktureUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -69,6 +70,7 @@
 		DFC101B030691083003945DD = {
 			isa = PBXGroup;
 			children = (
+				DF604FE2306E638A00D3309B /* Pickture-NoUI.xctestplan */,
 				DFC101BB30691083003945DD /* Pickture */,
 				DFC101C930691085003945DD /* PicktureTests */,
 				DFC101D330691085003945DD /* PicktureUITests */,
