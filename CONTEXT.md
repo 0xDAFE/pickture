@@ -26,6 +26,10 @@ _Avoid_: Metadata file, Tag file, Companion file
 A browsing mode in which opening a root folder presents all `MediaItem`s recursively across its entire directory subtree rather than only the immediate folder's contents, while keeping `MediaPair` matching scoped strictly within each individual directory.
 _Avoid_: Flat view, Deep scan, Recursive library
 
+**Workspace**:
+The active culling and inspection environment bound to an open folder and its associated `MediaItem`s, presenting either the Grid or Filmstrip view alongside synchronization controls.
+_Avoid_: Document, Project, Canvas, Window, Gallery
+
 ### Culling & Metadata
 
 **CurationMetadata**:

@@ -23,6 +23,11 @@ final class CullingSession {
     private var conflictsByItemID: [String: MetadataConflict] = [:]
     private var thumbnailAspectRatios: [String: CGFloat] = [:]
     private var isFlushingPendingWrites: Bool = false
+    var isAccessingFolder: Bool {
+        folderAccessService.isAccessingFolder
+    }
+    var isWriteQueueSuspended: Bool = false
+    var simulatedFlushDelayNanoseconds: UInt64 = 0
     var isSyncSuspended: Bool = false {
         didSet {
             if !isSyncSuspended {
@@ -608,8 +613,18 @@ final class CullingSession {
         isFlushingPendingWrites = true
         defer { isFlushingPendingWrites = false }
 
+        while isWriteQueueSuspended && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if Task.isCancelled { return }
+
         let pending = items.filter { syncState(for: $0) == .pendingWrite }
         for item in pending {
+            if Task.isCancelled { break }
+            if simulatedFlushDelayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: simulatedFlushDelayNanoseconds)
+            }
+            if Task.isCancelled { break }
             do {
                 try await flushPendingWrite(for: item.id)
             } catch {
@@ -618,6 +633,60 @@ final class CullingSession {
                 lastErrorMessage = "Sync error on \(item.displayFileName): \(error.localizedDescription)"
             }
         }
+    }
+
+    @discardableResult
+    func closeFolder(
+        force: Bool = false,
+        timeoutNanoseconds: UInt64 = 2_500_000_000
+    ) async -> CloseFolderResult {
+        guard currentFolderURL != nil else {
+            return .success
+        }
+
+        if pendingWritesCount == 0 {
+            cleanCloseSession()
+            return .success
+        }
+
+        if force {
+            cleanCloseSession()
+            return .closedWithPendingJournaled
+        }
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in
+                await self.flushPendingWrites()
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+            }
+            _ = await group.next()
+            group.cancelAll()
+        }
+
+        if pendingWritesCount == 0 {
+            cleanCloseSession()
+            return .success
+        } else {
+            return .pendingWritesRemaining(pendingWritesCount)
+        }
+    }
+
+    private func cleanCloseSession() {
+        folderAccessService.stopAccessingCurrentFolder()
+        currentFolderURL = nil
+        items.removeAll()
+        selectedItemID = nil
+        metadataByItemID.removeAll()
+        syncStateByItemID.removeAll()
+        baseSnapshotByItemID.removeAll()
+        conflictsByItemID.removeAll()
+        thumbnailAspectRatios.removeAll()
+        swipeHistory.removeAll()
+        activeConflictItemID = nil
+        isConflictSheetPresented = false
+        lastErrorMessage = nil
     }
 
     func flushPendingWrite(for itemID: String) async throws {
@@ -812,13 +881,32 @@ final class CullingSession {
     }
 
     func openFolder(at url: URL) throws {
-        let (resolvedURL, updatedRecents) = try folderAccessService.beginAccessingAndRecordFolder(at: url)
-        try applyOpenedFolder(resolvedURL: resolvedURL, updatedRecents: updatedRecents)
+        do {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.standardizedFileURL.path, isDirectory: &isDir), isDir.boolValue else {
+                throw CocoaError(.fileReadNoSuchFile)
+            }
+            let (resolvedURL, updatedRecents) = try folderAccessService.beginAccessingAndRecordFolder(at: url)
+            try applyOpenedFolder(resolvedURL: resolvedURL, updatedRecents: updatedRecents)
+        } catch {
+            self.lastErrorMessage = error.localizedDescription
+            throw error
+        }
     }
 
     func reopenRecentFolder(_ recentFolder: RecentFolder) throws {
-        let (resolvedURL, updatedRecents) = try folderAccessService.resolveAndAccess(recentFolder: recentFolder)
-        try applyOpenedFolder(resolvedURL: resolvedURL, updatedRecents: updatedRecents)
+        do {
+            let (resolvedURL, updatedRecents) = try folderAccessService.resolveAndAccess(recentFolder: recentFolder)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: resolvedURL.standardizedFileURL.path, isDirectory: &isDir), isDir.boolValue else {
+                folderAccessService.stopAccessingCurrentFolder()
+                throw CocoaError(.fileReadNoSuchFile)
+            }
+            try applyOpenedFolder(resolvedURL: resolvedURL, updatedRecents: updatedRecents)
+        } catch {
+            self.lastErrorMessage = error.localizedDescription
+            throw error
+        }
     }
 
     func removeRecentFolder(_ recentFolder: RecentFolder) {
@@ -826,12 +914,19 @@ final class CullingSession {
     }
 
     private func applyOpenedFolder(resolvedURL: URL, updatedRecents: [RecentFolder]) throws {
-        self.recentFolders = updatedRecents
-        self.currentFolderURL = resolvedURL
-        self.items = try discoverItems(in: resolvedURL.standardizedFileURL, mode: subfolderMode)
-        initializeMetadata(for: self.items)
-        if !isSyncSuspended {
-            scheduleFlushPendingWrites()
+        do {
+            let discoveredItems = try discoverItems(in: resolvedURL.standardizedFileURL, mode: subfolderMode)
+            self.recentFolders = updatedRecents
+            self.currentFolderURL = resolvedURL
+            self.items = discoveredItems
+            initializeMetadata(for: self.items)
+            self.lastErrorMessage = nil
+            if !isSyncSuspended {
+                scheduleFlushPendingWrites()
+            }
+        } catch {
+            folderAccessService.stopAccessingCurrentFolder()
+            throw error
         }
     }
 

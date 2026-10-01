@@ -318,6 +318,12 @@ nonisolated enum ConflictResolutionStrategy: Hashable, Sendable {
     case cherryPick(CurationMetadata)
 }
 
+nonisolated enum CloseFolderResult: Hashable, Sendable {
+    case success
+    case pendingWritesRemaining(Int)
+    case closedWithPendingJournaled
+}
+
 #if canImport(SwiftUI)
 import SwiftUI
 

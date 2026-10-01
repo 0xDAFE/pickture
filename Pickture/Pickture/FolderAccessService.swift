@@ -5,6 +5,7 @@ final class FolderAccessService {
     private let recentFoldersFileURL: URL
     private let maxRecentFoldersCount = 15
     private var activeSecurityScopedURL: URL?
+    private var activeFolderURL: URL?
 
     init(storageRootURL: URL) {
         self.recentFoldersFileURL = storageRootURL
@@ -29,6 +30,7 @@ final class FolderAccessService {
         if didStartScope {
             activeSecurityScopedURL = url
         }
+        activeFolderURL = url
 
         let bookmark = Self.makeBookmarkData(for: url)
         let canonicalPath = url.standardizedFileURL.path
@@ -60,11 +62,20 @@ final class FolderAccessService {
         return list
     }
 
+    var isAccessingFolder: Bool {
+        activeFolderURL != nil
+    }
+
+    var isAccessingSecurityScopedURL: Bool {
+        activeSecurityScopedURL != nil
+    }
+
     func stopAccessingCurrentFolder() {
         if let activeSecurityScopedURL {
             activeSecurityScopedURL.stopAccessingSecurityScopedResource()
             self.activeSecurityScopedURL = nil
         }
+        self.activeFolderURL = nil
     }
 
     private func persistRecentFolders(_ folders: [RecentFolder]) throws {

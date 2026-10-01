@@ -11,12 +11,18 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var session: CullingSession
+    @State private var preferredCompactColumn: NavigationSplitViewColumn
     @State private var isFolderImporterPresented = false
     @State private var isSettingsPresented = false
+    @State private var isCloseConfirmationPresented = false
+    @State private var pendingWritesCountForClose = 0
 
     init(session: CullingSession? = nil) {
-        _session = State(initialValue: session ?? CullingSession())
+        let resolvedSession = session ?? CullingSession()
+        _session = State(initialValue: resolvedSession)
+        _preferredCompactColumn = State(initialValue: resolvedSession.currentFolderURL == nil ? .sidebar : .detail)
     }
 
     private let gridColumns = [
@@ -24,7 +30,7 @@ struct ContentView: View {
     ]
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             sidebarContent
         } detail: {
             detailContent
@@ -40,12 +46,27 @@ struct ContentView: View {
                 do {
                     try session.openFolder(at: folderURL)
                     session.lastErrorMessage = nil
+                    preferredCompactColumn = .detail
                 } catch {
                     session.lastErrorMessage = error.localizedDescription
+                    preferredCompactColumn = .sidebar
                 }
             case .failure(let error):
                 session.lastErrorMessage = error.localizedDescription
+                preferredCompactColumn = .sidebar
             }
+        }
+        .confirmationDialog(
+            "Pending Writes in Progress",
+            isPresented: $isCloseConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Close Anyway", role: .destructive) {
+                handleCloseFolder(force: true)
+            }
+            Button("Keep Waiting", role: .cancel) {}
+        } message: {
+            Text("\(pendingWritesCountForClose) pending edit\(pendingWritesCountForClose == 1 ? "" : "s") have not finished syncing to disk. If you close now, edits are safely preserved in the local journal and will sync when you reopen this folder.")
         }
         .sheet(isPresented: $isSettingsPresented) {
             SettingsSheetView(session: session)
@@ -56,80 +77,139 @@ struct ContentView: View {
     }
 
     private var sidebarContent: some View {
-        List {
-            Section("Folder") {
-                Button {
-                    isFolderImporterPresented = true
-                } label: {
-                    Label("Open Folder…", systemImage: "folder.badge.plus")
+        VStack(spacing: 0) {
+            if let errorMessage = session.lastErrorMessage {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(errorMessage)
+                        .font(.caption)
+                    Spacer()
+                    Button("Dismiss") {
+                        session.lastErrorMessage = nil
+                    }
+                    .font(.caption.weight(.semibold))
                 }
-
-                Toggle(
-                    isOn: Binding(
-                        get: { session.subfolderMode == .recursive },
-                        set: { isRecursive in
-                            do {
-                                try session.setSubfolderMode(isRecursive ? .recursive : .immediate)
-                            } catch {
-                                session.lastErrorMessage = error.localizedDescription
-                            }
-                        }
-                    )
-                ) {
-                    Label("SubfolderMode (Recursive)", systemImage: "list.bullet.indent")
-                }
-
-                Picker(
-                    selection: Binding(
-                        get: { session.previewSource },
-                        set: { session.previewSource = $0 }
-                    )
-                ) {
-                    Text("Prefer Raster").tag(PreviewSource.preferRaster)
-                    Text("Prefer RAW").tag(PreviewSource.preferRAW)
-                } label: {
-                    Label("PreviewSource", systemImage: "photo.stack")
-                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.orange.opacity(0.15))
             }
 
-            Section("Recent Folders") {
-                if session.recentFolders.isEmpty {
-                    Text("No recent folders yet")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(session.recentFolders) { recent in
-                        HStack {
-                            Button {
-                                handleReopenRecentFolder(recent)
-                            } label: {
+            List {
+                if let folderURL = session.currentFolderURL {
+                    Section("Active Workspace") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "folder.fill.badge.gearshape")
+                                    .font(.title3)
+                                    .foregroundStyle(Color.accentColor)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "folder.fill")
-                                            .foregroundStyle(Color.accentColor)
-                                        Text(recent.name)
-                                            .font(.subheadline.weight(.medium))
-                                            .lineLimit(1)
-                                    }
-                                    Text(recent.displayPath)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                    Text(folderURL.lastPathComponent)
+                                        .font(.headline)
                                         .lineLimit(1)
-                                        .truncationMode(.middle)
+                                    Text("\(session.items.count) MediaItem\(session.items.count == 1 ? "" : "s")")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                 }
                             }
-                            .buttonStyle(.plain)
-
-                            Spacer()
+                            .padding(.vertical, 2)
 
                             Button {
-                                session.removeRecentFolder(recent)
+                                preferredCompactColumn = .detail
                             } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.tertiary)
+                                Label("Return to Grid", systemImage: "arrow.right.circle.fill")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Remove \(recent.name) from Recent Folders")
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.regular)
+
+                            Button(role: .destructive) {
+                                handleCloseFolder(force: false)
+                            } label: {
+                                Label("Close Folder", systemImage: "xmark.circle")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.regular)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                Section("Folder") {
+                    Button {
+                        isFolderImporterPresented = true
+                    } label: {
+                        Label("Open Folder…", systemImage: "folder.badge.plus")
+                    }
+
+                    Toggle(
+                        isOn: Binding(
+                            get: { session.subfolderMode == .recursive },
+                            set: { isRecursive in
+                                do {
+                                    try session.setSubfolderMode(isRecursive ? .recursive : .immediate)
+                                } catch {
+                                    session.lastErrorMessage = error.localizedDescription
+                                }
+                            }
+                        )
+                    ) {
+                        Label("SubfolderMode (Recursive)", systemImage: "list.bullet.indent")
+                    }
+
+                    Picker(
+                        selection: Binding(
+                            get: { session.previewSource },
+                            set: { session.previewSource = $0 }
+                        )
+                    ) {
+                        Text("Prefer Raster").tag(PreviewSource.preferRaster)
+                        Text("Prefer RAW").tag(PreviewSource.preferRAW)
+                    } label: {
+                        Label("PreviewSource", systemImage: "photo.stack")
+                    }
+                }
+
+                Section("Recent Folders") {
+                    if session.recentFolders.isEmpty {
+                        Text("No recent folders yet")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(session.recentFolders) { recent in
+                            HStack {
+                                Button {
+                                    handleReopenRecentFolder(recent)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "folder.fill")
+                                                .foregroundStyle(Color.accentColor)
+                                            Text(recent.name)
+                                                .font(.subheadline.weight(.medium))
+                                                .lineLimit(1)
+                                        }
+                                        Text(recent.displayPath)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+
+                                Spacer()
+
+                                Button {
+                                    session.removeRecentFolder(recent)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Remove \(recent.name) from Recent Folders")
+                            }
                         }
                     }
                 }
@@ -137,14 +217,50 @@ struct ContentView: View {
         }
         .navigationTitle("Pickture")
         .navigationSplitViewColumnWidth(min: 220, ideal: 245, max: 320)
+        .toolbar {
+            #if os(iOS)
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    isSettingsPresented = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .help("Open Pickture Settings")
+            }
+            #else
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    isSettingsPresented = true
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .help("Open Pickture Settings")
+            }
+            #endif
+        }
     }
 
     private func handleReopenRecentFolder(_ recent: RecentFolder) {
         do {
             try session.reopenRecentFolder(recent)
             session.lastErrorMessage = nil
+            preferredCompactColumn = .detail
         } catch {
             session.lastErrorMessage = error.localizedDescription
+            preferredCompactColumn = .sidebar
+        }
+    }
+
+    private func handleCloseFolder(force: Bool = false) {
+        Task {
+            let result = await session.closeFolder(force: force)
+            switch result {
+            case .success, .closedWithPendingJournaled:
+                preferredCompactColumn = .sidebar
+            case .pendingWritesRemaining(let count):
+                pendingWritesCountForClose = count
+                isCloseConfirmationPresented = true
+            }
         }
     }
 
@@ -226,180 +342,302 @@ struct ContentView: View {
         )
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                // View Mode Toggle (Grid vs Filmstrip)
-                Picker("View Mode", selection: Binding(
-                    get: { session.viewMode },
-                    set: { session.setViewMode($0) }
-                )) {
-                    Label("Grid (G)", systemImage: "square.grid.3x3").tag(ViewMode.grid)
-                    Label("Filmstrip (E)", systemImage: "rectangle.split.3x1").tag(ViewMode.filmstrip)
-                }
-                .pickerStyle(.segmented)
-                .help("Toggle between Grid View (G) and Filmstrip View (E or Space)")
-
-                // Filmstrip Controls (when in Filmstrip view)
-                if session.viewMode == .filmstrip {
-                    Menu {
-                        Button {
-                            session.setFilmstripDockPosition(.bottom)
-                        } label: {
-                            Label("Bottom Dock", systemImage: session.filmstripDockPosition == .bottom ? "checkmark" : "")
-                        }
-                        Button {
-                            session.setFilmstripDockPosition(.right)
-                        } label: {
-                            Label("Right Dock", systemImage: session.filmstripDockPosition == .right ? "checkmark" : "")
-                        }
-                    } label: {
-                        Label(
-                            "Dock: \(session.filmstripDockPosition.displayName)",
-                            systemImage: session.filmstripDockPosition == .bottom ? "dock.rectangle" : "sidebar.right"
-                        )
-                    }
-                    .help("Filmstrip thumbnail strip dock position")
-
-                    Button {
-                        session.toggleBorderTapNavigation()
-                    } label: {
-                        Label(
-                            session.isBorderTapNavigationEnabled ? "Border Tap: On" : "Border Tap: Off",
-                            systemImage: session.isBorderTapNavigationEnabled ? "hand.tap.fill" : "hand.tap"
-                        )
-                        .foregroundStyle(session.isBorderTapNavigationEnabled ? Color.accentColor : Color.secondary)
-                    }
-                    .help("Toggle BorderTapNavigation edge touch zones")
-
-                    Button {
-                        session.toggleSwipeMode()
-                    } label: {
-                        Label(
-                            session.isSwipeModeEnabled ? "SwipeMode: On" : "SwipeMode: Off",
-                            systemImage: session.isSwipeModeEnabled ? "hand.draw.fill" : "hand.draw"
-                        )
-                        .foregroundStyle(session.isSwipeModeEnabled ? Color.accentColor : Color.primary)
-                    }
-                    .help("Toggle SwipeMode Culling (Swipe left/right to cull)")
-
-                    Button {
-                        session.undoLastSwipe()
-                    } label: {
-                        Label("Undo Swipe", systemImage: "arrow.uturn.backward")
-                    }
-                    .keyboardShortcut("z", modifiers: .command)
-                    .disabled(!session.canUndoSwipe)
-                    .help("Undo Last Swipe (⌘Z)")
-                }
-
-                // PreviewSource Toggle Button (J)
-                Button {
-                    session.togglePreviewSource()
-                } label: {
-                    Label(
-                        session.previewSource == .preferRaster ? "Raster" : "RAW",
-                        systemImage: "photo.stack"
-                    )
-                }
-                .help("Toggle PreviewSource (PreferRaster ↔ PreferRAW) (J)")
-
-                // Auto-Advance Toggle Button (A)
-                Button {
-                    session.toggleAutoAdvance()
-                } label: {
-                    Label(
-                        session.isAutoAdvanceEnabled ? "Auto-Advance: On" : "Auto-Advance: Off",
-                        systemImage: session.isAutoAdvanceEnabled ? "forward.fill" : "forward"
-                    )
-                    .foregroundStyle(session.isAutoAdvanceEnabled ? Color.accentColor : Color.primary)
-                }
-                .help("Toggle Auto-Advance after rating (A)")
-
-                Button {
-                    isFolderImporterPresented = true
-                } label: {
-                    Label("Open Folder", systemImage: "folder.badge.plus")
-                }
-
-                Button {
-                    Task {
-                        try? await session.refreshFolder()
-                    }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .help("Refresh Folder and re-check sidecars")
-
-                // Workspace-level Sync Summary Badge
-                Button {
-                    if session.conflictedItemsCount > 0 {
-                        session.activeConflictItemID = nil
-                        session.isConflictSheetPresented = true
-                    } else if session.pendingWritesCount > 0 {
-                        Task { await session.flushPendingWrites() }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        switch session.syncSummaryState {
-                        case .synced:
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                        case .pendingWrite:
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .foregroundStyle(.orange)
-                        case .loading:
-                            ProgressView()
-                                .controlSize(.mini)
-                        case .conflicted:
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                        case .syncError:
-                            Image(systemName: "exclamationmark.circle.fill")
-                                .foregroundStyle(.red)
-                        }
-                        Text(session.syncSummaryBadgeText)
-                            .font(.caption.weight(.medium))
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule()
-                            .fill(session.syncSummaryState == .conflicted ? Color.orange.opacity(0.2) : Color.secondary.opacity(0.12))
-                    )
-                }
-                .buttonStyle(.plain)
-                .help("Sync Status — Click to resolve conflicts or flush pending writes")
-
-                Menu {
-                    if session.recentFolders.isEmpty {
-                        Text("No Recent Folders")
-                    } else {
-                        ForEach(session.recentFolders) { recent in
-                            Button(recent.name) {
-                                handleReopenRecentFolder(recent)
-                            }
-                        }
-                    }
-                } label: {
-                    Label("Recent Folders", systemImage: "clock.arrow.circlepath")
-                }
-
-                Button {
-                    try? session.toggleSubfolderMode()
-                } label: {
-                    Label(
-                        session.subfolderMode == .recursive ? "Subfolders: On" : "Subfolders: Off",
-                        systemImage: session.subfolderMode == .recursive
-                            ? "folder.fill.badge.gearshape"
-                            : "folder"
-                    )
-                }
-                .help("Toggle recursive SubfolderMode")
-
-                Button {
-                    isSettingsPresented = true
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
+                if horizontalSizeClass == .compact {
+                    filterMenu
+                    viewModePicker
+                    syncStateBadge
+                    moreMenu
+                } else {
+                    regularToolbarItems
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var filterMenu: some View {
+        Menu {
+            Toggle(
+                "Recursive Subfolders",
+                isOn: Binding(
+                    get: { session.subfolderMode == .recursive },
+                    set: { isRecursive in
+                        do {
+                            try session.setSubfolderMode(isRecursive ? .recursive : .immediate)
+                        } catch {
+                            session.lastErrorMessage = error.localizedDescription
+                        }
+                    }
+                )
+            )
+        } label: {
+            Label("Filter", systemImage: "line.3.horizontal.decrease.circle")
+        }
+        .help("Filter and subfolder options")
+    }
+
+    @ViewBuilder
+    private var viewModePicker: some View {
+        Picker("View Mode", selection: Binding(
+            get: { session.viewMode },
+            set: { session.setViewMode($0) }
+        )) {
+            Label("Grid (G)", systemImage: "square.grid.3x3").tag(ViewMode.grid)
+            Label("Filmstrip (E)", systemImage: "rectangle.split.3x1").tag(ViewMode.filmstrip)
+        }
+        .pickerStyle(.segmented)
+        .help("Toggle between Grid View (G) and Filmstrip View (E or Space)")
+    }
+
+    @ViewBuilder
+    private var syncStateBadge: some View {
+        Button {
+            if session.conflictedItemsCount > 0 {
+                session.activeConflictItemID = nil
+                session.isConflictSheetPresented = true
+            } else if session.pendingWritesCount > 0 {
+                Task { await session.flushPendingWrites() }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                switch session.syncSummaryState {
+                case .synced:
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                case .pendingWrite:
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.orange)
+                case .loading:
+                    ProgressView()
+                        .controlSize(.mini)
+                case .conflicted:
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                case .syncError:
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                }
+                Text(session.syncSummaryBadgeText)
+                    .font(.caption.weight(.medium))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(session.syncSummaryState == .conflicted ? Color.orange.opacity(0.2) : Color.secondary.opacity(0.12))
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Sync Status — Click to resolve conflicts or flush pending writes")
+    }
+
+    @ViewBuilder
+    private var moreMenu: some View {
+        Menu("More", systemImage: "ellipsis.circle") {
+            if session.viewMode == .filmstrip {
+                Menu {
+                    Button {
+                        session.setFilmstripDockPosition(.bottom)
+                    } label: {
+                        Label("Bottom Dock", systemImage: session.filmstripDockPosition == .bottom ? "checkmark" : "")
+                    }
+                    Button {
+                        session.setFilmstripDockPosition(.right)
+                    } label: {
+                        Label("Right Dock", systemImage: session.filmstripDockPosition == .right ? "checkmark" : "")
+                    }
+                } label: {
+                    Label(
+                        "Dock: \(session.filmstripDockPosition.displayName)",
+                        systemImage: session.filmstripDockPosition == .bottom ? "dock.rectangle" : "sidebar.right"
+                    )
+                }
+
+                Button {
+                    session.toggleBorderTapNavigation()
+                } label: {
+                    Label(
+                        session.isBorderTapNavigationEnabled ? "Border Tap: On" : "Border Tap: Off",
+                        systemImage: session.isBorderTapNavigationEnabled ? "hand.tap.fill" : "hand.tap"
+                    )
+                }
+
+                Button {
+                    session.toggleSwipeMode()
+                } label: {
+                    Label(
+                        session.isSwipeModeEnabled ? "SwipeMode: On" : "SwipeMode: Off",
+                        systemImage: session.isSwipeModeEnabled ? "hand.draw.fill" : "hand.draw"
+                    )
+                }
+
+                Button {
+                    session.undoLastSwipe()
+                } label: {
+                    Label("Undo Swipe", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!session.canUndoSwipe)
+            }
+
+            Button {
+                session.togglePreviewSource()
+            } label: {
+                Label(
+                    session.previewSource == .preferRaster ? "Raster" : "RAW",
+                    systemImage: "photo.stack"
+                )
+            }
+
+            Button {
+                session.toggleAutoAdvance()
+            } label: {
+                Label(
+                    session.isAutoAdvanceEnabled ? "Auto-Advance: On" : "Auto-Advance: Off",
+                    systemImage: session.isAutoAdvanceEnabled ? "forward.fill" : "forward"
+                )
+            }
+
+            Button {
+                isSettingsPresented = true
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+
+            Button {
+                Task {
+                    try? await session.refreshFolder()
+                }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+        }
+        .help("More session options")
+    }
+
+    @ViewBuilder
+    private var regularToolbarItems: some View {
+        viewModePicker
+
+        if session.viewMode == .filmstrip {
+            Menu {
+                Button {
+                    session.setFilmstripDockPosition(.bottom)
+                } label: {
+                    Label("Bottom Dock", systemImage: session.filmstripDockPosition == .bottom ? "checkmark" : "")
+                }
+                Button {
+                    session.setFilmstripDockPosition(.right)
+                } label: {
+                    Label("Right Dock", systemImage: session.filmstripDockPosition == .right ? "checkmark" : "")
+                }
+            } label: {
+                Label(
+                    "Dock: \(session.filmstripDockPosition.displayName)",
+                    systemImage: session.filmstripDockPosition == .bottom ? "dock.rectangle" : "sidebar.right"
+                )
+            }
+            .help("Filmstrip thumbnail strip dock position")
+
+            Button {
+                session.toggleBorderTapNavigation()
+            } label: {
+                Label(
+                    session.isBorderTapNavigationEnabled ? "Border Tap: On" : "Border Tap: Off",
+                    systemImage: session.isBorderTapNavigationEnabled ? "hand.tap.fill" : "hand.tap"
+                )
+                .foregroundStyle(session.isBorderTapNavigationEnabled ? Color.accentColor : Color.secondary)
+            }
+            .help("Toggle BorderTapNavigation edge touch zones")
+
+            Button {
+                session.toggleSwipeMode()
+            } label: {
+                Label(
+                    session.isSwipeModeEnabled ? "SwipeMode: On" : "SwipeMode: Off",
+                    systemImage: session.isSwipeModeEnabled ? "hand.draw.fill" : "hand.draw"
+                )
+                .foregroundStyle(session.isSwipeModeEnabled ? Color.accentColor : Color.primary)
+            }
+            .help("Toggle SwipeMode Culling (Swipe left/right to cull)")
+
+            Button {
+                session.undoLastSwipe()
+            } label: {
+                Label("Undo Swipe", systemImage: "arrow.uturn.backward")
+            }
+            .keyboardShortcut("z", modifiers: .command)
+            .disabled(!session.canUndoSwipe)
+            .help("Undo Last Swipe (⌘Z)")
+        }
+
+        Button {
+            session.togglePreviewSource()
+        } label: {
+            Label(
+                session.previewSource == .preferRaster ? "Raster" : "RAW",
+                systemImage: "photo.stack"
+            )
+        }
+        .help("Toggle PreviewSource (PreferRaster ↔ PreferRAW) (J)")
+
+        Button {
+            session.toggleAutoAdvance()
+        } label: {
+            Label(
+                session.isAutoAdvanceEnabled ? "Auto-Advance: On" : "Auto-Advance: Off",
+                systemImage: session.isAutoAdvanceEnabled ? "forward.fill" : "forward"
+            )
+            .foregroundStyle(session.isAutoAdvanceEnabled ? Color.accentColor : Color.primary)
+        }
+        .help("Toggle Auto-Advance after rating (A)")
+
+        Button {
+            isFolderImporterPresented = true
+        } label: {
+            Label("Open Folder", systemImage: "folder.badge.plus")
+        }
+
+        Button {
+            Task {
+                try? await session.refreshFolder()
+            }
+        } label: {
+            Label("Refresh", systemImage: "arrow.clockwise")
+        }
+        .help("Refresh Folder and re-check sidecars")
+
+        syncStateBadge
+
+        Menu {
+            if session.recentFolders.isEmpty {
+                Text("No Recent Folders")
+            } else {
+                ForEach(session.recentFolders) { recent in
+                    Button(recent.name) {
+                        handleReopenRecentFolder(recent)
+                    }
+                }
+            }
+        } label: {
+            Label("Recent Folders", systemImage: "clock.arrow.circlepath")
+        }
+
+        Button {
+            try? session.toggleSubfolderMode()
+        } label: {
+            Label(
+                session.subfolderMode == .recursive ? "Subfolders: On" : "Subfolders: Off",
+                systemImage: session.subfolderMode == .recursive
+                    ? "folder.fill.badge.gearshape"
+                    : "folder"
+            )
+        }
+        .help("Toggle recursive SubfolderMode")
+
+        Button {
+            isSettingsPresented = true
+        } label: {
+            Label("Settings", systemImage: "gearshape")
         }
     }
 
