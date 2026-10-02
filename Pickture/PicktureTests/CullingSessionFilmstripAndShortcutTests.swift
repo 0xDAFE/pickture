@@ -571,7 +571,43 @@ struct CullingSessionFilmstripAndShortcutTests {
         #expect(videoRightSize.width == 112)
         #expect(videoRightSize.height == 64)
     }
+
+    @Test("Filmstrip task key contract incorporates item.id, previewSource, and cacheGeneration, invalidating on toggle and cache clear")
+    func filmstripTaskKeyContract() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try createTestJPEG(at: root.appendingPathComponent("TEST.JPG"))
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        try session.openFolder(at: root)
+
+        let item = try #require(session.items.first)
+        let initialGen = session.cacheGeneration
+        let key1 = "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)"
+
+        // Toggle preview source: key must change
+        session.togglePreviewSource()
+        let key2 = "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)"
+        #expect(key1 != key2)
+
+        // Clear media cache: cacheGeneration must increment, key must change
+        session.clearMediaCache()
+        #expect(session.cacheGeneration == initialGen + 1)
+        let key3 = "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)"
+        #expect(key2 != key3)
+    }
+
+    @Test("ContentView and SettingsSheetView support injected session and suppress dismiss button when requested")
+    func viewStateAndPresentationContracts() {
+        let session = CullingSession()
+        let contentView = ContentView(session: session)
+        #expect(contentView.session === session)
+
+        let settingsSheetModal = SettingsSheetView(session: session)
+        #expect(settingsSheetModal.showsDismissButton == true)
+
+        let settingsScene = SettingsSheetView(session: session, showsDismissButton: false)
+        #expect(settingsScene.showsDismissButton == false)
+    }
 }
-
-
-

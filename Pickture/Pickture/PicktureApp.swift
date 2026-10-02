@@ -17,7 +17,7 @@ struct PicktureApp: App {
         }
         #if os(macOS)
         Settings {
-            SettingsSheetView(session: session)
+            SettingsSheetView(session: session, showsDismissButton: false)
         }
         #endif
     }

@@ -268,8 +268,10 @@ struct FilmstripView: View {
     @ViewBuilder
     private func thumbnailStrip(position: FilmstripDockPosition) -> some View {
         ScrollViewReader { proxy in
-            if position == .bottom {
-                ScrollView(.horizontal, showsIndicators: true) {
+            let isHorizontal = position == .bottom
+            let axis: Axis.Set = isHorizontal ? .horizontal : .vertical
+            ScrollView(axis, showsIndicators: true) {
+                if isHorizontal {
                     LazyHStack(spacing: 8) {
                         ForEach(session.visibleItems) { item in
                             thumbnailItemView(for: item, position: .bottom)
@@ -277,16 +279,7 @@ struct FilmstripView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                }
-                .onChange(of: session.selectedItemID) { _, newID in
-                    if let newID {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            proxy.scrollTo(newID, anchor: .center)
-                        }
-                    }
-                }
-            } else {
-                ScrollView(.vertical, showsIndicators: true) {
+                } else {
                     LazyVStack(spacing: 8) {
                         ForEach(session.visibleItems) { item in
                             thumbnailItemView(for: item, position: .right)
@@ -296,11 +289,11 @@ struct FilmstripView: View {
                     .padding(.vertical, 12)
                     .padding(.horizontal, 8)
                 }
-                .onChange(of: session.selectedItemID) { _, newID in
-                    if let newID {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            proxy.scrollTo(newID, anchor: .center)
-                        }
+            }
+            .onChange(of: session.selectedItemID) { _, newID in
+                if let newID {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo(newID, anchor: .center)
                     }
                 }
             }
@@ -310,14 +303,27 @@ struct FilmstripView: View {
     private func thumbnailItemView(for item: MediaItem, position: FilmstripDockPosition) -> some View {
         FilmstripThumbnailCell(
             item: item,
+            curation: session.curationMetadata(for: item),
+            syncState: session.syncState(for: item),
             isSelected: session.selectedItemID == item.id,
-            session: session,
-            dockPosition: position
+            dockPosition: position,
+            previewSource: session.previewSource,
+            cacheGeneration: session.cacheGeneration,
+            cachedThumbnail: session.cachedThumbnailImage(for: item, maxPixelSize: 360),
+            aspectRatio: session.thumbnailAspectRatio(for: item),
+            onSelect: {
+                session.selectedItemID = item.id
+            },
+            loadThumbnail: { [session, item] in
+                guard let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) else { return nil }
+                return await PreviewLoader.decodeCGImageAsync(from: data)
+            },
+            onThumbnailLoaded: { [session, item] image in
+                session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
+            }
         )
+        .equatable()
         .id(item.id)
-        .onTapGesture {
-            session.selectedItemID = item.id
-        }
     }
 
     // MARK: - Conflict Alert Banner
@@ -390,7 +396,7 @@ struct SwipeActionBadgeView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(direction == .right ? "SWIPE RIGHT" : "SWIPE LEFT")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.caption2.weight(.bold))
                     .foregroundStyle(.white.opacity(0.75))
                     .tracking(1)
 
@@ -563,12 +569,17 @@ struct FilmstripImageCanvasView: View {
                         }
                     }
             )
-            .task(id: "\(item.id)-\(session.previewSource.rawValue)") {
+            .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
                 isLoading = true
-                if let data = await session.loadPreviewImageData(for: item, maxPixelSize: 2048) {
-                    previewImage = PreviewLoader.decodeCGImage(from: data)
+                defer { isLoading = false }
+                guard let data = await session.loadPreviewImageData(for: item, maxPixelSize: 2048) else {
+                    previewImage = nil
+                    return
                 }
-                isLoading = false
+                let decoded = await PreviewLoader.decodeCGImageAsync(from: data)
+                if !Task.isCancelled {
+                    previewImage = decoded
+                }
             }
         }
     }
@@ -593,9 +604,6 @@ struct FilmstripVideoCanvasView: View {
                 Group {
                     if let player {
                         VideoPlayer(player: player)
-                            .onDisappear {
-                                player.pause()
-                            }
                     } else {
                         ProgressView()
                             .tint(.white)
@@ -672,35 +680,36 @@ struct FilmstripVideoCanvasView: View {
 
 // MARK: - Filmstrip Thumbnail Cell
 
-struct FilmstripThumbnailCell: View {
+struct FilmstripThumbnailCell: View, Equatable {
     let item: MediaItem
+    let curation: CurationMetadata
+    let syncState: SyncState
     let isSelected: Bool
-    let session: CullingSession
     var dockPosition: FilmstripDockPosition = .bottom
+    var previewSource: PreviewSource = .preferRaster
+    var cacheGeneration: Int = 0
+    var cachedThumbnail: CGImage? = nil
+    var aspectRatio: CGFloat? = nil
+    var onSelect: (() -> Void)? = nil
+    var loadThumbnail: (() async -> CGImage?)? = nil
+    var onThumbnailLoaded: ((CGImage) -> Void)? = nil
 
     @State private var thumbnail: CGImage?
 
-    private var curation: CurationMetadata {
-        session.curationMetadata(for: item)
-    }
-
-    private var syncState: SyncState {
-        session.syncState(for: item)
-    }
-
     private var displayedImage: CGImage? {
-        thumbnail ?? session.cachedThumbnailImage(for: item, maxPixelSize: 360)
+        thumbnail ?? cachedThumbnail
     }
 
     private var currentAspectRatio: CGFloat {
-        if let cgImage = displayedImage {
-            return cgImage.aspectRatio
-        }
-        return session.thumbnailAspectRatio(for: item)
+        CullingLayoutCalculator.resolveAspectRatio(
+            aspectRatio: aspectRatio,
+            displayedThumbnail: displayedImage,
+            mediaKind: item.kind
+        )
     }
 
     private var thumbnailSize: CGSize {
-        session.filmstripThumbnailSize(
+        CullingLayoutCalculator.filmstripThumbnailSize(
             aspectRatio: currentAspectRatio,
             dockPosition: dockPosition,
             mediaKind: item.kind
@@ -719,149 +728,172 @@ struct FilmstripThumbnailCell: View {
         let size = thumbnailSize
         let isCompact = size.width < 70
 
-        VStack(spacing: 4) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(neutralMattingColor)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
-                    )
+        Button(action: {
+            onSelect?()
+        }) {
+            VStack(spacing: 4) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(neutralMattingColor)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                        )
 
-                if let cgImage = displayedImage {
-                    Image(decorative: cgImage, scale: 1.0, orientation: .up)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    Image(systemName: item.kind == .video ? "film" : "photo")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                // Color label indicator: A sleek vertical accent stripe on the left edge
-                if curation.colorLabel != .none {
-                    HStack {
-                        RoundedRectangle(cornerRadius: 1.5)
-                            .fill(curation.colorLabel.displayColor)
-                            .frame(width: 4)
-                            .padding(.vertical, 6)
-                            .padding(.leading, 3.5)
-                        Spacer()
+                    if let cgImage = displayedImage {
+                        Image(decorative: cgImage, scale: 1.0, orientation: .up)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        Image(systemName: item.kind == .video ? "film" : "photo")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                }
 
-                // Rating & Flag overlays
-                VStack {
-                    // Top row: format and sync badges with 3pt spacing and corner offsets
-                    HStack(spacing: 3) {
-                        if item.isMediaPair {
-                            Text("RAW+JPG")
-                                .font(.system(size: 8, weight: .bold))
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 2)
-                                .background(.black.opacity(0.8), in: Capsule())
-                                .foregroundStyle(.yellow)
-                        } else if item.kind == .video {
-                            Image(systemName: "video.fill")
-                                .font(.system(size: 8))
-                                .padding(3)
-                                .background(.black.opacity(0.8), in: Circle())
-                                .foregroundStyle(.white)
-                        }
-
-                        Spacer()
-
-                        switch syncState {
-                        case .synced:
-                            EmptyView()
-                        case .pendingWrite:
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.orange)
-                        case .conflicted:
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.orange)
-                        case .loading:
-                            ProgressView()
-                                .controlSize(.mini)
-                        case .syncError:
-                            Image(systemName: "exclamationmark.circle.fill")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.red)
+                    // Color label indicator: A sleek vertical accent stripe on the left edge
+                    if curation.colorLabel != .none {
+                        HStack {
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .fill(curation.colorLabel.displayColor)
+                                .frame(width: 4)
+                                .padding(.vertical, 6)
+                                .padding(.leading, 3.5)
+                            Spacer()
                         }
                     }
-                    .padding(.top, 3)
-                    .padding(.horizontal, (curation.colorLabel != .none) ? 8 : 3)
 
-                    Spacer()
-
-                    // Bottom row: star rating pill and pick flag circle with compact adjustments
-                    HStack(spacing: isCompact ? 1 : 2) {
-                        if curation.starRating > 0 {
-                            HStack(spacing: 1) {
-                                Image(systemName: "star.fill")
-                                    .font(.system(size: 8))
+                    // Rating & Flag overlays
+                    VStack {
+                        // Top row: format and sync badges with 3pt spacing and corner offsets
+                        HStack(spacing: 3) {
+                            if item.isMediaPair {
+                                Text("RAW+JPG")
+                                    .font(.caption2.weight(.bold))
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(.black.opacity(0.8), in: Capsule())
                                     .foregroundStyle(.yellow)
-                                Text("\(curation.starRating.value)")
-                                    .font(.system(size: 8, weight: .bold))
+                            } else if item.kind == .video {
+                                Image(systemName: "video.fill")
+                                    .font(.caption2)
+                                    .padding(3)
+                                    .background(.black.opacity(0.8), in: Circle())
                                     .foregroundStyle(.white)
                             }
-                            .padding(.horizontal, isCompact ? 2.5 : 4)
-                            .padding(.vertical, 2)
-                            .background(.black.opacity(0.8), in: Capsule())
+
+                            Spacer()
+
+                            switch syncState {
+                            case .synced:
+                                EmptyView()
+                            case .pendingWrite:
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            case .conflicted:
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            case .loading:
+                                ProgressView()
+                                    .controlSize(.mini)
+                            case .syncError:
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.red)
+                            }
                         }
+                        .padding(.top, 3)
+                        .padding(.horizontal, (curation.colorLabel != .none) ? 8 : 3)
 
                         Spacer()
 
-                        switch curation.pickFlag {
-                        case .picked:
-                            Image(systemName: "flag.fill")
-                                .font(.system(size: 8))
-                                .foregroundStyle(.green)
-                                .padding(isCompact ? 2 : 3)
-                                .background(.black.opacity(0.8), in: Circle())
-                        case .rejected:
-                            Image(systemName: "xmark")
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundStyle(.red)
-                                .padding(isCompact ? 2 : 3)
-                                .background(.black.opacity(0.8), in: Circle())
-                        case .unflagged:
-                            EmptyView()
-                        }
-                    }
-                    .padding(.bottom, 3)
-                    .padding(.horizontal, (curation.colorLabel != .none) ? (isCompact ? 8 : 9) : (isCompact ? 3 : 4))
-                }
-            }
-            .frame(width: size.width, height: size.height)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2.5)
-            )
+                        // Bottom row: star rating pill and pick flag circle with compact adjustments
+                        HStack(spacing: isCompact ? 1 : 2) {
+                            if curation.starRating > 0 {
+                                HStack(spacing: 1) {
+                                    Image(systemName: "star.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.yellow)
+                                    Text("\(curation.starRating.value)")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(.white)
+                                }
+                                .padding(.horizontal, isCompact ? 2.5 : 4)
+                                .padding(.vertical, 2)
+                                .background(.black.opacity(0.8), in: Capsule())
+                            }
 
-            Text(item.baseName)
-                .font(.system(size: 10, weight: isSelected ? .bold : .regular))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
-                .frame(width: max(size.width, 64))
+                            Spacer()
+
+                            switch curation.pickFlag {
+                            case .picked:
+                                Image(systemName: "flag.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.green)
+                                    .padding(isCompact ? 2 : 3)
+                                    .background(.black.opacity(0.8), in: Circle())
+                            case .rejected:
+                                Image(systemName: "xmark")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.red)
+                                    .padding(isCompact ? 2 : 3)
+                                    .background(.black.opacity(0.8), in: Circle())
+                            case .unflagged:
+                                EmptyView()
+                            }
+                        }
+                        .padding(.bottom, 3)
+                        .padding(.horizontal, (curation.colorLabel != .none) ? (isCompact ? 8 : 9) : (isCompact ? 3 : 4))
+                    }
+                }
+                .frame(width: size.width, height: size.height)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2.5)
+                )
+
+                Text(item.baseName)
+                    .font(.caption.weight(isSelected ? .bold : .regular))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                    .frame(width: max(size.width, 64))
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.baseName), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
-        .task(id: item.id) {
-            if thumbnail == nil {
-                if let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) {
-                    if let decoded = PreviewLoader.decodeCGImage(from: data) {
-                        thumbnail = decoded
-                        session.recordThumbnailAspectRatio(decoded.aspectRatio, for: item.id)
-                    }
+        .task(id: "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)") {
+            guard let loadThumbnail else { return }
+            if let decoded = await loadThumbnail() {
+                if !Task.isCancelled {
+                    thumbnail = decoded
+                    onThumbnailLoaded?(decoded)
+                }
+            } else {
+                if !Task.isCancelled {
+                    thumbnail = nil
                 }
             }
         }
+    }
+}
+
+extension FilmstripThumbnailCell {
+    static func == (lhs: FilmstripThumbnailCell, rhs: FilmstripThumbnailCell) -> Bool {
+        lhs.item == rhs.item &&
+        lhs.curation == rhs.curation &&
+        lhs.syncState == rhs.syncState &&
+        lhs.isSelected == rhs.isSelected &&
+        lhs.dockPosition == rhs.dockPosition &&
+        lhs.previewSource == rhs.previewSource &&
+        lhs.cacheGeneration == rhs.cacheGeneration &&
+        lhs.aspectRatio == rhs.aspectRatio &&
+        lhs.cachedThumbnail === rhs.cachedThumbnail
     }
 }

@@ -1,24 +1,11 @@
 import SwiftUI
 
 struct SettingsSheetView: View {
-    let session: CullingSession
+    @Bindable var session: CullingSession
+    var showsDismissButton: Bool = true
     @Environment(\.dismiss) private var dismiss
 
-    private var sliderMegabytesBinding: Binding<Double> {
-        Binding(
-            get: {
-                Double(session.cacheSizeLimitBytes) / (1_024.0 * 1_024.0)
-            },
-            set: { newMegabytes in
-                let bytes = Int64(newMegabytes * 1_024.0 * 1_024.0)
-                session.setUserConfiguredCacheSizeLimitBytes(bytes)
-            }
-        )
-    }
-
     var body: some View {
-        @Bindable var session = session
-
         NavigationStack {
             Form {
                 Section {
@@ -39,7 +26,7 @@ struct SettingsSheetView: View {
                         }
 
                         Slider(
-                            value: sliderMegabytesBinding,
+                            value: $session.cacheSizeLimitMegabytes,
                             in: 250.0...(20.0 * 1_024.0),
                             step: 250.0
                         ) {
@@ -132,14 +119,8 @@ struct SettingsSheetView: View {
                 }
 
                 Section {
-                    Picker(
-                        "Shortcut Profile",
-                        selection: Binding(
-                            get: { session.shortcutProfileKind == .custom ? .lightroom : session.shortcutProfileKind },
-                            set: { session.setShortcutProfileKind($0) }
-                        )
-                    ) {
-                        ForEach(ShortcutProfileKind.allCases.filter { $0 != .custom }, id: \.self) { kind in
+                    Picker("Shortcut Profile", selection: $session.shortcutProfileKind) {
+                        ForEach(ShortcutProfileKind.allCases.filter { $0 != .custom || session.shortcutProfileKind == .custom }, id: \.self) { kind in
                             Text(kind.displayName).tag(kind)
                         }
                     }
@@ -157,23 +138,17 @@ struct SettingsSheetView: View {
                         Text("Prefer RAW Embedded Preview").tag(PreviewSource.preferRAW)
                     }
 
-                    Toggle(
-                        "Subfolder Mode",
-                        isOn: Binding(
-                            get: { session.subfolderMode == .recursive },
-                            set: { isRecursive in
-                                try? session.setSubfolderMode(isRecursive ? .recursive : .immediate)
-                            }
-                        )
-                    )
+                    Toggle("Subfolder Mode", isOn: $session.isRecursiveSubfolderMode)
                 }
             }
             .formStyle(.grouped)
             .navigationTitle("Pickture Settings")
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        dismiss()
+                if showsDismissButton {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            dismiss()
+                        }
                     }
                 }
             }
