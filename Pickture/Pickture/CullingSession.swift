@@ -66,7 +66,7 @@ final class CullingSession {
     private var conflictsByItemID: [String: MetadataConflict] = [:]
     private var thumbnailAspectRatios: [String: CGFloat] = [:]
     private(set) var isFlushingPendingWrites: Bool = false
-    private var flushContinuations: [CheckedContinuation<Void, Never>] = []
+    private var activeFlushTask: Task<Void, Never>? = nil
     var isAccessingFolder: Bool {
         folderAccessService.isAccessingFolder
     }
@@ -772,34 +772,54 @@ final class CullingSession {
         if conflicts > 0 {
             return "\(conflicts) Conflict\(conflicts == 1 ? "" : "s")"
         }
-        let pending = pendingWritesCount
-        if pending > 0 {
-            return "\(pending) Pending"
-        }
         let errors = syncErrorItemsCount
         if errors > 0 {
             return "\(errors) Error\(errors == 1 ? "" : "s")"
         }
+        let pending = pendingWritesCount
+        if pending > 0 {
+            return "\(pending) Pending"
+        }
         return "Synced"
     }
 
-    func flushPendingWrites() async {
-        guard !isFlushingPendingWrites else {
-            await withCheckedContinuation { continuation in
-                flushContinuations.append(continuation)
-            }
-            return
-        }
-        isFlushingPendingWrites = true
-        defer {
-            isFlushingPendingWrites = false
-            let continuations = flushContinuations
-            flushContinuations.removeAll()
-            for c in continuations {
-                c.resume()
-            }
-        }
+    func recordSyncError(_ error: Error, fallback: String? = nil) {
+        let fallbackText = fallback ?? error.localizedDescription
+        lastErrorMessage = SidecarCodec.userFacingErrorMessage(for: error, fallback: fallbackText)
+    }
 
+    func flushPendingWrites() async {
+        while !Task.isCancelled {
+            if let existing = activeFlushTask {
+                await existing.value
+            } else {
+                let pendingCount = items.filter { syncState(for: $0) == .pendingWrite }.count
+                guard pendingCount > 0 else { break }
+
+                let task = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.isFlushingPendingWrites = true
+                    defer {
+                        self.isFlushingPendingWrites = false
+                        self.activeFlushTask = nil
+                    }
+                    await self.performPendingWritesFlush()
+                }
+                activeFlushTask = task
+                await withTaskCancellationHandler {
+                    await task.value
+                } onCancel: {
+                    task.cancel()
+                }
+            }
+            let remainingPending = items.contains { syncState(for: $0) == .pendingWrite }
+            if !remainingPending {
+                break
+            }
+        }
+    }
+
+    private func performPendingWritesFlush() async {
         while !Task.isCancelled {
             let pending = items.filter { syncState(for: $0) == .pendingWrite }
             guard !pending.isEmpty else { break }
@@ -818,10 +838,7 @@ final class CullingSession {
                     let nsError = error as NSError
                     let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
                     Self.logger.error("Flush error on \(item.displayFileName, privacy: .public): domain=\(nsError.domain, privacy: .public) code=\(nsError.code) underlying=\(underlying?.domain ?? "none", privacy: .public)(\(underlying?.code ?? -1)) desc=\(error.localizedDescription, privacy: .public)")
-                    lastErrorMessage = SidecarCodec.userFacingErrorMessage(
-                        for: error,
-                        fallback: "Sync error on \(item.displayFileName): \(error.localizedDescription)"
-                    )
+                    recordSyncError(error, fallback: "Sync error on \(item.displayFileName): \(error.localizedDescription)")
                     refreshDerivedCounts()
                 }
             }
@@ -1009,9 +1026,7 @@ final class CullingSession {
             }
             resolvedMetadata = chosen
 
-            let writtenTargets = try await Task.detached(priority: .utility) {
-                try await SidecarCodec.write(curation: chosen, for: item)
-            }.value
+            let writtenTargets = try await SidecarCodec.write(curation: chosen, for: item)
 
             let primaryTarget = writtenTargets.first ?? SidecarCodec.resolveSidecarReadURL(for: item)
             let writtenData = primaryTarget.flatMap { SidecarCodec.readData(from: $0) } ?? Data()
@@ -1211,12 +1226,13 @@ final class CullingSession {
                     exifByItemID[item.id] = persistedExif
                 }
 
-                if persisted.syncState == .pendingWrite {
+                if persisted.syncState == .pendingWrite || persisted.syncState == .syncError {
                     metadataByItemID[item.id] = persisted.metadata
-                    syncStateByItemID[item.id] = .pendingWrite
+                    syncStateByItemID[item.id] = persisted.syncState
                     baseSnapshotByItemID[item.id] = persisted.baseSnapshot
 
-                    // Check if external edit happened on disk while pending
+                    // Check if external edit happened on disk while pending or in syncError
+                    // (e.g. share remounted with a new or modified external .xmp file)
                     if let base = persisted.baseSnapshot {
                         let remoteChanged = diskDigest != base.fileDigest
                         let threeWay = XMPConflictEngine.evaluateThreeWay(
@@ -1231,7 +1247,32 @@ final class CullingSession {
                             syncStateByItemID[item.id] = .conflicted
                             conflictsByItemID[item.id] = conflict
                             metadataSyncStore.recordConflict(conflict, for: item.id)
-                        case .cleanMerge, .noChange:
+                        case .cleanMerge(let merged):
+                            metadataByItemID[item.id] = merged
+                            metadataSyncStore.stagePendingWrite(merged, baseSnapshot: base, for: item.id)
+                        case .noChange:
+                            break
+                        }
+                    } else if let diskCuration {
+                        // Remounted with a new sidecar created externally while local had uncommitted mutations
+                        let threeWay = XMPConflictEngine.evaluateThreeWay(
+                            itemID: item.id,
+                            base: nil,
+                            local: persisted.metadata,
+                            remote: diskCuration,
+                            remoteDigestChanged: true
+                        )
+                        switch threeWay {
+                        case .conflict(let conflict):
+                            syncStateByItemID[item.id] = .conflicted
+                            conflictsByItemID[item.id] = conflict
+                            metadataSyncStore.recordConflict(conflict, for: item.id)
+                        case .cleanMerge(let merged):
+                            metadataByItemID[item.id] = merged
+                            let newBase = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
+                            metadataSyncStore.stagePendingWrite(merged, baseSnapshot: newBase, for: item.id)
+                            baseSnapshotByItemID[item.id] = newBase
+                        case .noChange:
                             break
                         }
                     }

@@ -79,68 +79,10 @@ nonisolated enum SidecarCodec {
         return files
     }
 
-    // MARK: - Safe POSIX I/O & Invalidation Helpers
+    // MARK: - Safe Disk I/O & Invalidation Helpers
 
     static func readData(from url: URL) -> Data? {
-        if let data = try? Data(contentsOf: url) {
-            return data
-        }
-        let fd = open(url.path, O_RDONLY)
-        guard fd >= 0 else { return nil }
-        defer { close(fd) }
-        var statBuf = stat()
-        guard fstat(fd, &statBuf) == 0 else { return nil }
-        let size = Int(statBuf.st_size)
-        guard size > 0 else { return Data() }
-        var data = Data(count: size)
-        let readSuccess = data.withUnsafeMutableBytes { rawBuffer -> Bool in
-            guard let base = rawBuffer.baseAddress else { return false }
-            var totalRead = 0
-            while totalRead < size {
-                let r = Darwin.read(fd, base.advanced(by: totalRead), size - totalRead)
-                if r <= 0 { return false }
-                totalRead += r
-            }
-            return true
-        }
-        return readSuccess ? data : nil
-    }
-
-    @discardableResult
-    static func writeViaPOSIX(data: Data, to path: String, flags: Int32 = O_WRONLY | O_CREAT | O_TRUNC, mode: mode_t = 0o666) -> Error? {
-        let fd = open(path, flags, mode)
-        if fd < 0 {
-            let err = errno
-            return NSError(domain: NSPOSIXErrorDomain, code: Int(err), userInfo: [
-                NSLocalizedDescriptionKey: String(cString: strerror(err)),
-                NSFilePathErrorKey: path
-            ])
-        }
-        defer { close(fd) }
-
-        var remaining = data.count
-        var offset = 0
-        let writeError: Int32 = data.withUnsafeBytes { rawBuffer -> Int32 in
-            guard let base = rawBuffer.baseAddress else { return 0 }
-            while remaining > 0 {
-                let written = Darwin.write(fd, base.advanced(by: offset), remaining)
-                if written < 0 {
-                    return errno
-                }
-                remaining -= written
-                offset += written
-            }
-            return 0
-        }
-
-        if writeError != 0 {
-            return NSError(domain: NSPOSIXErrorDomain, code: Int(writeError), userInfo: [
-                NSLocalizedDescriptionKey: String(cString: strerror(writeError)),
-                NSFilePathErrorKey: path
-            ])
-        }
-
-        return nil
+        try? Data(contentsOf: url)
     }
 
     // MARK: - XMP Parsing
@@ -172,157 +114,56 @@ nonisolated enum SidecarCodec {
 
     @discardableResult
     static func writeCoordinatedWithRetry(data: Data, to url: URL) async throws -> URL {
-        let coordinator = NSFileCoordinator(filePresenter: nil)
-        let fm = FileManager.default
+        try await Task.detached(priority: .utility) {
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            let fm = FileManager.default
 
-        struct AttemptResult {
-            var coordError: NSError?
-            var writeError: Error?
-            var accessorRan: Bool = false
-            var targetURL: URL?
+            struct AttemptResult {
+                var coordError: NSError?
+                var writeError: Error?
 
-            var error: Error? {
-                coordError ?? writeError
+                var error: Error? {
+                    coordError ?? writeError
+                }
             }
-        }
 
-        func attemptWrite(useReplacing: Bool) -> AttemptResult {
-            var result = AttemptResult()
-            let options: NSFileCoordinator.WritingOptions = useReplacing ? .forReplacing : []
-            coordinator.coordinate(writingItemAt: url, options: options, error: &result.coordError) { targetURL in
-                result.accessorRan = true
-                result.targetURL = targetURL
-                do {
-                    try data.write(to: targetURL, options: [])
-                } catch {
-                    // Foundation's data.write fails on stat() before even attempting open().
-                    // Direct POSIX open(O_CREAT) does not stat() first and may bypass the stale handle.
-                    if isStaleOrMissingFileError(error) {
-                        if let posixErr = writeViaPOSIX(data: data, to: targetURL.path) {
-                            result.writeError = posixErr
-                        } else {
-                            result.writeError = nil
-                        }
-                    } else {
+            func attemptWrite(useReplacing: Bool) -> AttemptResult {
+                var result = AttemptResult()
+                let options: NSFileCoordinator.WritingOptions = useReplacing ? [.forReplacing] : []
+                coordinator.coordinate(writingItemAt: url, options: options, error: &result.coordError) { targetURL in
+                    do {
+                        try data.write(to: targetURL, options: [])
+                    } catch {
                         result.writeError = error
                     }
                 }
-            }
-            return result
-        }
-
-        let initialExists = fm.fileExists(atPath: url.path)
-        var lastAttempt = attemptWrite(useReplacing: !initialExists)
-
-        if lastAttempt.error == nil {
-            return url
-        }
-
-        let error = lastAttempt.error!
-        var statBuf = stat()
-        let statRes = stat(url.path, &statBuf)
-        let statErr = errno
-        let folderURL = url.deletingLastPathComponent()
-        let folderExists = fm.fileExists(atPath: folderURL.path)
-
-        logger.debug("""
-        Initial write failed for \(url.lastPathComponent, privacy: .public): \
-        coordError=\(String(describing: lastAttempt.coordError), privacy: .public) \
-        accessorRan=\(lastAttempt.accessorRan) \
-        targetURL=\(lastAttempt.targetURL?.path ?? "nil", privacy: .public) \
-        writeError=\(String(describing: lastAttempt.writeError), privacy: .public) \
-        fm.fileExists=\(initialExists) statRes=\(statRes) (errno \(statErr): \(String(cString: strerror(statErr)), privacy: .public)) \
-        folderExists=\(folderExists)
-        """)
-
-        if isStaleOrMissingFileError(error) {
-            // Progressive backoff with .forReplacing
-            let retryDelays: [UInt64] = [50_000_000, 150_000_000]
-            for (idx, delay) in retryDelays.enumerated() {
-                try await Task.sleep(nanoseconds: delay)
-                let retryAttempt = attemptWrite(useReplacing: true)
-                if retryAttempt.error == nil {
-                    logger.info("SidecarCodec.write succeeded on backoff retry #\(idx + 1) for \(url.lastPathComponent, privacy: .public)")
-                    return url
-                }
-                lastAttempt = retryAttempt
+                return result
             }
 
-            logger.debug("Backoff retries exhausted for \(url.lastPathComponent, privacy: .public). Probing recovery fallbacks:")
+            let initialExists = fm.fileExists(atPath: url.path)
+            var lastAttempt = attemptWrite(useReplacing: !initialExists)
 
-            // Probe 1: Parent directory cache invalidation via readdir + fsync
-            let folderPath = folderURL.path
-            if let dir = opendir(folderPath) {
-                while readdir(dir) != nil {}
-                closedir(dir)
-            }
-            let dirFd = open(folderPath, O_RDONLY)
-            if dirFd >= 0 {
-                fsync(dirFd)
-                close(dirFd)
-            }
-            if writeViaPOSIX(data: data, to: url.path) == nil {
-                logger.info("Recovery via directory fsync + POSIX write succeeded for \(url.lastPathComponent, privacy: .public)")
+            if lastAttempt.error == nil {
                 return url
             }
 
-            // Probe 2: POSIX open with O_CREAT | O_EXCL
-            if writeViaPOSIX(data: data, to: url.path, flags: O_WRONLY | O_CREAT | O_EXCL) == nil {
-                logger.info("Recovery via POSIX O_EXCL succeeded for \(url.lastPathComponent, privacy: .public)")
-                return url
-            }
-
-            // Probe 3: Explicit POSIX unlink to evict stale kernel/smbclientd inode cache
-            let unlinkRes = unlink(url.path)
-            let unlinkErr = errno
-            logger.debug("Probe 3 (POSIX unlink): res=\(unlinkRes), errno=\(unlinkErr)")
-            if writeViaPOSIX(data: data, to: url.path) == nil {
-                logger.info("Recovery via POSIX unlink + POSIX write succeeded for \(url.lastPathComponent, privacy: .public)")
-                return url
-            }
-
-            // Probe 4: Write to fresh temporary file in same folder and atomic rename
-            let tempName = ".\(url.deletingPathExtension().lastPathComponent).tmp-\(UUID().uuidString.prefix(8)).xmp"
-            let tempURL = folderURL.appendingPathComponent(tempName)
-            var tempWriteSucceeded = false
-            do {
-                logger.debug("Probe 4: Attempting write to temp file: \(tempName, privacy: .public)")
-                try data.write(to: tempURL, options: [])
-                tempWriteSucceeded = true
-                logger.debug("Probe 4: Temp write succeeded. Renaming to target...")
-                let renameRes = rename(tempURL.path, url.path)
-                if renameRes == 0 {
-                    logger.info("Recovery via temp file + rename succeeded for \(url.lastPathComponent, privacy: .public)")
-                    return url
-                } else {
-                    let renameErr = errno
-                    logger.debug("Probe 4: rename failed with errno=\(renameErr)")
-                    do {
-                        _ = try fm.replaceItemAt(url, withItemAt: tempURL, backupItemName: nil, options: [])
-                        logger.info("Recovery via fm.replaceItemAt succeeded for \(url.lastPathComponent, privacy: .public)")
+            let error = lastAttempt.error!
+            if isStaleOrMissingFileError(error) {
+                // Progressive backoff with .forReplacing
+                let retryDelays: [UInt64] = [50_000_000, 150_000_000]
+                for delay in retryDelays {
+                    try? await Task.sleep(nanoseconds: delay)
+                    let retryAttempt = attemptWrite(useReplacing: true)
+                    if retryAttempt.error == nil {
                         return url
-                    } catch {
-                        logger.debug("Probe 4: fm.replaceItemAt also failed: \(error.localizedDescription, privacy: .public)")
                     }
+                    lastAttempt = retryAttempt
                 }
-            } catch {
-                logger.debug("Probe 4: Temp write failed: \(error.localizedDescription, privacy: .public)")
-            }
-            if tempWriteSucceeded && fm.fileExists(atPath: tempURL.path) {
-                try? fm.removeItem(at: tempURL)
             }
 
             let finalError = lastAttempt.error ?? error
-            let nsError = finalError as NSError
-            let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-            logger.error("SidecarCodec.write all retries and fallbacks failed for \(url.lastPathComponent, privacy: .public): domain=\(nsError.domain, privacy: .public) code=\(nsError.code) underlying=\(underlying?.domain ?? "none", privacy: .public)(\(underlying?.code ?? -1))")
             throw finalError
-        } else {
-            let nsError = error as NSError
-            let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-            logger.error("SidecarCodec.write direct failed for \(url.lastPathComponent, privacy: .public): domain=\(nsError.domain, privacy: .public) code=\(nsError.code) underlying=\(underlying?.domain ?? "none", privacy: .public)(\(underlying?.code ?? -1))")
-            throw error
-        }
+        }.value
     }
 
     static func hasPOSIXErrorCode(_ error: Error, code: Int) -> Bool {
@@ -342,7 +183,7 @@ nonisolated enum SidecarCodec {
 
     static func userFacingErrorMessage(for error: Error, fallback: String) -> String {
         if isStaleFileHandleError(error) {
-            return "Network share has stale file handles from external file deletion. Disconnect and reconnect the server in the Files app to restore write access."
+            return "Network share encountered stale file handles. If using a network share, disconnect and reconnect the server in the Files app to help restore write access."
         }
         return fallback
     }

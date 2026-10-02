@@ -657,6 +657,59 @@ struct CullingSessionSyncAndConflictTests {
         let parsed = try SidecarCodec.parse(data: diskData)
         #expect(parsed.curation == expectedMerged)
     }
+
+    @Test("SyncError items preserve local mutations on reload and evaluate conflicts if external XMP appears")
+    func syncErrorPreservesMutationsAndDetectsConflictOnReload() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let storeRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: storeRoot) }
+
+        let jpgURL = root.appendingPathComponent("TEST_SYNCERR.JPG")
+        try Data("jpg-data".utf8).write(to: jpgURL)
+
+        let initialXMP = try SidecarCodec.update(xmlData: nil, with: CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .none))
+        let xmpURL = root.appendingPathComponent("TEST_SYNCERR.xmp")
+        try initialXMP.write(to: xmpURL)
+
+        let session1 = CullingSession(storageRootURL: storeRoot)
+        try session1.openFolder(at: root)
+
+        let item1 = try #require(session1.items.first)
+        session1.setStarRating(5, for: item1)
+        session1.setPickFlag(.picked, for: item1)
+
+        // Delete the XMP on disk to simulate external deletion / ESTALE condition
+        try FileManager.default.removeItem(at: xmpURL)
+
+        // Mark syncState as .syncError in store
+        let syncStore = MetadataSyncStore(storeDirectoryURL: storeRoot)
+        syncStore.updateSyncState(.syncError, for: item1.id)
+
+        // Case 1: Re-open folder with deleted XMP while in syncError -> local mutations must NOT be erased
+        let session2 = CullingSession(storageRootURL: storeRoot)
+        try session2.openFolder(at: root)
+
+        let item2 = try #require(session2.items.first)
+        #expect(session2.curationMetadata(for: item2).starRating == 5)
+        #expect(session2.curationMetadata(for: item2).pickFlag == .picked)
+        #expect(session2.syncState(for: item2) == .pendingWrite || session2.syncState(for: item2) == .syncError)
+
+        // Case 2: External app creates a conflicting .xmp on disk (e.g. starRating = 3)
+        let externalConflictingXMP = try SidecarCodec.update(xmlData: nil, with: CurationMetadata(starRating: 3, pickFlag: .rejected, colorLabel: .blue))
+        try externalConflictingXMP.write(to: xmpURL)
+
+        // Reopen folder again: must detect conflict with the newly appeared external XMP!
+        let session3 = CullingSession(storageRootURL: storeRoot)
+        try session3.openFolder(at: root)
+
+        let item3 = try #require(session3.items.first)
+        #expect(session3.syncState(for: item3) == .conflicted)
+        let conflict = try #require(session3.conflict(for: item3))
+        #expect(conflict.local.starRating == 5)
+        #expect(conflict.remote.starRating == 3)
+    }
 }
 
 

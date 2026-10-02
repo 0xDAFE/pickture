@@ -76,11 +76,11 @@ nonisolated enum XMPConflictEngine {
     }
 
     static func evaluate(
+        itemID: String = "",
         base: BaseSnapshot?,
         local: CurationMetadata,
         remote: CurationMetadata,
-        remoteDigestChanged: Bool,
-        itemID: String = ""
+        remoteDigestChanged: Bool
     ) -> MetadataConflict? {
         let result = evaluateThreeWay(
             itemID: itemID,
@@ -93,22 +93,6 @@ nonisolated enum XMPConflictEngine {
             return conflict
         }
         return nil
-    }
-
-    static func evaluate(
-        itemID: String,
-        base: BaseSnapshot?,
-        local: CurationMetadata,
-        remote: CurationMetadata,
-        remoteDigestChanged: Bool
-    ) -> MetadataConflict? {
-        evaluate(
-            base: base,
-            local: local,
-            remote: remote,
-            remoteDigestChanged: remoteDigestChanged,
-            itemID: itemID
-        )
     }
 
     // MARK: - Conflict Resolution & Merging

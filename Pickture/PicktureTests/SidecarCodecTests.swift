@@ -464,26 +464,23 @@ struct SidecarCodecTests {
         #expect(!SidecarCodec.isStaleFileHandleError(genericError))
     }
 
-    @Test("SidecarCodec POSIX helpers write and read data cleanly")
-    func posixHelpersWriteAndReadCleanly() throws {
+    @Test("SidecarCodec.readData reads data cleanly")
+    func readDataReadsCleanly() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let testFile = root.appendingPathComponent("posix_test.xmp")
-        let sampleData = "Sample POSIX XMP Content".data(using: .utf8)!
+        let testFile = root.appendingPathComponent("read_test.xmp")
+        let sampleData = "Sample XMP Content".data(using: .utf8)!
 
-        // Write via POSIX
-        let writeErr = SidecarCodec.writeViaPOSIX(data: sampleData, to: testFile.path)
-        #expect(writeErr == nil)
+        try sampleData.write(to: testFile)
 
         // Read via SidecarCodec.readData
         let readBack = SidecarCodec.readData(from: testFile)
         #expect(readBack == sampleData)
 
-        // Overwrite via POSIX
-        let updatedData = "Updated POSIX XMP Content".data(using: .utf8)!
-        let overwriteErr = SidecarCodec.writeViaPOSIX(data: updatedData, to: testFile.path)
-        #expect(overwriteErr == nil)
+        // Overwrite
+        let updatedData = "Updated XMP Content".data(using: .utf8)!
+        try updatedData.write(to: testFile)
 
         let readBackUpdated = SidecarCodec.readData(from: testFile)
         #expect(readBackUpdated == updatedData)
