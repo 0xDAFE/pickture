@@ -1,8 +1,10 @@
 import CryptoKit
 import Darwin
 import Foundation
+import OSLog
 
 nonisolated enum SidecarCodec {
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.pickture", category: "sync")
 
     // MARK: - Sidecar Path Discovery & Targets
 
@@ -223,13 +225,15 @@ nonisolated enum SidecarCodec {
         let folderURL = url.deletingLastPathComponent()
         let folderExists = fm.fileExists(atPath: folderURL.path)
 
-        print("[DEBUG-SMB-SYNC] Initial write failed for \(url.lastPathComponent):")
-        print("[DEBUG-SMB-SYNC]   coordError: \(String(describing: lastAttempt.coordError))")
-        print("[DEBUG-SMB-SYNC]   accessorRan: \(lastAttempt.accessorRan)")
-        print("[DEBUG-SMB-SYNC]   targetURL: \(lastAttempt.targetURL?.path ?? "nil")")
-        print("[DEBUG-SMB-SYNC]   writeError: \(String(describing: lastAttempt.writeError))")
-        print("[DEBUG-SMB-SYNC]   fm.fileExists: \(initialExists), statRes: \(statRes) (errno \(statErr): \(String(cString: strerror(statErr))))")
-        print("[DEBUG-SMB-SYNC]   folder exists: \(folderExists) (\(folderURL.lastPathComponent))")
+        logger.debug("""
+        Initial write failed for \(url.lastPathComponent, privacy: .public): \
+        coordError=\(String(describing: lastAttempt.coordError), privacy: .public) \
+        accessorRan=\(lastAttempt.accessorRan) \
+        targetURL=\(lastAttempt.targetURL?.path ?? "nil", privacy: .public) \
+        writeError=\(String(describing: lastAttempt.writeError), privacy: .public) \
+        fm.fileExists=\(initialExists) statRes=\(statRes) (errno \(statErr): \(String(cString: strerror(statErr)), privacy: .public)) \
+        folderExists=\(folderExists)
+        """)
 
         if isStaleOrMissingFileError(error) {
             // Progressive backoff with .forReplacing
@@ -238,13 +242,13 @@ nonisolated enum SidecarCodec {
                 try await Task.sleep(nanoseconds: delay)
                 let retryAttempt = attemptWrite(useReplacing: true)
                 if retryAttempt.error == nil {
-                    print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded on backoff retry #\(idx + 1) for \(url.lastPathComponent)")
+                    logger.info("SidecarCodec.write succeeded on backoff retry #\(idx + 1) for \(url.lastPathComponent, privacy: .public)")
                     return url
                 }
                 lastAttempt = retryAttempt
             }
 
-            print("[DEBUG-SMB-SYNC] Backoff retries exhausted for \(url.lastPathComponent). Probing recovery fallbacks:")
+            logger.debug("Backoff retries exhausted for \(url.lastPathComponent, privacy: .public). Probing recovery fallbacks:")
 
             // Probe 1: Parent directory cache invalidation via readdir + fsync
             let folderPath = folderURL.path
@@ -258,22 +262,22 @@ nonisolated enum SidecarCodec {
                 close(dirFd)
             }
             if writeViaPOSIX(data: data, to: url.path) == nil {
-                print("[DEBUG-SMB-SYNC]   -> Recovery via directory fsync + POSIX write SUCCEEDED for \(url.lastPathComponent)!")
+                logger.info("Recovery via directory fsync + POSIX write succeeded for \(url.lastPathComponent, privacy: .public)")
                 return url
             }
 
             // Probe 2: POSIX open with O_CREAT | O_EXCL
             if writeViaPOSIX(data: data, to: url.path, flags: O_WRONLY | O_CREAT | O_EXCL) == nil {
-                print("[DEBUG-SMB-SYNC]   -> Recovery via POSIX O_EXCL SUCCEEDED for \(url.lastPathComponent)!")
+                logger.info("Recovery via POSIX O_EXCL succeeded for \(url.lastPathComponent, privacy: .public)")
                 return url
             }
 
             // Probe 3: Explicit POSIX unlink to evict stale kernel/smbclientd inode cache
             let unlinkRes = unlink(url.path)
             let unlinkErr = errno
-            print("[DEBUG-SMB-SYNC]   Probe 3 (POSIX unlink): res=\(unlinkRes), errno=\(unlinkErr) (\(String(cString: strerror(unlinkErr))))")
+            logger.debug("Probe 3 (POSIX unlink): res=\(unlinkRes), errno=\(unlinkErr)")
             if writeViaPOSIX(data: data, to: url.path) == nil {
-                print("[DEBUG-SMB-SYNC]   -> Recovery via POSIX unlink + POSIX write SUCCEEDED for \(url.lastPathComponent)!")
+                logger.info("Recovery via POSIX unlink + POSIX write succeeded for \(url.lastPathComponent, privacy: .public)")
                 return url
             }
 
@@ -282,27 +286,27 @@ nonisolated enum SidecarCodec {
             let tempURL = folderURL.appendingPathComponent(tempName)
             var tempWriteSucceeded = false
             do {
-                print("[DEBUG-SMB-SYNC]   Probe 4: Attempting write to temp file: \(tempName)")
+                logger.debug("Probe 4: Attempting write to temp file: \(tempName, privacy: .public)")
                 try data.write(to: tempURL, options: [])
                 tempWriteSucceeded = true
-                print("[DEBUG-SMB-SYNC]   Probe 4: Temp write succeeded. Renaming to target...")
+                logger.debug("Probe 4: Temp write succeeded. Renaming to target...")
                 let renameRes = rename(tempURL.path, url.path)
                 if renameRes == 0 {
-                    print("[DEBUG-SMB-SYNC]   -> Recovery via temp file + rename SUCCEEDED for \(url.lastPathComponent)!")
+                    logger.info("Recovery via temp file + rename succeeded for \(url.lastPathComponent, privacy: .public)")
                     return url
                 } else {
                     let renameErr = errno
-                    print("[DEBUG-SMB-SYNC]   Probe 4: rename failed with errno=\(renameErr) (\(String(cString: strerror(renameErr))))")
+                    logger.debug("Probe 4: rename failed with errno=\(renameErr)")
                     do {
                         _ = try fm.replaceItemAt(url, withItemAt: tempURL, backupItemName: nil, options: [])
-                        print("[DEBUG-SMB-SYNC]   -> Recovery via fm.replaceItemAt SUCCEEDED for \(url.lastPathComponent)!")
+                        logger.info("Recovery via fm.replaceItemAt succeeded for \(url.lastPathComponent, privacy: .public)")
                         return url
                     } catch {
-                        print("[DEBUG-SMB-SYNC]   Probe 4: fm.replaceItemAt also failed: \(error.localizedDescription)")
+                        logger.debug("Probe 4: fm.replaceItemAt also failed: \(error.localizedDescription, privacy: .public)")
                     }
                 }
             } catch {
-                print("[DEBUG-SMB-SYNC]   Probe 4: Temp write failed: \(error.localizedDescription)")
+                logger.debug("Probe 4: Temp write failed: \(error.localizedDescription, privacy: .public)")
             }
             if tempWriteSucceeded && fm.fileExists(atPath: tempURL.path) {
                 try? fm.removeItem(at: tempURL)
@@ -311,12 +315,12 @@ nonisolated enum SidecarCodec {
             let finalError = lastAttempt.error ?? error
             let nsError = finalError as NSError
             let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-            print("[DEBUG-SMB-SYNC] SidecarCodec.write all retries and fallbacks failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
+            logger.error("SidecarCodec.write all retries and fallbacks failed for \(url.lastPathComponent, privacy: .public): domain=\(nsError.domain, privacy: .public) code=\(nsError.code) underlying=\(underlying?.domain ?? "none", privacy: .public)(\(underlying?.code ?? -1))")
             throw finalError
         } else {
             let nsError = error as NSError
             let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-            print("[DEBUG-SMB-SYNC] SidecarCodec.write direct failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
+            logger.error("SidecarCodec.write direct failed for \(url.lastPathComponent, privacy: .public): domain=\(nsError.domain, privacy: .public) code=\(nsError.code) underlying=\(underlying?.domain ?? "none", privacy: .public)(\(underlying?.code ?? -1))")
             throw error
         }
     }

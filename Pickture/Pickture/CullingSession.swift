@@ -1,10 +1,12 @@
 import CoreGraphics
 import Foundation
 import Observation
+import OSLog
 
 @MainActor
 @Observable
 final class CullingSession {
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.pickture", category: "sync")
     let storageRootURL: URL
     private let folderAccessService: FolderAccessService
     let mediaCache: MediaCache
@@ -815,7 +817,7 @@ final class CullingSession {
                     metadataSyncStore.updateSyncState(.syncError, for: item.id)
                     let nsError = error as NSError
                     let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-                    print("[DEBUG-SMB-SYNC] Flush error on \(item.displayFileName): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1)) desc=\(error.localizedDescription)")
+                    Self.logger.error("Flush error on \(item.displayFileName, privacy: .public): domain=\(nsError.domain, privacy: .public) code=\(nsError.code) underlying=\(underlying?.domain ?? "none", privacy: .public)(\(underlying?.code ?? -1)) desc=\(error.localizedDescription, privacy: .public)")
                     lastErrorMessage = SidecarCodec.userFacingErrorMessage(
                         for: error,
                         fallback: "Sync error on \(item.displayFileName): \(error.localizedDescription)"
