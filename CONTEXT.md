@@ -19,7 +19,7 @@ A `MediaItem` backed by both a RAW `MediaFile` and a raster (e.g. JPEG/HEIC) `Me
 _Avoid_: Stack, Group, Bundle, Duplicate
 
 **Sidecar**:
-A standard-conformant `.xmp` file stored alongside a `MediaItem`'s `MediaFile`(s) that persists all non-destructive rating and culling metadata without modifying the original media files.
+A standard-conformant `.xmp` file stored alongside a `MediaItem`'s `MediaFile`(s) that persists all non-destructive rating and culling metadata without modifying the original media files. Follows `<basename>.xmp` (shared between RAW+raster pairs in Lightroom and Capture One) or `<filename>.<ext>.xmp` (Darktable sidecar convention). For Capture One workflows, star ratings and color labels (synchronized with `photoshop:Urgency`) are used for culling, as Capture One does not support XMP pick flags.
 _Avoid_: Metadata file, Tag file, Companion file
 
 **SubfolderMode**:
