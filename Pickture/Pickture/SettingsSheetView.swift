@@ -129,7 +129,7 @@ struct SettingsSheetView: View {
                 } header: {
                     Text("Shortcuts & Auto-Advance")
                 } footer: {
-                    Text("Lightroom profile maps ratings 0–5, flags P/X/U, labels 6–9. Capture One profile maps ratings 0–5, flags +/-/U, label *. Auto-Advance automatically moves selection to the next item immediately after applying a rating, flag, or label.")
+                    Text("Lightroom profile maps ratings 0–5, flags P/X/U, labels 6–9. Capture One profile maps ratings 0–5, flags +/-/U, label *. Auto-Advance automatically moves selection to the next item immediately after applying a rating, flag, or label. Note: Capture One synchronizes XMP star ratings and color labels, but does not support pick/reject flags in XMP sidecars; when culling for Capture One, use Star Ratings or Color Labels.")
                 }
 
                 Section("Preview & Discovery Defaults") {

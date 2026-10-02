@@ -8,7 +8,9 @@ I don't need to make any image adjustments / editing with this app, the focus is
 ## Crucial Features
 - Support for external storage location provided by Files.app on iOS / iPad OS to allow direct access to NAS storage
 - Non-destructive editing: The original image files or video files are **NEVER** modified. All metadata is written into standard conform `.xmp` sidecars
-- Metadata compatibility: Both reading and writing metadata needs to support common industry tools such as Capture One, Lightroom and Adobe Bridge
+- Metadata compatibility: Both reading and writing metadata supports common industry tools including Adobe Lightroom, Capture One, Adobe Bridge, and Darktable.
+  - Sidecar conventions: Both Lightroom Classic and Capture One use `<basename>.xmp` (shared across RAW+raster pairs), while Darktable uses `<filename>.<ext>.xmp`. Pickture reads both conventions and writes to `<basename>.xmp` by default while updating existing `<filename>.<ext>.xmp` files.
+  - Capture One workflow: Capture One reads and writes star ratings and color labels via XMP sidecars (synchronized with `photoshop:Urgency`), but does not support pick/reject flags in XMP. Users targeting Capture One should cull using Star Ratings or Color Labels.
 - Tolerance for low bandwidth, high latency and unreliable network connections: Mobile media management is expected to be performed over unreliable mobile network connectivity as a main use case. The app does not assume reliable, high-bandwidth LAN connectivity.
 - Responsiveness: Network activity (such as reading or writing metadata or media files) does not block the UI. Data is lazy loaded and cached where appropriate, keeping the UI responsive but with a clear indication of the current activity status for each media file.
 - Keyboard support with shortcuts for ratings, with a configurable keyboard shortcut profile matching Capture One or Lightroom shortcuts

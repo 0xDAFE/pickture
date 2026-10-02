@@ -191,6 +191,30 @@ nonisolated enum ColorLabel: String, Codable, CaseIterable, Hashable, Sendable {
     case blue
     case purple
     case grey
+
+    var photoshopUrgency: Int? {
+        switch self {
+        case .red: return 1
+        case .green: return 2
+        case .yellow: return 3
+        case .blue: return 4
+        case .orange: return 5
+        case .purple: return 6
+        case .grey, .none: return nil
+        }
+    }
+
+    init?(photoshopUrgency: Int) {
+        switch photoshopUrgency {
+        case 1: self = .red
+        case 2: self = .green
+        case 3: self = .yellow
+        case 4: self = .blue
+        case 5: self = .orange
+        case 6: self = .purple
+        default: return nil
+        }
+    }
 }
 
 nonisolated struct CurationMetadata: Hashable, Codable, Sendable {
