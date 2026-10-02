@@ -251,4 +251,109 @@ struct XMPConflictEngineTests {
         #expect(xmlString.contains("crs:Pick=\"-1\""))
         #expect(xmlString.contains("xmp:Label=\"Red\""))
     }
+
+    // MARK: - Three-Way Auto-Merge Evaluation (Spec #22)
+
+    @Test("evaluateThreeWay auto-merges non-overlapping remote and local changes cleanly")
+    func evaluateThreeWayAutoMergesDisjointEdits() {
+        // Base: star 1, unflagged, none
+        let baseMeta = CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .none)
+        let baseSnapshot = BaseSnapshot(metadata: baseMeta, fileDigest: "digest-base")
+
+        // Local changed: colorLabel to .green
+        let localMeta = CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .green)
+
+        // Remote changed: starRating to 5
+        let remoteMeta = CurationMetadata(starRating: 5, pickFlag: .unflagged, colorLabel: .none)
+
+        let result = XMPConflictEngine.evaluateThreeWay(
+            itemID: "item-3way-1",
+            base: baseSnapshot,
+            local: localMeta,
+            remote: remoteMeta,
+            remoteDigestChanged: true
+        )
+
+        guard case .cleanMerge(let merged) = result else {
+            Issue.record("Expected cleanMerge, got \(result)")
+            return
+        }
+
+        #expect(merged.starRating == 5) // from remote!
+        #expect(merged.pickFlag == .unflagged)
+        #expect(merged.colorLabel == .green) // from local!
+    }
+
+    @Test("evaluateThreeWay returns conflict when local and remote mutate the same field to different values")
+    func evaluateThreeWayReturnsConflictOnConflictingField() {
+        let baseMeta = CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .none)
+        let baseSnapshot = BaseSnapshot(metadata: baseMeta, fileDigest: "digest-base")
+
+        // Both local and remote changed starRating to different values
+        let localMeta = CurationMetadata(starRating: 2, pickFlag: .unflagged, colorLabel: .none)
+        let remoteMeta = CurationMetadata(starRating: 5, pickFlag: .unflagged, colorLabel: .none)
+
+        let result = XMPConflictEngine.evaluateThreeWay(
+            itemID: "item-3way-2",
+            base: baseSnapshot,
+            local: localMeta,
+            remote: remoteMeta,
+            remoteDigestChanged: true
+        )
+
+        guard case .conflict(let conflict) = result else {
+            Issue.record("Expected conflict, got \(result)")
+            return
+        }
+
+        #expect(conflict.itemID == "item-3way-2")
+        #expect(conflict.starRatingDiff.isConflicted == true)
+        #expect(conflict.colorLabelDiff.isConflicted == false)
+    }
+
+    @Test("evaluateThreeWay returns clean reset when remote file was deleted and local had no mutations")
+    func evaluateThreeWayRemoteDeletionWithUnmodifiedLocal() {
+        let baseMeta = CurationMetadata(starRating: 4, pickFlag: .picked, colorLabel: .blue)
+        let baseSnapshot = BaseSnapshot(metadata: baseMeta, fileDigest: "digest-deleted")
+
+        let localMeta = baseMeta // No local changes
+
+        let result = XMPConflictEngine.evaluateThreeWay(
+            itemID: "item-3way-3",
+            base: baseSnapshot,
+            local: localMeta,
+            remote: nil, // deleted!
+            remoteDigestChanged: true
+        )
+
+        guard case .cleanMerge(let merged) = result else {
+            Issue.record("Expected cleanMerge, got \(result)")
+            return
+        }
+
+        #expect(merged == CurationMetadata()) // Clean reset!
+    }
+
+    @Test("evaluateThreeWay preserves local mutations when remote file was deleted and local has uncommitted mutations")
+    func evaluateThreeWayRemoteDeletionWithLocalMutations() {
+        let baseMeta = CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .none)
+        let baseSnapshot = BaseSnapshot(metadata: baseMeta, fileDigest: "digest-deleted")
+
+        let localMeta = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .red)
+
+        let result = XMPConflictEngine.evaluateThreeWay(
+            itemID: "item-3way-4",
+            base: baseSnapshot,
+            local: localMeta,
+            remote: nil, // deleted!
+            remoteDigestChanged: true
+        )
+
+        guard case .cleanMerge(let merged) = result else {
+            Issue.record("Expected cleanMerge, got \(result)")
+            return
+        }
+
+        #expect(merged == localMeta) // Local mutations recreated
+    }
 }

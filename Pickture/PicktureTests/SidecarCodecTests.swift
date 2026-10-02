@@ -307,7 +307,7 @@ struct SidecarCodecTests {
     }
 
     @Test("SidecarCodec.write persists curation to <basename>.xmp and updates existing <filename>.<ext>.xmp on disk")
-    func sidecarCodecWriteDualConventionDiskPersistence() throws {
+    func sidecarCodecWriteDualConventionDiskPersistence() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -346,7 +346,7 @@ struct SidecarCodecTests {
         try Data(externalCaptureOneXML.utf8).write(to: rawExtXmp)
 
         let newCuration = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green)
-        let writtenURLs = try SidecarCodec.write(curation: newCuration, for: pairItem)
+        let writtenURLs = try await SidecarCodec.write(curation: newCuration, for: pairItem)
 
         let basenameXmp = root.appendingPathComponent("DSC0800.xmp")
         #expect(writtenURLs.contains { $0.standardizedFileURL.path == basenameXmp.standardizedFileURL.path })
@@ -392,5 +392,153 @@ struct SidecarCodecTests {
         #expect(throws: (any Error).self) {
             try SidecarCodec.update(xmlData: corruptData, with: CurationMetadata(starRating: 3))
         }
+    }
+
+    @Test("SidecarCodec.write supports direct sequential overwrites on existing sidecar without auxiliary file collision")
+    func sidecarCodecWriteDirectSequentialOverwritesWithoutAuxiliaryCollision() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("TEST001.JPG")
+        try Data("jpg-content".utf8).write(to: jpgURL)
+
+        let jpgFile = MediaFile(url: jpgURL, formatKind: .raster)
+        let item = MediaItem(
+            id: "\(root.path)#TEST001",
+            baseName: "TEST001",
+            directoryURL: root,
+            relativeDirectoryPath: "",
+            kind: .photo,
+            primaryFile: jpgFile,
+            mediaPair: nil,
+            sidecarURL: nil
+        )
+
+        let xmpURL = root.appendingPathComponent("TEST001.xmp")
+
+        // First write: creates TEST001.xmp
+        let curation1 = CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .none)
+        let written1 = try await SidecarCodec.write(curation: curation1, for: item)
+        #expect(written1.map(\.standardizedFileURL.path).contains(xmpURL.standardizedFileURL.path))
+
+        let parsed1 = try SidecarCodec.parse(data: try Data(contentsOf: xmpURL))
+        #expect(parsed1.curation == curation1)
+
+        // Second write (direct sequential overwrite on existing file)
+        let curation2 = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .red)
+        let written2 = try await SidecarCodec.write(curation: curation2, for: item)
+        #expect(written2.map(\.standardizedFileURL.path).contains(xmpURL.standardizedFileURL.path))
+
+        let parsed2 = try SidecarCodec.parse(data: try Data(contentsOf: xmpURL))
+        #expect(parsed2.curation == curation2)
+
+        // Third write (another immediate overwrite)
+        let curation3 = CurationMetadata(starRating: 3, pickFlag: .rejected, colorLabel: .blue)
+        let written3 = try await SidecarCodec.write(curation: curation3, for: item)
+        #expect(written3.map(\.standardizedFileURL.path).contains(xmpURL.standardizedFileURL.path))
+
+        let parsed3 = try SidecarCodec.parse(data: try Data(contentsOf: xmpURL))
+        #expect(parsed3.curation == curation3)
+    }
+
+    @Test("SidecarCodec classifies ESTALE (errno 70) correctly across direct and underlying error containers")
+    func classifiesESTALECorrectly() {
+        // Direct POSIX 70 error
+        let directStale = NSError(domain: NSPOSIXErrorDomain, code: 70)
+        #expect(SidecarCodec.isStaleFileHandleError(directStale))
+
+        // CocoaError 512 wrapping POSIX 70 in NSUnderlyingErrorKey
+        let wrappedStale = NSError(
+            domain: NSCocoaErrorDomain,
+            code: 512,
+            userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: 70)]
+        )
+        #expect(SidecarCodec.isStaleFileHandleError(wrappedStale))
+
+        // Non-stale POSIX error (e.g. ENOENT = 2 or EACCES = 13)
+        let otherPOSIX = NSError(domain: NSPOSIXErrorDomain, code: 2)
+        #expect(!SidecarCodec.isStaleFileHandleError(otherPOSIX))
+
+        // Generic error without underlying error
+        let genericError = NSError(domain: NSCocoaErrorDomain, code: 512)
+        #expect(!SidecarCodec.isStaleFileHandleError(genericError))
+    }
+
+    @Test("SidecarCodec.readData reads data cleanly")
+    func readDataReadsCleanly() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let testFile = root.appendingPathComponent("read_test.xmp")
+        let sampleData = "Sample XMP Content".data(using: .utf8)!
+
+        try sampleData.write(to: testFile)
+
+        // Read via SidecarCodec.readData
+        let readBack = SidecarCodec.readData(from: testFile)
+        #expect(readBack == sampleData)
+
+        // Overwrite
+        let updatedData = "Updated XMP Content".data(using: .utf8)!
+        try updatedData.write(to: testFile)
+
+        let readBackUpdated = SidecarCodec.readData(from: testFile)
+        #expect(readBackUpdated == updatedData)
+
+        // Read non-existent file returns nil
+        let nonExistent = root.appendingPathComponent("does_not_exist.xmp")
+        #expect(SidecarCodec.readData(from: nonExistent) == nil)
+    }
+
+    @Test("SidecarCodec.resolveSidecarWriteURLs always targets standard lowercase <basename>.xmp")
+    func resolveSidecarWriteURLsAlwaysTargetsStandardLowercaseXMP() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("PHOTO01.JPG")
+        try Data("jpg-content".utf8).write(to: jpgURL)
+
+        // Even if an uppercase sidecar exists on disk, writes must strictly use standard lowercase .xmp
+        let upperXMP = root.appendingPathComponent("PHOTO01.XMP")
+        try Data("xmp-content".utf8).write(to: upperXMP)
+
+        let item = MediaItem(
+            id: "\(root.path)#PHOTO01",
+            baseName: "PHOTO01",
+            directoryURL: root,
+            relativeDirectoryPath: "",
+            kind: .photo,
+            primaryFile: MediaFile(url: jpgURL, formatKind: .raster),
+            mediaPair: nil,
+            sidecarURL: upperXMP
+        )
+
+        let targets = SidecarCodec.resolveSidecarWriteURLs(for: item)
+        #expect(targets.first?.lastPathComponent == "PHOTO01.xmp")
+        #expect(!targets.contains(where: { $0.lastPathComponent == "PHOTO01.XMP" }))
+    }
+
+    @Test("SidecarCodec.userFacingErrorMessage returns actionable Files app reconnection guidance on ESTALE")
+    func userFacingErrorMessageReturnsActionableGuidanceOnESTALE() {
+        // Direct POSIX 70
+        let directStale = NSError(domain: NSPOSIXErrorDomain, code: 70)
+        let directMsg = SidecarCodec.userFacingErrorMessage(for: directStale, fallback: "Generic fallback")
+        #expect(directMsg.contains("Files app"))
+        #expect(directMsg.contains("reconnect the server"))
+
+        // CocoaError 512 with underlying POSIX 70
+        let wrappedStale = NSError(
+            domain: NSCocoaErrorDomain,
+            code: 512,
+            userInfo: [NSUnderlyingErrorKey: directStale]
+        )
+        let wrappedMsg = SidecarCodec.userFacingErrorMessage(for: wrappedStale, fallback: "Generic fallback")
+        #expect(wrappedMsg.contains("Files app"))
+        #expect(wrappedMsg.contains("reconnect the server"))
+
+        // Unrelated error returns fallback
+        let otherError = NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileWriteNoPermission.rawValue)
+        let fallbackMsg = SidecarCodec.userFacingErrorMessage(for: otherError, fallback: "Permission denied")
+        #expect(fallbackMsg == "Permission denied")
     }
 }

@@ -144,52 +144,10 @@ struct PicktureToolbarContent: ToolbarContent {
 
     @ViewBuilder
     private var syncStateBadge: some View {
-        Button {
-            if session.conflictedItemsCount > 0 {
-                session.activeConflictItemID = nil
-                session.isConflictSheetPresented = true
-            } else if session.pendingWritesCount > 0 {
-                Task { await session.flushPendingWrites() }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                switch session.syncSummaryState {
-                case .synced:
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                case .pendingWrite:
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .foregroundStyle(.orange)
-                case .loading:
-                    ProgressView()
-                        .controlSize(.mini)
-                case .conflicted:
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                case .syncError:
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .foregroundStyle(.red)
-                }
-                if effectiveHorizontalSizeClass != .compact {
-                    Text(session.syncSummaryBadgeText)
-                        .font(.caption.weight(.medium))
-                } else if session.conflictedItemsCount > 0 {
-                    Text("\(session.conflictedItemsCount)")
-                        .font(.caption2.weight(.bold))
-                } else if session.pendingWritesCount > 0 {
-                    Text("\(session.pendingWritesCount)")
-                        .font(.caption2.weight(.bold))
-                }
-            }
-            .padding(.horizontal, effectiveHorizontalSizeClass == .compact ? 6 : 8)
-            .padding(.vertical, 4)
-            .background(
-                Capsule()
-                    .fill(session.syncSummaryState == .conflicted ? Color.orange.opacity(0.2) : Color.secondary.opacity(0.12))
-            )
-        }
-        .buttonStyle(.plain)
-        .help("Sync Status — Click to resolve conflicts or flush pending writes")
+        SyncStateBadgeView(
+            session: session,
+            isCompact: effectiveHorizontalSizeClass == .compact
+        )
     }
 
     // MARK: - Regular Toolbar Items
@@ -326,5 +284,135 @@ struct PicktureToolbarContent: ToolbarContent {
         .keyboardShortcut("z", modifiers: .command)
         .disabled(!session.canUndoSwipe)
         .help("Undo Last Swipe (⌘Z)")
+    }
+}
+
+struct SyncStateBadgeView: View {
+    @Bindable var session: CullingSession
+    var isCompact: Bool
+    @State private var isErrorPopoverPresented: Bool = false
+
+    var body: some View {
+        Button {
+            if session.conflictedItemsCount > 0 {
+                session.activeConflictItemID = nil
+                session.isConflictSheetPresented = true
+            } else if session.syncSummaryState == .syncError {
+                isErrorPopoverPresented = true
+            } else if session.pendingWritesCount > 0 {
+                Task { await session.flushPendingWrites() }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                switch session.syncSummaryState {
+                case .synced:
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                case .pendingWrite:
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.orange)
+                case .loading:
+                    ProgressView()
+                        .controlSize(.mini)
+                case .conflicted:
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                case .syncError:
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                }
+                if !isCompact {
+                    Text(session.syncSummaryBadgeText)
+                        .font(.caption.weight(.medium))
+                } else if session.conflictedItemsCount > 0 {
+                    Text("\(session.conflictedItemsCount)")
+                        .font(.caption2.weight(.bold))
+                } else if session.syncSummaryState == .syncError {
+                    if session.syncErrorItemsCount > 0 {
+                        Text("\(session.syncErrorItemsCount)")
+                            .font(.caption2.weight(.bold))
+                    }
+                } else if session.pendingWritesCount > 0 {
+                    Text("\(session.pendingWritesCount)")
+                        .font(.caption2.weight(.bold))
+                }
+            }
+            .padding(.horizontal, isCompact ? 6 : 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(
+                        session.syncSummaryState == .conflicted
+                            ? Color.orange.opacity(0.2)
+                            : (session.syncSummaryState == .syncError ? Color.red.opacity(0.15) : Color.secondary.opacity(0.12))
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(syncBadgeHelpText)
+        .help(syncBadgeHelpText)
+        .popover(isPresented: $isErrorPopoverPresented) {
+            syncErrorPopover
+        }
+    }
+
+    private var syncBadgeHelpText: String {
+        switch session.syncSummaryState {
+        case .conflicted:
+            return "Sync Conflicts — Click to resolve conflicts"
+        case .syncError:
+            return "Sync Error — Click for details and retry"
+        case .pendingWrite:
+            return "Pending Writes — Click to flush pending writes"
+        case .loading:
+            return "Syncing..."
+        case .synced:
+            return "Sync Status — All changes saved"
+        }
+    }
+
+    @ViewBuilder
+    private var syncErrorPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(.red)
+                    .font(.title3)
+                Text("Sync Error")
+                    .font(.headline)
+            }
+
+            if let message = session.lastErrorMessage, !message.isEmpty {
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+            } else {
+                Text("Failed to write metadata changes to storage.")
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+            }
+
+            Text("If using a network share, disconnecting and reconnecting the server in the Files app may help restore write access.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("Dismiss") {
+                    isErrorPopoverPresented = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("Retry Now") {
+                    isErrorPopoverPresented = false
+                    Task {
+                        await session.retryFailedWrites()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .frame(minWidth: 280, maxWidth: 360)
     }
 }

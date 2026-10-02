@@ -330,6 +330,12 @@ nonisolated enum ConflictResolutionStrategy: Hashable, Sendable {
     case cherryPick(CurationMetadata)
 }
 
+nonisolated enum ThreeWayMergeResult: Hashable, Sendable {
+    case noChange
+    case cleanMerge(CurationMetadata)
+    case conflict(MetadataConflict)
+}
+
 nonisolated enum CloseFolderResult: Hashable, Sendable {
     case success
     case pendingWritesRemaining(Int)

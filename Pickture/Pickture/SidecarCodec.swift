@@ -1,7 +1,10 @@
 import CryptoKit
+import Darwin
 import Foundation
+import OSLog
 
 nonisolated enum SidecarCodec {
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.pickture", category: "sync")
 
     // MARK: - Sidecar Path Discovery & Targets
 
@@ -50,7 +53,7 @@ nonisolated enum SidecarCodec {
         let basenameURL = dir.appendingPathComponent("\(item.baseName).xmp").standardizedFileURL
         var targets: [URL] = [basenameURL]
 
-        // Also update any <filename>.<ext>.xmp that already exists on disk
+        // 2. Also update any <filename>.<ext>.xmp that already exists on disk
         let files = associatedFiles(for: item)
         for file in files {
             let extURL = dir.appendingPathComponent("\(file.fileName).xmp").standardizedFileURL
@@ -76,6 +79,12 @@ nonisolated enum SidecarCodec {
         return files
     }
 
+    // MARK: - Safe Disk I/O & Invalidation Helpers
+
+    static func readData(from url: URL) -> Data? {
+        try? Data(contentsOf: url)
+    }
+
     // MARK: - XMP Parsing
 
     static func parse(data: Data) throws -> (curation: CurationMetadata, exif: ExifMetadata) {
@@ -86,17 +95,111 @@ nonisolated enum SidecarCodec {
     // MARK: - XMP Round-Trip Serialization & Disk Persistence
 
     @discardableResult
-    static func write(curation: CurationMetadata, for item: MediaItem) throws -> [URL] {
+    static func write(curation: CurationMetadata, for item: MediaItem) async throws -> [URL] {
         let targets = resolveSidecarWriteURLs(for: item)
         let fm = FileManager.default
+        var actualWritten: [URL] = []
         for url in targets {
-            let existingData = try? Data(contentsOf: url)
+            let existingData = readData(from: url)
             let updatedData = try update(xmlData: existingData, with: curation)
             let dir = url.deletingLastPathComponent()
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            try updatedData.write(to: url, options: .atomic)
+            if !fm.fileExists(atPath: dir.path) {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            let writtenURL = try await writeCoordinatedWithRetry(data: updatedData, to: url)
+            actualWritten.append(writtenURL)
         }
-        return targets
+        return actualWritten
+    }
+
+    @discardableResult
+    static func writeCoordinatedWithRetry(data: Data, to url: URL) async throws -> URL {
+        try await Task.detached(priority: .utility) {
+            let coordinator = NSFileCoordinator(filePresenter: nil)
+            let fm = FileManager.default
+
+            struct AttemptResult {
+                var coordError: NSError?
+                var writeError: Error?
+
+                var error: Error? {
+                    coordError ?? writeError
+                }
+            }
+
+            func attemptWrite(useReplacing: Bool) -> AttemptResult {
+                var result = AttemptResult()
+                let options: NSFileCoordinator.WritingOptions = useReplacing ? [.forReplacing] : []
+                coordinator.coordinate(writingItemAt: url, options: options, error: &result.coordError) { targetURL in
+                    do {
+                        try data.write(to: targetURL, options: [])
+                    } catch {
+                        result.writeError = error
+                    }
+                }
+                return result
+            }
+
+            let initialExists = fm.fileExists(atPath: url.path)
+            var lastAttempt = attemptWrite(useReplacing: !initialExists)
+
+            if lastAttempt.error == nil {
+                return url
+            }
+
+            let error = lastAttempt.error!
+            if isStaleOrMissingFileError(error) {
+                // Progressive backoff with .forReplacing
+                let retryDelays: [UInt64] = [50_000_000, 150_000_000]
+                for delay in retryDelays {
+                    try? await Task.sleep(nanoseconds: delay)
+                    let retryAttempt = attemptWrite(useReplacing: true)
+                    if retryAttempt.error == nil {
+                        return url
+                    }
+                    lastAttempt = retryAttempt
+                }
+            }
+
+            let finalError = lastAttempt.error ?? error
+            throw finalError
+        }.value
+    }
+
+    static func hasPOSIXErrorCode(_ error: Error, code: Int) -> Bool {
+        var current: NSError? = error as NSError
+        while let err = current {
+            if err.domain == NSPOSIXErrorDomain && err.code == code {
+                return true
+            }
+            current = err.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
+    }
+
+    static func isStaleFileHandleError(_ error: Error) -> Bool {
+        hasPOSIXErrorCode(error, code: Int(POSIXError.Code.ESTALE.rawValue))
+    }
+
+    static func userFacingErrorMessage(for error: Error, fallback: String) -> String {
+        if isStaleFileHandleError(error) {
+            return "Network share encountered stale file handles. If using a network share, disconnect and reconnect the server in the Files app to help restore write access."
+        }
+        return fallback
+    }
+
+    static func isStaleOrMissingFileError(_ error: Error) -> Bool {
+        if isStaleFileHandleError(error) {
+            return true
+        }
+        if hasPOSIXErrorCode(error, code: Int(POSIXError.Code.ENOENT.rawValue)) {
+            return true
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain && nsError.code == CocoaError.fileNoSuchFile.rawValue {
+            return true
+        }
+        return false
     }
 
     static func update(xmlData: Data?, with curation: CurationMetadata) throws -> Data {

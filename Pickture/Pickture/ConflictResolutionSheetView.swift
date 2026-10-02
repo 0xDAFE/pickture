@@ -484,8 +484,7 @@ struct ConflictResolutionSheetView: View {
                     session.isConflictSheetPresented = false
                 }
             } catch {
-                isResolving = false
-                session.lastErrorMessage = error.localizedDescription
+                handleResolutionError(error)
             }
         }
     }
@@ -498,8 +497,7 @@ struct ConflictResolutionSheetView: View {
                 isResolving = false
                 session.isConflictSheetPresented = false
             } catch {
-                isResolving = false
-                session.lastErrorMessage = error.localizedDescription
+                handleResolutionError(error)
             }
         }
     }
@@ -512,9 +510,14 @@ struct ConflictResolutionSheetView: View {
                 isResolving = false
                 session.isConflictSheetPresented = false
             } catch {
-                isResolving = false
-                session.lastErrorMessage = error.localizedDescription
+                handleResolutionError(error)
             }
         }
+    }
+
+    @MainActor
+    private func handleResolutionError(_ error: Error) {
+        isResolving = false
+        session.recordSyncError(error)
     }
 }

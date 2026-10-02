@@ -1,10 +1,12 @@
 import CoreGraphics
 import Foundation
 import Observation
+import OSLog
 
 @MainActor
 @Observable
 final class CullingSession {
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.pickture", category: "sync")
     let storageRootURL: URL
     private let folderAccessService: FolderAccessService
     let mediaCache: MediaCache
@@ -63,7 +65,8 @@ final class CullingSession {
     private var baseSnapshotByItemID: [String: BaseSnapshot] = [:]
     private var conflictsByItemID: [String: MetadataConflict] = [:]
     private var thumbnailAspectRatios: [String: CGFloat] = [:]
-    private var isFlushingPendingWrites: Bool = false
+    private(set) var isFlushingPendingWrites: Bool = false
+    private var activeFlushTask: Task<Void, Never>? = nil
     var isAccessingFolder: Bool {
         folderAccessService.isAccessingFolder
     }
@@ -760,43 +763,99 @@ final class CullingSession {
         return .synced
     }
 
+    var syncErrorItemsCount: Int {
+        items.filter { syncState(for: $0) == .syncError }.count
+    }
+
     var syncSummaryBadgeText: String {
         let conflicts = conflictedItemsCount
         if conflicts > 0 {
             return "\(conflicts) Conflict\(conflicts == 1 ? "" : "s")"
         }
+        let errors = syncErrorItemsCount
+        if errors > 0 {
+            return "\(errors) Error\(errors == 1 ? "" : "s")"
+        }
         let pending = pendingWritesCount
         if pending > 0 {
             return "\(pending) Pending"
         }
-        let errors = items.filter { syncState(for: $0) == .syncError }.count
-        if errors > 0 {
-            return "\(errors) Error\(errors == 1 ? "" : "s")"
-        }
         return "Synced"
     }
 
-    func flushPendingWrites() async {
-        guard !isFlushingPendingWrites else { return }
-        isFlushingPendingWrites = true
-        defer { isFlushingPendingWrites = false }
+    func recordSyncError(_ error: Error, fallback: String? = nil) {
+        let fallbackText = fallback ?? error.localizedDescription
+        lastErrorMessage = SidecarCodec.userFacingErrorMessage(for: error, fallback: fallbackText)
+    }
 
-        let pending = items.filter { syncState(for: $0) == .pendingWrite }
-        for item in pending {
-            if Task.isCancelled { break }
-            if simulatedFlushDelayNanoseconds > 0 {
-                try? await Task.sleep(nanoseconds: simulatedFlushDelayNanoseconds)
+    func flushPendingWrites() async {
+        while !Task.isCancelled {
+            if let existing = activeFlushTask {
+                await existing.value
+            } else {
+                let pendingCount = items.filter { syncState(for: $0) == .pendingWrite }.count
+                guard pendingCount > 0 else { break }
+
+                let task = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.isFlushingPendingWrites = true
+                    defer {
+                        self.isFlushingPendingWrites = false
+                        self.activeFlushTask = nil
+                    }
+                    await self.performPendingWritesFlush()
+                }
+                activeFlushTask = task
+                await withTaskCancellationHandler {
+                    await task.value
+                } onCancel: {
+                    task.cancel()
+                }
             }
-            if Task.isCancelled { break }
-            do {
-                try await flushPendingWrite(for: item.id)
-            } catch {
-                syncStateByItemID[item.id] = .syncError
-                metadataSyncStore.updateSyncState(.syncError, for: item.id)
-                lastErrorMessage = "Sync error on \(item.displayFileName): \(error.localizedDescription)"
-                refreshDerivedCounts()
+            let remainingPending = items.contains { syncState(for: $0) == .pendingWrite }
+            if !remainingPending {
+                break
             }
         }
+    }
+
+    private func performPendingWritesFlush() async {
+        while !Task.isCancelled {
+            let pending = items.filter { syncState(for: $0) == .pendingWrite }
+            guard !pending.isEmpty else { break }
+
+            for item in pending {
+                if Task.isCancelled { break }
+                if simulatedFlushDelayNanoseconds > 0 {
+                    try? await Task.sleep(nanoseconds: simulatedFlushDelayNanoseconds)
+                }
+                if Task.isCancelled { break }
+                do {
+                    try await flushPendingWrite(for: item.id)
+                } catch {
+                    syncStateByItemID[item.id] = .syncError
+                    metadataSyncStore.updateSyncState(.syncError, for: item.id)
+                    let nsError = error as NSError
+                    let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+                    Self.logger.error("Flush error on \(item.displayFileName, privacy: .public): domain=\(nsError.domain, privacy: .public) code=\(nsError.code) underlying=\(underlying?.domain ?? "none", privacy: .public)(\(underlying?.code ?? -1)) desc=\(error.localizedDescription, privacy: .public)")
+                    recordSyncError(error, fallback: "Sync error on \(item.displayFileName): \(error.localizedDescription)")
+                    refreshDerivedCounts()
+                }
+            }
+        }
+    }
+
+    func retryFailedWrites() async {
+        lastErrorMessage = nil
+        let failedItems = items.filter { syncState(for: $0) == .syncError }
+        guard !failedItems.isEmpty else { return }
+
+        for item in failedItems {
+            syncStateByItemID[item.id] = .pendingWrite
+            metadataSyncStore.updateSyncState(.pendingWrite, for: item.id)
+        }
+        refreshDerivedCounts()
+        await flushPendingWrites()
     }
 
     @discardableResult
@@ -878,7 +937,7 @@ final class CullingSession {
             var diskCuration: CurationMetadata? = nil
             var diskDigest = ""
 
-            if let readURL, let data = try? Data(contentsOf: readURL) {
+            if let readURL, let data = SidecarCodec.readData(from: readURL) {
                 diskDigest = SidecarCodec.computeDigest(for: data)
                 if let parsed = try? SidecarCodec.parse(data: data) {
                     diskCuration = parsed.curation
@@ -887,28 +946,39 @@ final class CullingSession {
 
             let remoteDigestChanged = (base?.fileDigest != diskDigest)
 
-            if let diskCuration, remoteDigestChanged {
-                let conflict = XMPConflictEngine.evaluate(
-                    itemID: item.id,
-                    base: base,
-                    local: pendingCuration,
-                    remote: diskCuration,
-                    remoteDigestChanged: true
-                )
-                if let conflict {
-                    return .conflict(conflict)
+            let mergeEvaluation = XMPConflictEngine.evaluateThreeWay(
+                itemID: item.id,
+                base: base,
+                local: pendingCuration,
+                remote: diskCuration,
+                remoteDigestChanged: remoteDigestChanged
+            )
+
+            let curationToWrite: CurationMetadata
+
+            switch mergeEvaluation {
+            case .conflict(let conflict):
+                return .conflict(conflict)
+
+            case .cleanMerge(let mergedCuration):
+                if diskCuration == nil && pendingCuration == base?.metadata {
+                    return .success(BaseSnapshot(metadata: CurationMetadata(), fileDigest: ""))
                 }
+                curationToWrite = mergedCuration
+
+            case .noChange:
+                curationToWrite = pendingCuration
             }
 
-            let writtenTargets = try SidecarCodec.write(curation: pendingCuration, for: item)
+            let writtenTargets = try await SidecarCodec.write(curation: curationToWrite, for: item)
 
-            if let primaryTarget = writtenTargets.first, let writtenData = try? Data(contentsOf: primaryTarget) {
+            if let primaryTarget = writtenTargets.first, let writtenData = SidecarCodec.readData(from: primaryTarget) {
                 let newDigest = SidecarCodec.computeDigest(for: writtenData)
                 let modDate = (try? primaryTarget.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                let newBase = BaseSnapshot(metadata: pendingCuration, fileDigest: newDigest, modificationDate: modDate)
+                let newBase = BaseSnapshot(metadata: curationToWrite, fileDigest: newDigest, modificationDate: modDate)
                 return .success(newBase)
             } else {
-                let fallbackBase = BaseSnapshot(metadata: pendingCuration, fileDigest: "")
+                let fallbackBase = BaseSnapshot(metadata: curationToWrite, fileDigest: "")
                 return .success(fallbackBase)
             }
         }.value
@@ -920,6 +990,7 @@ final class CullingSession {
             metadataSyncStore.recordConflict(conflict, for: item.id)
 
         case .success(let newBase):
+            metadataByItemID[item.id] = newBase.metadata
             baseSnapshotByItemID[item.id] = newBase
             syncStateByItemID[item.id] = .synced
             conflictsByItemID.removeValue(forKey: item.id)
@@ -938,7 +1009,7 @@ final class CullingSession {
         case .useRemote:
             resolvedMetadata = conflict.remote
             let readURL = SidecarCodec.resolveSidecarReadURL(for: item)
-            let diskData = (try? readURL.flatMap { try? Data(contentsOf: $0) }) ?? Data()
+            let diskData = readURL.flatMap { SidecarCodec.readData(from: $0) } ?? Data()
             let digest = SidecarCodec.computeDigest(for: diskData)
             let modDate = readURL.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
             newBase = BaseSnapshot(metadata: resolvedMetadata, fileDigest: digest, modificationDate: modDate)
@@ -955,12 +1026,10 @@ final class CullingSession {
             }
             resolvedMetadata = chosen
 
-            let writtenTargets = try await Task.detached(priority: .utility) {
-                try SidecarCodec.write(curation: chosen, for: item)
-            }.value
+            let writtenTargets = try await SidecarCodec.write(curation: chosen, for: item)
 
             let primaryTarget = writtenTargets.first ?? SidecarCodec.resolveSidecarReadURL(for: item)
-            let writtenData = (try? primaryTarget.flatMap { try? Data(contentsOf: $0) }) ?? Data()
+            let writtenData = primaryTarget.flatMap { SidecarCodec.readData(from: $0) } ?? Data()
             let digest = SidecarCodec.computeDigest(for: writtenData)
             let modDate = primaryTarget.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
             newBase = BaseSnapshot(metadata: resolvedMetadata, fileDigest: digest, modificationDate: modDate)
@@ -1136,7 +1205,7 @@ final class CullingSession {
             var diskDigest = ""
             var diskModDate: Date? = nil
 
-            if let sidecarURL, let data = try? Data(contentsOf: sidecarURL) {
+            if let sidecarURL, let data = SidecarCodec.readData(from: sidecarURL) {
                 diskData = data
                 diskDigest = SidecarCodec.computeDigest(for: data)
                 diskModDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
@@ -1157,24 +1226,54 @@ final class CullingSession {
                     exifByItemID[item.id] = persistedExif
                 }
 
-                if persisted.syncState == .pendingWrite {
+                if persisted.syncState == .pendingWrite || persisted.syncState == .syncError {
                     metadataByItemID[item.id] = persisted.metadata
-                    syncStateByItemID[item.id] = .pendingWrite
+                    syncStateByItemID[item.id] = persisted.syncState
                     baseSnapshotByItemID[item.id] = persisted.baseSnapshot
 
-                    // Check if external edit happened on disk while pending
-                    if let diskCuration, let base = persisted.baseSnapshot {
+                    // Check if external edit happened on disk while pending or in syncError
+                    // (e.g. share remounted with a new or modified external .xmp file)
+                    if let base = persisted.baseSnapshot {
                         let remoteChanged = diskDigest != base.fileDigest
-                        if remoteChanged, let conflict = XMPConflictEngine.evaluate(
+                        let threeWay = XMPConflictEngine.evaluateThreeWay(
                             itemID: item.id,
                             base: base,
                             local: persisted.metadata,
                             remote: diskCuration,
-                            remoteDigestChanged: true
-                        ) {
+                            remoteDigestChanged: remoteChanged
+                        )
+                        switch threeWay {
+                        case .conflict(let conflict):
                             syncStateByItemID[item.id] = .conflicted
                             conflictsByItemID[item.id] = conflict
                             metadataSyncStore.recordConflict(conflict, for: item.id)
+                        case .cleanMerge(let merged):
+                            metadataByItemID[item.id] = merged
+                            metadataSyncStore.stagePendingWrite(merged, baseSnapshot: base, for: item.id)
+                        case .noChange:
+                            break
+                        }
+                    } else if let diskCuration {
+                        // Remounted with a new sidecar created externally while local had uncommitted mutations
+                        let threeWay = XMPConflictEngine.evaluateThreeWay(
+                            itemID: item.id,
+                            base: nil,
+                            local: persisted.metadata,
+                            remote: diskCuration,
+                            remoteDigestChanged: true
+                        )
+                        switch threeWay {
+                        case .conflict(let conflict):
+                            syncStateByItemID[item.id] = .conflicted
+                            conflictsByItemID[item.id] = conflict
+                            metadataSyncStore.recordConflict(conflict, for: item.id)
+                        case .cleanMerge(let merged):
+                            metadataByItemID[item.id] = merged
+                            let newBase = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
+                            metadataSyncStore.stagePendingWrite(merged, baseSnapshot: newBase, for: item.id)
+                            baseSnapshotByItemID[item.id] = newBase
+                        case .noChange:
+                            break
                         }
                     }
                 } else if persisted.syncState == .conflicted, let conflict = persisted.conflict {
@@ -1190,9 +1289,12 @@ final class CullingSession {
                         baseSnapshotByItemID[item.id] = snapshot
                         metadataSyncStore.recordBaseSnapshot(snapshot, exif: exifByItemID[item.id] ?? diskExif, for: item.id)
                     } else {
-                        metadataByItemID[item.id] = persisted.metadata
+                        // Sidecar was deleted externally on storage, and local had no uncommitted mutations
+                        let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+                        metadataByItemID[item.id] = CurationMetadata()
                         syncStateByItemID[item.id] = .synced
-                        baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                        baseSnapshotByItemID[item.id] = emptySnapshot
+                        metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: exifByItemID[item.id] ?? diskExif, for: item.id)
                     }
                 }
             } else {
