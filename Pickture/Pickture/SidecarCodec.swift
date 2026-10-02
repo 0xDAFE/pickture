@@ -47,16 +47,9 @@ nonisolated enum SidecarCodec {
         let fm = FileManager.default
         let dir = item.directoryURL.standardizedFileURL
 
-        // 1. Primary write URL is <basename>.xmp, preserving existing on-disk casing (e.g. .XMP) if found
+        // Always write to <basename>.xmp by default
         let basenameURL = dir.appendingPathComponent("\(item.baseName).xmp").standardizedFileURL
-        var primaryURL = basenameURL
-        if let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-            let targetBase = "\(item.baseName).xmp".lowercased()
-            if let matched = contents.first(where: { $0.lastPathComponent.lowercased() == targetBase }) {
-                primaryURL = matched.standardizedFileURL
-            }
-        }
-        var targets: [URL] = [primaryURL]
+        var targets: [URL] = [basenameURL]
 
         // 2. Also update any <filename>.<ext>.xmp that already exists on disk
         let files = associatedFiles(for: item)
@@ -311,54 +304,8 @@ nonisolated enum SidecarCodec {
             } catch {
                 print("[DEBUG-SMB-SYNC]   Probe 4: Temp write failed: \(error.localizedDescription)")
             }
-
-            // Probe 5: Case-variant destination (.XMP)
-            // On SMB shares, file lookups are case-insensitive on the server. However, smbclientd
-            // on iOS caches nodes by the exact requested string. If "P9227373.xmp" has a poisoned/stale
-            // node in smbclientd that rejects all lookups, "P9227373.XMP" bypasses the poisoned entry,
-            // creates the file on the NAS, and persists the curation.
-            let upperName = "\(url.deletingPathExtension().lastPathComponent).XMP"
-            let upperURL = folderURL.appendingPathComponent(upperName)
-            print("[DEBUG-SMB-SYNC]   Probe 5: Attempting write to case-variant: \(upperName)")
-
-            var upperWriteSucceeded = false
             if tempWriteSucceeded && fm.fileExists(atPath: tempURL.path) {
-                let renameUpperRes = rename(tempURL.path, upperURL.path)
-                if renameUpperRes == 0 {
-                    print("[DEBUG-SMB-SYNC]   Probe 5: rename temp -> \(upperName) SUCCEEDED!")
-                    upperWriteSucceeded = true
-                } else {
-                    let renameUpperErr = errno
-                    print("[DEBUG-SMB-SYNC]   Probe 5: rename temp -> \(upperName) failed with errno=\(renameUpperErr)")
-                    try? fm.removeItem(at: tempURL)
-                }
-            }
-
-            if !upperWriteSucceeded {
-                if writeViaPOSIX(data: data, to: upperURL.path) == nil {
-                    print("[DEBUG-SMB-SYNC]   Probe 5: writeViaPOSIX to \(upperName) SUCCEEDED!")
-                    upperWriteSucceeded = true
-                } else {
-                    do {
-                        try data.write(to: upperURL, options: [])
-                        print("[DEBUG-SMB-SYNC]   Probe 5: data.write to \(upperName) SUCCEEDED!")
-                        upperWriteSucceeded = true
-                    } catch {
-                        print("[DEBUG-SMB-SYNC]   Probe 5: data.write to \(upperName) failed: \(error.localizedDescription)")
-                    }
-                }
-            }
-
-            if upperWriteSucceeded {
-                let finalRenameRes = rename(upperURL.path, url.path)
-                if finalRenameRes == 0 {
-                    print("[DEBUG-SMB-SYNC]   -> Recovery via case-variant write + rename to lowercase SUCCEEDED for \(url.lastPathComponent)!")
-                    return url
-                } else {
-                    let finalRenameErr = errno
-                    print("[DEBUG-SMB-SYNC]   -> Recovery via case-variant write retained as \(upperName) (rename to lowercase errno=\(finalRenameErr))!")
-                    return upperURL
-                }
+                try? fm.removeItem(at: tempURL)
             }
 
             let finalError = lastAttempt.error ?? error
@@ -375,20 +322,25 @@ nonisolated enum SidecarCodec {
     }
 
     static func hasPOSIXErrorCode(_ error: Error, code: Int) -> Bool {
-        let nsError = error as NSError
-        if nsError.domain == NSPOSIXErrorDomain && nsError.code == code {
-            return true
-        }
-        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
-            if underlying.domain == NSPOSIXErrorDomain && underlying.code == code {
+        var current: NSError? = error as NSError
+        while let err = current {
+            if err.domain == NSPOSIXErrorDomain && err.code == code {
                 return true
             }
+            current = err.userInfo[NSUnderlyingErrorKey] as? NSError
         }
         return false
     }
 
     static func isStaleFileHandleError(_ error: Error) -> Bool {
         hasPOSIXErrorCode(error, code: Int(POSIXError.Code.ESTALE.rawValue))
+    }
+
+    static func userFacingErrorMessage(for error: Error, fallback: String) -> String {
+        if isStaleFileHandleError(error) {
+            return "Network share has stale file handles from external file deletion. Disconnect and reconnect the server in the Files app to restore write access."
+        }
+        return fallback
     }
 
     static func isStaleOrMissingFileError(_ error: Error) -> Bool {

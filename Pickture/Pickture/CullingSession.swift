@@ -816,7 +816,10 @@ final class CullingSession {
                     let nsError = error as NSError
                     let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
                     print("[DEBUG-SMB-SYNC] Flush error on \(item.displayFileName): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1)) desc=\(error.localizedDescription)")
-                    lastErrorMessage = "Sync error on \(item.displayFileName): \(error.localizedDescription)"
+                    lastErrorMessage = SidecarCodec.userFacingErrorMessage(
+                        for: error,
+                        fallback: "Sync error on \(item.displayFileName): \(error.localizedDescription)"
+                    )
                     refreshDerivedCounts()
                 }
             }

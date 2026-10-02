@@ -493,15 +493,15 @@ struct SidecarCodecTests {
         #expect(SidecarCodec.readData(from: nonExistent) == nil)
     }
 
-    @Test("SidecarCodec.resolveSidecarWriteURLs preserves existing .XMP uppercase sidecar casing")
-    func resolveSidecarWriteURLsPreservesExistingUppercaseXMPCasing() throws {
+    @Test("SidecarCodec.resolveSidecarWriteURLs always targets standard lowercase <basename>.xmp")
+    func resolveSidecarWriteURLsAlwaysTargetsStandardLowercaseXMP() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
         let jpgURL = root.appendingPathComponent("PHOTO01.JPG")
         try Data("jpg-content".utf8).write(to: jpgURL)
 
-        // Create an existing uppercase sidecar on disk
+        // Even if an uppercase sidecar exists on disk, writes must strictly use standard lowercase .xmp
         let upperXMP = root.appendingPathComponent("PHOTO01.XMP")
         try Data("xmp-content".utf8).write(to: upperXMP)
 
@@ -517,6 +517,31 @@ struct SidecarCodecTests {
         )
 
         let targets = SidecarCodec.resolveSidecarWriteURLs(for: item)
-        #expect(targets.contains(where: { $0.lastPathComponent == "PHOTO01.XMP" }))
+        #expect(targets.first?.lastPathComponent == "PHOTO01.xmp")
+        #expect(!targets.contains(where: { $0.lastPathComponent == "PHOTO01.XMP" }))
+    }
+
+    @Test("SidecarCodec.userFacingErrorMessage returns actionable Files app reconnection guidance on ESTALE")
+    func userFacingErrorMessageReturnsActionableGuidanceOnESTALE() {
+        // Direct POSIX 70
+        let directStale = NSError(domain: NSPOSIXErrorDomain, code: 70)
+        let directMsg = SidecarCodec.userFacingErrorMessage(for: directStale, fallback: "Generic fallback")
+        #expect(directMsg.contains("Files app"))
+        #expect(directMsg.contains("reconnect the server"))
+
+        // CocoaError 512 with underlying POSIX 70
+        let wrappedStale = NSError(
+            domain: NSCocoaErrorDomain,
+            code: 512,
+            userInfo: [NSUnderlyingErrorKey: directStale]
+        )
+        let wrappedMsg = SidecarCodec.userFacingErrorMessage(for: wrappedStale, fallback: "Generic fallback")
+        #expect(wrappedMsg.contains("Files app"))
+        #expect(wrappedMsg.contains("reconnect the server"))
+
+        // Unrelated error returns fallback
+        let otherError = NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileWriteNoPermission.rawValue)
+        let fallbackMsg = SidecarCodec.userFacingErrorMessage(for: otherError, fallback: "Permission denied")
+        #expect(fallbackMsg == "Permission denied")
     }
 }

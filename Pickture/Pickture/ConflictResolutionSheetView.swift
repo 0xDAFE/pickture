@@ -485,7 +485,7 @@ struct ConflictResolutionSheetView: View {
                 }
             } catch {
                 isResolving = false
-                session.lastErrorMessage = error.localizedDescription
+                session.lastErrorMessage = SidecarCodec.userFacingErrorMessage(for: error, fallback: error.localizedDescription)
             }
         }
     }
@@ -499,7 +499,7 @@ struct ConflictResolutionSheetView: View {
                 session.isConflictSheetPresented = false
             } catch {
                 isResolving = false
-                session.lastErrorMessage = error.localizedDescription
+                session.lastErrorMessage = SidecarCodec.userFacingErrorMessage(for: error, fallback: error.localizedDescription)
             }
         }
     }
@@ -513,7 +513,7 @@ struct ConflictResolutionSheetView: View {
                 session.isConflictSheetPresented = false
             } catch {
                 isResolving = false
-                session.lastErrorMessage = error.localizedDescription
+                session.lastErrorMessage = SidecarCodec.userFacingErrorMessage(for: error, fallback: error.localizedDescription)
             }
         }
     }
