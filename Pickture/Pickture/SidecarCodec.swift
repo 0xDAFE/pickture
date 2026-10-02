@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 nonisolated enum SidecarCodec {
@@ -105,42 +106,108 @@ nonisolated enum SidecarCodec {
         let coordinator = NSFileCoordinator(filePresenter: nil)
         let fm = FileManager.default
 
-        func attemptWrite(useReplacing: Bool) -> Error? {
+        struct AttemptResult {
             var coordError: NSError?
             var writeError: Error?
+            var accessorRan: Bool = false
+            var targetURL: URL?
+
+            var error: Error? {
+                coordError ?? writeError
+            }
+        }
+
+        func attemptWrite(useReplacing: Bool) -> AttemptResult {
+            var result = AttemptResult()
             let options: NSFileCoordinator.WritingOptions = useReplacing ? .forReplacing : []
-            coordinator.coordinate(writingItemAt: url, options: options, error: &coordError) { targetURL in
+            coordinator.coordinate(writingItemAt: url, options: options, error: &result.coordError) { targetURL in
+                result.accessorRan = true
+                result.targetURL = targetURL
                 do {
                     try data.write(to: targetURL, options: [])
                 } catch {
-                    writeError = error
+                    result.writeError = error
                 }
             }
-            return coordError ?? writeError
+            return result
         }
 
         let initialExists = fm.fileExists(atPath: url.path)
-        var lastError = attemptWrite(useReplacing: !initialExists)
+        var lastAttempt = attemptWrite(useReplacing: !initialExists)
 
-        if let error = lastError {
+        if let error = lastAttempt.error {
+            var statBuf = stat()
+            let statRes = stat(url.path, &statBuf)
+            let statErr = errno
+            let folderURL = url.deletingLastPathComponent()
+            let folderExists = fm.fileExists(atPath: folderURL.path)
+
+            print("[DEBUG-SMB-SYNC] Initial write failed for \(url.lastPathComponent):")
+            print("[DEBUG-SMB-SYNC]   coordError: \(String(describing: lastAttempt.coordError))")
+            print("[DEBUG-SMB-SYNC]   accessorRan: \(lastAttempt.accessorRan)")
+            print("[DEBUG-SMB-SYNC]   targetURL: \(lastAttempt.targetURL?.path ?? "nil")")
+            print("[DEBUG-SMB-SYNC]   writeError: \(String(describing: lastAttempt.writeError))")
+            print("[DEBUG-SMB-SYNC]   fm.fileExists: \(initialExists), statRes: \(statRes) (errno \(statErr): \(String(cString: strerror(statErr))))")
+            print("[DEBUG-SMB-SYNC]   folder exists: \(folderExists) (\(folderURL.lastPathComponent))")
+
             if isStaleOrMissingFileError(error) {
-                // Network shares (SMB/NFS) may intermittently report ESTALE (errno 70) or ENOENT (errno 2)
-                // when an existing file was recently deleted on another host.
-                // Progressive backoff with .forReplacing allows smbclientd to refresh its lease and invalidate stale handles.
+                // Progressive backoff with .forReplacing
                 let retryDelays: [UInt64] = [50_000_000, 150_000_000]
-                for delay in retryDelays {
+                for (idx, delay) in retryDelays.enumerated() {
                     try await Task.sleep(nanoseconds: delay)
-                    if let retryError = attemptWrite(useReplacing: true) {
-                        lastError = retryError
-                    } else {
-                        print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded on retry for \(url.lastPathComponent)")
+                    let retryAttempt = attemptWrite(useReplacing: true)
+                    if retryAttempt.error == nil {
+                        print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded on backoff retry #\(idx + 1) for \(url.lastPathComponent)")
                         return
                     }
+                    lastAttempt = retryAttempt
                 }
-                let nsError = (lastError ?? error) as NSError
+
+                print("[DEBUG-SMB-SYNC] Backoff retries exhausted for \(url.lastPathComponent). Probing recovery fallbacks:")
+
+                // Strategy 1: Explicit POSIX unlink to evict stale kernel/smbclientd inode cache
+                let unlinkRes = unlink(url.path)
+                let unlinkErr = errno
+                print("[DEBUG-SMB-SYNC]   Probe 1 (POSIX unlink): res=\(unlinkRes), errno=\(unlinkErr) (\(String(cString: strerror(unlinkErr))))")
+
+                let afterUnlinkAttempt = attemptWrite(useReplacing: true)
+                if afterUnlinkAttempt.error == nil {
+                    print("[DEBUG-SMB-SYNC]   -> Recovery via POSIX unlink SUCCEEDED for \(url.lastPathComponent)!")
+                    return
+                }
+
+                // Strategy 2: Write to fresh temporary file in same folder and atomic rename
+                let tempName = ".\(url.deletingPathExtension().lastPathComponent).tmp-\(UUID().uuidString.prefix(8)).xmp"
+                let tempURL = folderURL.appendingPathComponent(tempName)
+                do {
+                    print("[DEBUG-SMB-SYNC]   Probe 2: Attempting write to temp file: \(tempName)")
+                    try data.write(to: tempURL, options: [])
+                    print("[DEBUG-SMB-SYNC]   Probe 2: Temp write succeeded. Renaming to target...")
+                    let renameRes = rename(tempURL.path, url.path)
+                    if renameRes == 0 {
+                        print("[DEBUG-SMB-SYNC]   -> Recovery via temp file + rename SUCCEEDED for \(url.lastPathComponent)!")
+                        return
+                    } else {
+                        let renameErr = errno
+                        print("[DEBUG-SMB-SYNC]   Probe 2: rename failed with errno=\(renameErr) (\(String(cString: strerror(renameErr))))")
+                        do {
+                            _ = try fm.replaceItemAt(url, withItemAt: tempURL, backupItemName: nil, options: [])
+                            print("[DEBUG-SMB-SYNC]   -> Recovery via fm.replaceItemAt SUCCEEDED for \(url.lastPathComponent)!")
+                            return
+                        } catch {
+                            print("[DEBUG-SMB-SYNC]   Probe 2: fm.replaceItemAt also failed: \(error.localizedDescription)")
+                            try? fm.removeItem(at: tempURL)
+                        }
+                    }
+                } catch {
+                    print("[DEBUG-SMB-SYNC]   Probe 2: Temp write failed: \(error.localizedDescription)")
+                }
+
+                let finalError = lastAttempt.error ?? error
+                let nsError = finalError as NSError
                 let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-                print("[DEBUG-SMB-SYNC] SidecarCodec.write retry failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
-                throw lastError ?? error
+                print("[DEBUG-SMB-SYNC] SidecarCodec.write all retries and fallbacks failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
+                throw finalError
             } else {
                 let nsError = error as NSError
                 let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
