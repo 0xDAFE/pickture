@@ -904,28 +904,39 @@ final class CullingSession {
 
             let remoteDigestChanged = (base?.fileDigest != diskDigest)
 
-            if let diskCuration, remoteDigestChanged {
-                let conflict = XMPConflictEngine.evaluate(
-                    itemID: item.id,
-                    base: base,
-                    local: pendingCuration,
-                    remote: diskCuration,
-                    remoteDigestChanged: true
-                )
-                if let conflict {
-                    return .conflict(conflict)
+            let mergeEvaluation = XMPConflictEngine.evaluateThreeWay(
+                itemID: item.id,
+                base: base,
+                local: pendingCuration,
+                remote: diskCuration,
+                remoteDigestChanged: remoteDigestChanged
+            )
+
+            let curationToWrite: CurationMetadata
+
+            switch mergeEvaluation {
+            case .conflict(let conflict):
+                return .conflict(conflict)
+
+            case .cleanMerge(let mergedCuration):
+                if diskCuration == nil && pendingCuration == base?.metadata {
+                    return .success(BaseSnapshot(metadata: CurationMetadata(), fileDigest: ""))
                 }
+                curationToWrite = mergedCuration
+
+            case .noChange:
+                curationToWrite = pendingCuration
             }
 
-            let writtenTargets = try await SidecarCodec.write(curation: pendingCuration, for: item)
+            let writtenTargets = try await SidecarCodec.write(curation: curationToWrite, for: item)
 
             if let primaryTarget = writtenTargets.first, let writtenData = try? Data(contentsOf: primaryTarget) {
                 let newDigest = SidecarCodec.computeDigest(for: writtenData)
                 let modDate = (try? primaryTarget.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                let newBase = BaseSnapshot(metadata: pendingCuration, fileDigest: newDigest, modificationDate: modDate)
+                let newBase = BaseSnapshot(metadata: curationToWrite, fileDigest: newDigest, modificationDate: modDate)
                 return .success(newBase)
             } else {
-                let fallbackBase = BaseSnapshot(metadata: pendingCuration, fileDigest: "")
+                let fallbackBase = BaseSnapshot(metadata: curationToWrite, fileDigest: "")
                 return .success(fallbackBase)
             }
         }.value
@@ -937,6 +948,7 @@ final class CullingSession {
             metadataSyncStore.recordConflict(conflict, for: item.id)
 
         case .success(let newBase):
+            metadataByItemID[item.id] = newBase.metadata
             baseSnapshotByItemID[item.id] = newBase
             syncStateByItemID[item.id] = .synced
             conflictsByItemID.removeValue(forKey: item.id)
@@ -1178,18 +1190,22 @@ final class CullingSession {
                     baseSnapshotByItemID[item.id] = persisted.baseSnapshot
 
                     // Check if external edit happened on disk while pending
-                    if let diskCuration, let base = persisted.baseSnapshot {
+                    if let base = persisted.baseSnapshot {
                         let remoteChanged = diskDigest != base.fileDigest
-                        if remoteChanged, let conflict = XMPConflictEngine.evaluate(
+                        let threeWay = XMPConflictEngine.evaluateThreeWay(
                             itemID: item.id,
                             base: base,
                             local: persisted.metadata,
                             remote: diskCuration,
-                            remoteDigestChanged: true
-                        ) {
+                            remoteDigestChanged: remoteChanged
+                        )
+                        switch threeWay {
+                        case .conflict(let conflict):
                             syncStateByItemID[item.id] = .conflicted
                             conflictsByItemID[item.id] = conflict
                             metadataSyncStore.recordConflict(conflict, for: item.id)
+                        case .cleanMerge, .noChange:
+                            break
                         }
                     }
                 } else if persisted.syncState == .conflicted, let conflict = persisted.conflict {
@@ -1205,9 +1221,12 @@ final class CullingSession {
                         baseSnapshotByItemID[item.id] = snapshot
                         metadataSyncStore.recordBaseSnapshot(snapshot, exif: exifByItemID[item.id] ?? diskExif, for: item.id)
                     } else {
-                        metadataByItemID[item.id] = persisted.metadata
+                        // Sidecar was deleted externally on storage, and local had no uncommitted mutations
+                        let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+                        metadataByItemID[item.id] = CurationMetadata()
                         syncStateByItemID[item.id] = .synced
-                        baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                        baseSnapshotByItemID[item.id] = emptySnapshot
+                        metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: exifByItemID[item.id] ?? diskExif, for: item.id)
                     }
                 }
             } else {

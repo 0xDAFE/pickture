@@ -103,11 +103,13 @@ nonisolated enum SidecarCodec {
 
     static func writeCoordinatedWithRetry(data: Data, to url: URL) async throws {
         let coordinator = NSFileCoordinator(filePresenter: nil)
+        let fm = FileManager.default
 
-        func attemptWrite() -> Error? {
+        func attemptWrite(useReplacing: Bool) -> Error? {
             var coordError: NSError?
             var writeError: Error?
-            coordinator.coordinate(writingItemAt: url, options: [], error: &coordError) { targetURL in
+            let options: NSFileCoordinator.WritingOptions = useReplacing ? .forReplacing : []
+            coordinator.coordinate(writingItemAt: url, options: options, error: &coordError) { targetURL in
                 do {
                     try data.write(to: targetURL, options: [])
                 } catch {
@@ -117,18 +119,28 @@ nonisolated enum SidecarCodec {
             return coordError ?? writeError
         }
 
-        if let error = attemptWrite() {
-            if isStaleFileHandleError(error) {
-                // Network shares (SMB/NFS) may intermittently report ESTALE (errno 70) during rapid bursts.
-                // Non-blocking micro-backoff allows smbclientd to refresh its lease and invalidate stale handles.
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                if let retryError = attemptWrite() {
-                    let nsError = retryError as NSError
-                    let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-                    print("[DEBUG-SMB-SYNC] SidecarCodec.write retry failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
-                    throw retryError
+        let initialExists = fm.fileExists(atPath: url.path)
+        var lastError = attemptWrite(useReplacing: !initialExists)
+
+        if let error = lastError {
+            if isStaleOrMissingFileError(error) {
+                // Network shares (SMB/NFS) may intermittently report ESTALE (errno 70) or ENOENT (errno 2)
+                // when an existing file was recently deleted on another host.
+                // Progressive backoff with .forReplacing allows smbclientd to refresh its lease and invalidate stale handles.
+                let retryDelays: [UInt64] = [50_000_000, 150_000_000]
+                for delay in retryDelays {
+                    try await Task.sleep(nanoseconds: delay)
+                    if let retryError = attemptWrite(useReplacing: true) {
+                        lastError = retryError
+                    } else {
+                        print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded on retry for \(url.lastPathComponent)")
+                        return
+                    }
                 }
-                print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded on ESTALE retry for \(url.lastPathComponent)")
+                let nsError = (lastError ?? error) as NSError
+                let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+                print("[DEBUG-SMB-SYNC] SidecarCodec.write retry failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
+                throw lastError ?? error
             } else {
                 let nsError = error as NSError
                 let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
@@ -138,16 +150,33 @@ nonisolated enum SidecarCodec {
         }
     }
 
-    static func isStaleFileHandleError(_ error: Error) -> Bool {
-        let staleCode = Int(POSIXError.Code.ESTALE.rawValue)
+    static func hasPOSIXErrorCode(_ error: Error, code: Int) -> Bool {
         let nsError = error as NSError
-        if nsError.domain == NSPOSIXErrorDomain && nsError.code == staleCode {
+        if nsError.domain == NSPOSIXErrorDomain && nsError.code == code {
             return true
         }
         if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
-            if underlying.domain == NSPOSIXErrorDomain && underlying.code == staleCode {
+            if underlying.domain == NSPOSIXErrorDomain && underlying.code == code {
                 return true
             }
+        }
+        return false
+    }
+
+    static func isStaleFileHandleError(_ error: Error) -> Bool {
+        hasPOSIXErrorCode(error, code: Int(POSIXError.Code.ESTALE.rawValue))
+    }
+
+    static func isStaleOrMissingFileError(_ error: Error) -> Bool {
+        if isStaleFileHandleError(error) {
+            return true
+        }
+        if hasPOSIXErrorCode(error, code: Int(POSIXError.Code.ENOENT.rawValue)) {
+            return true
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain && nsError.code == CocoaError.fileNoSuchFile.rawValue {
+            return true
         }
         return false
     }

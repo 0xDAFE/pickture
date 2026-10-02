@@ -487,4 +487,176 @@ struct CullingSessionSyncAndConflictTests {
         #expect(parsed1.curation.starRating == 4)
         #expect(parsed2.curation.starRating == 2)
     }
+
+    // MARK: - Bug 2 Repro: Non-overlapping Remote Modifications Clobbered
+
+    @Test("Repro Bug 2: External XMP modification on disk must not be silently overwritten by stale local metadata")
+    func externalXMPModificationPreservesExternalFieldOrDetectsConflict() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("BUG2.JPG")
+        try Data("jpg-data".utf8).write(to: jpgURL)
+
+        // Initial base on disk: 1 star, unflagged, none
+        let baseMetadata = CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .none)
+        let baseXMPData = try SidecarCodec.update(xmlData: nil, with: baseMetadata)
+        let xmpURL = root.appendingPathComponent("BUG2.xmp")
+        try baseXMPData.write(to: xmpURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        session.isSyncSuspended = true
+        try session.openFolder(at: root)
+
+        let item = try #require(session.items.first)
+        #expect(session.syncState(for: item) == .synced)
+
+        // User changes color flag in Pickture:
+        session.setColorLabel(.green, for: item) // local = star: 1, flag: unflagged, color: green
+        #expect(session.syncState(for: item) == .pendingWrite)
+
+        // External tool on NAS modifies star rating in .xmp:
+        let externalMetadata = CurationMetadata(starRating: 5, pickFlag: .unflagged, colorLabel: .none)
+        let externalXMPData = try SidecarCodec.update(xmlData: baseXMPData, with: externalMetadata)
+        try externalXMPData.write(to: xmpURL)
+
+        // Flush pending writes
+        await session.flushPendingWrites()
+
+        // What does disk have now?
+        let diskDataAfterFlush = try Data(contentsOf: xmpURL)
+        let (diskCuration, _) = try SidecarCodec.parse(data: diskDataAfterFlush)
+
+        // The bug: Pickture clobbered external starRating: 5 back to 1!
+        // We assert that the external starRating: 5 was NOT overwritten!
+        #expect(diskCuration.starRating == 5)
+    }
+
+    // MARK: - Bug 1 Repro: External Deletion of XMP File
+
+    @Test("Repro Bug 1: When an XMP file is deleted externally on disk, refreshing the folder clears stale curation instead of retaining phantom synced state")
+    func externalDeletionOfXMPReflectedOnRefresh() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("BUG1_DEL.JPG")
+        try Data("jpg-data".utf8).write(to: jpgURL)
+
+        let initialMetadata = CurationMetadata(starRating: 4, pickFlag: .picked, colorLabel: .blue)
+        let initialXMPData = try SidecarCodec.update(xmlData: nil, with: initialMetadata)
+        let xmpURL = root.appendingPathComponent("BUG1_DEL.xmp")
+        try initialXMPData.write(to: xmpURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        session.isSyncSuspended = true
+        try session.openFolder(at: root)
+
+        let item = try #require(session.items.first)
+        #expect(session.syncState(for: item) == .synced)
+        #expect(session.curationMetadata(for: item) == initialMetadata)
+
+        // External tool/user deletes the .xmp file on disk
+        try FileManager.default.removeItem(at: xmpURL)
+        #expect(!FileManager.default.fileExists(atPath: xmpURL.path))
+
+        // Refresh folder in Pickture
+        try await session.refreshFolder()
+
+        let refreshedItem = try #require(session.items.first)
+        // Expected: sidecar is gone, so curation should be reset to default / empty CurationMetadata(),
+        // NOT retaining the old 4 stars / blue from persisted store!
+        #expect(session.curationMetadata(for: refreshedItem) == CurationMetadata())
+        #expect(session.syncState(for: refreshedItem) == .synced)
+        #expect(session.baseSnapshot(for: refreshedItem)?.fileDigest == "")
+    }
+
+    @Test("External sidecar deletion while local has pending write cleanly recreates sidecar without sync error")
+    func externalDeletionDuringPendingWriteRecreatesSidecarWithoutSyncError() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("BUG1_PENDING.JPG")
+        try Data("jpg-data".utf8).write(to: jpgURL)
+
+        let initialMetadata = CurationMetadata(starRating: 2, pickFlag: .unflagged, colorLabel: .none)
+        let initialXMPData = try SidecarCodec.update(xmlData: nil, with: initialMetadata)
+        let xmpURL = root.appendingPathComponent("BUG1_PENDING.xmp")
+        try initialXMPData.write(to: xmpURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        session.isSyncSuspended = true
+        try session.openFolder(at: root)
+
+        let item = try #require(session.items.first)
+        session.setStarRating(5, for: item) // pending mutation
+        #expect(session.syncState(for: item) == .pendingWrite)
+
+        // Sidecar is deleted externally on storage
+        try FileManager.default.removeItem(at: xmpURL)
+        #expect(!FileManager.default.fileExists(atPath: xmpURL.path))
+
+        // Flush pending write
+        await session.flushPendingWrites()
+
+        // Verify sidecar was recreated with creation semantics and no sync error
+        #expect(session.syncState(for: item) == .synced)
+        #expect(session.syncSummaryState == .synced)
+        #expect(session.syncErrorItemsCount == 0)
+        #expect(session.lastErrorMessage == nil)
+
+        #expect(FileManager.default.fileExists(atPath: xmpURL.path))
+        let diskData = try Data(contentsOf: xmpURL)
+        let parsed = try SidecarCodec.parse(data: diskData)
+        #expect(parsed.curation.starRating == 5)
+    }
+
+    @Test("Three-way auto-merge updates in-memory session curation so UI immediately reflects merged state")
+    func threeWayAutoMergeUpdatesSessionCurationImmediately() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("MERGE_UI.JPG")
+        try Data("jpg-data".utf8).write(to: jpgURL)
+
+        let baseMetadata = CurationMetadata(starRating: 1, pickFlag: .unflagged, colorLabel: .none)
+        let baseXMP = try SidecarCodec.update(xmlData: nil, with: baseMetadata)
+        let xmpURL = root.appendingPathComponent("MERGE_UI.xmp")
+        try baseXMP.write(to: xmpURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        session.isSyncSuspended = true
+        try session.openFolder(at: root)
+
+        let item = try #require(session.items.first)
+
+        // Local changes: pick flag to .picked, color to .purple
+        session.setPickFlag(.picked, for: item)
+        session.setColorLabel(.purple, for: item)
+
+        // External tool on NAS changes: star rating from 1 to 4
+        let remoteMetadata = CurationMetadata(starRating: 4, pickFlag: .unflagged, colorLabel: .none)
+        let remoteXMP = try SidecarCodec.update(xmlData: baseXMP, with: remoteMetadata)
+        try remoteXMP.write(to: xmpURL)
+
+        // Flush
+        await session.flushPendingWrites()
+
+        let expectedMerged = CurationMetadata(starRating: 4, pickFlag: .picked, colorLabel: .purple)
+
+        // In-memory curation in CullingSession must be updated!
+        #expect(session.curationMetadata(for: item) == expectedMerged)
+        #expect(session.syncState(for: item) == .synced)
+        #expect(session.syncSummaryBadgeText == "Synced")
+
+        // On-disk sidecar must also contain the merged values!
+        let diskData = try Data(contentsOf: xmpURL)
+        let parsed = try SidecarCodec.parse(data: diskData)
+        #expect(parsed.curation == expectedMerged)
+    }
 }
+
+
