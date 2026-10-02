@@ -463,4 +463,60 @@ struct SidecarCodecTests {
         let genericError = NSError(domain: NSCocoaErrorDomain, code: 512)
         #expect(!SidecarCodec.isStaleFileHandleError(genericError))
     }
+
+    @Test("SidecarCodec POSIX helpers write and read data cleanly")
+    func posixHelpersWriteAndReadCleanly() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let testFile = root.appendingPathComponent("posix_test.xmp")
+        let sampleData = "Sample POSIX XMP Content".data(using: .utf8)!
+
+        // Write via POSIX
+        let writeErr = SidecarCodec.writeViaPOSIX(data: sampleData, to: testFile.path)
+        #expect(writeErr == nil)
+
+        // Read via SidecarCodec.readData
+        let readBack = SidecarCodec.readData(from: testFile)
+        #expect(readBack == sampleData)
+
+        // Overwrite via POSIX
+        let updatedData = "Updated POSIX XMP Content".data(using: .utf8)!
+        let overwriteErr = SidecarCodec.writeViaPOSIX(data: updatedData, to: testFile.path)
+        #expect(overwriteErr == nil)
+
+        let readBackUpdated = SidecarCodec.readData(from: testFile)
+        #expect(readBackUpdated == updatedData)
+
+        // Read non-existent file returns nil
+        let nonExistent = root.appendingPathComponent("does_not_exist.xmp")
+        #expect(SidecarCodec.readData(from: nonExistent) == nil)
+    }
+
+    @Test("SidecarCodec.resolveSidecarWriteURLs preserves existing .XMP uppercase sidecar casing")
+    func resolveSidecarWriteURLsPreservesExistingUppercaseXMPCasing() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("PHOTO01.JPG")
+        try Data("jpg-content".utf8).write(to: jpgURL)
+
+        // Create an existing uppercase sidecar on disk
+        let upperXMP = root.appendingPathComponent("PHOTO01.XMP")
+        try Data("xmp-content".utf8).write(to: upperXMP)
+
+        let item = MediaItem(
+            id: "\(root.path)#PHOTO01",
+            baseName: "PHOTO01",
+            directoryURL: root,
+            relativeDirectoryPath: "",
+            kind: .photo,
+            primaryFile: MediaFile(url: jpgURL, formatKind: .raster),
+            mediaPair: nil,
+            sidecarURL: upperXMP
+        )
+
+        let targets = SidecarCodec.resolveSidecarWriteURLs(for: item)
+        #expect(targets.contains(where: { $0.lastPathComponent == "PHOTO01.XMP" }))
+    }
 }

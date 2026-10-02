@@ -915,7 +915,7 @@ final class CullingSession {
             var diskCuration: CurationMetadata? = nil
             var diskDigest = ""
 
-            if let readURL, let data = try? Data(contentsOf: readURL) {
+            if let readURL, let data = SidecarCodec.readData(from: readURL) {
                 diskDigest = SidecarCodec.computeDigest(for: data)
                 if let parsed = try? SidecarCodec.parse(data: data) {
                     diskCuration = parsed.curation
@@ -950,7 +950,7 @@ final class CullingSession {
 
             let writtenTargets = try await SidecarCodec.write(curation: curationToWrite, for: item)
 
-            if let primaryTarget = writtenTargets.first, let writtenData = try? Data(contentsOf: primaryTarget) {
+            if let primaryTarget = writtenTargets.first, let writtenData = SidecarCodec.readData(from: primaryTarget) {
                 let newDigest = SidecarCodec.computeDigest(for: writtenData)
                 let modDate = (try? primaryTarget.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
                 let newBase = BaseSnapshot(metadata: curationToWrite, fileDigest: newDigest, modificationDate: modDate)
@@ -987,7 +987,7 @@ final class CullingSession {
         case .useRemote:
             resolvedMetadata = conflict.remote
             let readURL = SidecarCodec.resolveSidecarReadURL(for: item)
-            let diskData = (try? readURL.flatMap { try? Data(contentsOf: $0) }) ?? Data()
+            let diskData = readURL.flatMap { SidecarCodec.readData(from: $0) } ?? Data()
             let digest = SidecarCodec.computeDigest(for: diskData)
             let modDate = readURL.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
             newBase = BaseSnapshot(metadata: resolvedMetadata, fileDigest: digest, modificationDate: modDate)
@@ -1009,7 +1009,7 @@ final class CullingSession {
             }.value
 
             let primaryTarget = writtenTargets.first ?? SidecarCodec.resolveSidecarReadURL(for: item)
-            let writtenData = (try? primaryTarget.flatMap { try? Data(contentsOf: $0) }) ?? Data()
+            let writtenData = primaryTarget.flatMap { SidecarCodec.readData(from: $0) } ?? Data()
             let digest = SidecarCodec.computeDigest(for: writtenData)
             let modDate = primaryTarget.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
             newBase = BaseSnapshot(metadata: resolvedMetadata, fileDigest: digest, modificationDate: modDate)
@@ -1185,7 +1185,7 @@ final class CullingSession {
             var diskDigest = ""
             var diskModDate: Date? = nil
 
-            if let sidecarURL, let data = try? Data(contentsOf: sidecarURL) {
+            if let sidecarURL, let data = SidecarCodec.readData(from: sidecarURL) {
                 diskData = data
                 diskDigest = SidecarCodec.computeDigest(for: data)
                 diskModDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate

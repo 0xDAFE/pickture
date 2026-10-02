@@ -47,11 +47,18 @@ nonisolated enum SidecarCodec {
         let fm = FileManager.default
         let dir = item.directoryURL.standardizedFileURL
 
-        // Always write to <basename>.xmp by default
+        // 1. Primary write URL is <basename>.xmp, preserving existing on-disk casing (e.g. .XMP) if found
         let basenameURL = dir.appendingPathComponent("\(item.baseName).xmp").standardizedFileURL
-        var targets: [URL] = [basenameURL]
+        var primaryURL = basenameURL
+        if let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            let targetBase = "\(item.baseName).xmp".lowercased()
+            if let matched = contents.first(where: { $0.lastPathComponent.lowercased() == targetBase }) {
+                primaryURL = matched.standardizedFileURL
+            }
+        }
+        var targets: [URL] = [primaryURL]
 
-        // Also update any <filename>.<ext>.xmp that already exists on disk
+        // 2. Also update any <filename>.<ext>.xmp that already exists on disk
         let files = associatedFiles(for: item)
         for file in files {
             let extURL = dir.appendingPathComponent("\(file.fileName).xmp").standardizedFileURL
@@ -77,6 +84,70 @@ nonisolated enum SidecarCodec {
         return files
     }
 
+    // MARK: - Safe POSIX I/O & Invalidation Helpers
+
+    static func readData(from url: URL) -> Data? {
+        if let data = try? Data(contentsOf: url) {
+            return data
+        }
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var statBuf = stat()
+        guard fstat(fd, &statBuf) == 0 else { return nil }
+        let size = Int(statBuf.st_size)
+        guard size > 0 else { return Data() }
+        var data = Data(count: size)
+        let readSuccess = data.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let base = rawBuffer.baseAddress else { return false }
+            var totalRead = 0
+            while totalRead < size {
+                let r = Darwin.read(fd, base.advanced(by: totalRead), size - totalRead)
+                if r <= 0 { return false }
+                totalRead += r
+            }
+            return true
+        }
+        return readSuccess ? data : nil
+    }
+
+    @discardableResult
+    static func writeViaPOSIX(data: Data, to path: String, flags: Int32 = O_WRONLY | O_CREAT | O_TRUNC, mode: mode_t = 0o666) -> Error? {
+        let fd = open(path, flags, mode)
+        if fd < 0 {
+            let err = errno
+            return NSError(domain: NSPOSIXErrorDomain, code: Int(err), userInfo: [
+                NSLocalizedDescriptionKey: String(cString: strerror(err)),
+                NSFilePathErrorKey: path
+            ])
+        }
+        defer { close(fd) }
+
+        var remaining = data.count
+        var offset = 0
+        let writeError: Int32 = data.withUnsafeBytes { rawBuffer -> Int32 in
+            guard let base = rawBuffer.baseAddress else { return 0 }
+            while remaining > 0 {
+                let written = Darwin.write(fd, base.advanced(by: offset), remaining)
+                if written < 0 {
+                    return errno
+                }
+                remaining -= written
+                offset += written
+            }
+            return 0
+        }
+
+        if writeError != 0 {
+            return NSError(domain: NSPOSIXErrorDomain, code: Int(writeError), userInfo: [
+                NSLocalizedDescriptionKey: String(cString: strerror(writeError)),
+                NSFilePathErrorKey: path
+            ])
+        }
+
+        return nil
+    }
+
     // MARK: - XMP Parsing
 
     static func parse(data: Data) throws -> (curation: CurationMetadata, exif: ExifMetadata) {
@@ -90,19 +161,22 @@ nonisolated enum SidecarCodec {
     static func write(curation: CurationMetadata, for item: MediaItem) async throws -> [URL] {
         let targets = resolveSidecarWriteURLs(for: item)
         let fm = FileManager.default
+        var actualWritten: [URL] = []
         for url in targets {
-            let existingData = try? Data(contentsOf: url)
+            let existingData = readData(from: url)
             let updatedData = try update(xmlData: existingData, with: curation)
             let dir = url.deletingLastPathComponent()
             if !fm.fileExists(atPath: dir.path) {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
-            try await writeCoordinatedWithRetry(data: updatedData, to: url)
+            let writtenURL = try await writeCoordinatedWithRetry(data: updatedData, to: url)
+            actualWritten.append(writtenURL)
         }
-        return targets
+        return actualWritten
     }
 
-    static func writeCoordinatedWithRetry(data: Data, to url: URL) async throws {
+    @discardableResult
+    static func writeCoordinatedWithRetry(data: Data, to url: URL) async throws -> URL {
         let coordinator = NSFileCoordinator(filePresenter: nil)
         let fm = FileManager.default
 
@@ -126,7 +200,17 @@ nonisolated enum SidecarCodec {
                 do {
                     try data.write(to: targetURL, options: [])
                 } catch {
-                    result.writeError = error
+                    // Foundation's data.write fails on stat() before even attempting open().
+                    // Direct POSIX open(O_CREAT) does not stat() first and may bypass the stale handle.
+                    if isStaleOrMissingFileError(error) {
+                        if let posixErr = writeViaPOSIX(data: data, to: targetURL.path) {
+                            result.writeError = posixErr
+                        } else {
+                            result.writeError = nil
+                        }
+                    } else {
+                        result.writeError = error
+                    }
                 }
             }
             return result
@@ -135,85 +219,158 @@ nonisolated enum SidecarCodec {
         let initialExists = fm.fileExists(atPath: url.path)
         var lastAttempt = attemptWrite(useReplacing: !initialExists)
 
-        if let error = lastAttempt.error {
-            var statBuf = stat()
-            let statRes = stat(url.path, &statBuf)
-            let statErr = errno
-            let folderURL = url.deletingLastPathComponent()
-            let folderExists = fm.fileExists(atPath: folderURL.path)
+        if lastAttempt.error == nil {
+            return url
+        }
 
-            print("[DEBUG-SMB-SYNC] Initial write failed for \(url.lastPathComponent):")
-            print("[DEBUG-SMB-SYNC]   coordError: \(String(describing: lastAttempt.coordError))")
-            print("[DEBUG-SMB-SYNC]   accessorRan: \(lastAttempt.accessorRan)")
-            print("[DEBUG-SMB-SYNC]   targetURL: \(lastAttempt.targetURL?.path ?? "nil")")
-            print("[DEBUG-SMB-SYNC]   writeError: \(String(describing: lastAttempt.writeError))")
-            print("[DEBUG-SMB-SYNC]   fm.fileExists: \(initialExists), statRes: \(statRes) (errno \(statErr): \(String(cString: strerror(statErr))))")
-            print("[DEBUG-SMB-SYNC]   folder exists: \(folderExists) (\(folderURL.lastPathComponent))")
+        let error = lastAttempt.error!
+        var statBuf = stat()
+        let statRes = stat(url.path, &statBuf)
+        let statErr = errno
+        let folderURL = url.deletingLastPathComponent()
+        let folderExists = fm.fileExists(atPath: folderURL.path)
 
-            if isStaleOrMissingFileError(error) {
-                // Progressive backoff with .forReplacing
-                let retryDelays: [UInt64] = [50_000_000, 150_000_000]
-                for (idx, delay) in retryDelays.enumerated() {
-                    try await Task.sleep(nanoseconds: delay)
-                    let retryAttempt = attemptWrite(useReplacing: true)
-                    if retryAttempt.error == nil {
-                        print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded on backoff retry #\(idx + 1) for \(url.lastPathComponent)")
-                        return
-                    }
-                    lastAttempt = retryAttempt
+        print("[DEBUG-SMB-SYNC] Initial write failed for \(url.lastPathComponent):")
+        print("[DEBUG-SMB-SYNC]   coordError: \(String(describing: lastAttempt.coordError))")
+        print("[DEBUG-SMB-SYNC]   accessorRan: \(lastAttempt.accessorRan)")
+        print("[DEBUG-SMB-SYNC]   targetURL: \(lastAttempt.targetURL?.path ?? "nil")")
+        print("[DEBUG-SMB-SYNC]   writeError: \(String(describing: lastAttempt.writeError))")
+        print("[DEBUG-SMB-SYNC]   fm.fileExists: \(initialExists), statRes: \(statRes) (errno \(statErr): \(String(cString: strerror(statErr))))")
+        print("[DEBUG-SMB-SYNC]   folder exists: \(folderExists) (\(folderURL.lastPathComponent))")
+
+        if isStaleOrMissingFileError(error) {
+            // Progressive backoff with .forReplacing
+            let retryDelays: [UInt64] = [50_000_000, 150_000_000]
+            for (idx, delay) in retryDelays.enumerated() {
+                try await Task.sleep(nanoseconds: delay)
+                let retryAttempt = attemptWrite(useReplacing: true)
+                if retryAttempt.error == nil {
+                    print("[DEBUG-SMB-SYNC] SidecarCodec.write succeeded on backoff retry #\(idx + 1) for \(url.lastPathComponent)")
+                    return url
                 }
-
-                print("[DEBUG-SMB-SYNC] Backoff retries exhausted for \(url.lastPathComponent). Probing recovery fallbacks:")
-
-                // Strategy 1: Explicit POSIX unlink to evict stale kernel/smbclientd inode cache
-                let unlinkRes = unlink(url.path)
-                let unlinkErr = errno
-                print("[DEBUG-SMB-SYNC]   Probe 1 (POSIX unlink): res=\(unlinkRes), errno=\(unlinkErr) (\(String(cString: strerror(unlinkErr))))")
-
-                let afterUnlinkAttempt = attemptWrite(useReplacing: true)
-                if afterUnlinkAttempt.error == nil {
-                    print("[DEBUG-SMB-SYNC]   -> Recovery via POSIX unlink SUCCEEDED for \(url.lastPathComponent)!")
-                    return
-                }
-
-                // Strategy 2: Write to fresh temporary file in same folder and atomic rename
-                let tempName = ".\(url.deletingPathExtension().lastPathComponent).tmp-\(UUID().uuidString.prefix(8)).xmp"
-                let tempURL = folderURL.appendingPathComponent(tempName)
-                do {
-                    print("[DEBUG-SMB-SYNC]   Probe 2: Attempting write to temp file: \(tempName)")
-                    try data.write(to: tempURL, options: [])
-                    print("[DEBUG-SMB-SYNC]   Probe 2: Temp write succeeded. Renaming to target...")
-                    let renameRes = rename(tempURL.path, url.path)
-                    if renameRes == 0 {
-                        print("[DEBUG-SMB-SYNC]   -> Recovery via temp file + rename SUCCEEDED for \(url.lastPathComponent)!")
-                        return
-                    } else {
-                        let renameErr = errno
-                        print("[DEBUG-SMB-SYNC]   Probe 2: rename failed with errno=\(renameErr) (\(String(cString: strerror(renameErr))))")
-                        do {
-                            _ = try fm.replaceItemAt(url, withItemAt: tempURL, backupItemName: nil, options: [])
-                            print("[DEBUG-SMB-SYNC]   -> Recovery via fm.replaceItemAt SUCCEEDED for \(url.lastPathComponent)!")
-                            return
-                        } catch {
-                            print("[DEBUG-SMB-SYNC]   Probe 2: fm.replaceItemAt also failed: \(error.localizedDescription)")
-                            try? fm.removeItem(at: tempURL)
-                        }
-                    }
-                } catch {
-                    print("[DEBUG-SMB-SYNC]   Probe 2: Temp write failed: \(error.localizedDescription)")
-                }
-
-                let finalError = lastAttempt.error ?? error
-                let nsError = finalError as NSError
-                let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-                print("[DEBUG-SMB-SYNC] SidecarCodec.write all retries and fallbacks failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
-                throw finalError
-            } else {
-                let nsError = error as NSError
-                let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-                print("[DEBUG-SMB-SYNC] SidecarCodec.write direct failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
-                throw error
+                lastAttempt = retryAttempt
             }
+
+            print("[DEBUG-SMB-SYNC] Backoff retries exhausted for \(url.lastPathComponent). Probing recovery fallbacks:")
+
+            // Probe 1: Parent directory cache invalidation via readdir + fsync
+            let folderPath = folderURL.path
+            if let dir = opendir(folderPath) {
+                while readdir(dir) != nil {}
+                closedir(dir)
+            }
+            let dirFd = open(folderPath, O_RDONLY)
+            if dirFd >= 0 {
+                fsync(dirFd)
+                close(dirFd)
+            }
+            if writeViaPOSIX(data: data, to: url.path) == nil {
+                print("[DEBUG-SMB-SYNC]   -> Recovery via directory fsync + POSIX write SUCCEEDED for \(url.lastPathComponent)!")
+                return url
+            }
+
+            // Probe 2: POSIX open with O_CREAT | O_EXCL
+            if writeViaPOSIX(data: data, to: url.path, flags: O_WRONLY | O_CREAT | O_EXCL) == nil {
+                print("[DEBUG-SMB-SYNC]   -> Recovery via POSIX O_EXCL SUCCEEDED for \(url.lastPathComponent)!")
+                return url
+            }
+
+            // Probe 3: Explicit POSIX unlink to evict stale kernel/smbclientd inode cache
+            let unlinkRes = unlink(url.path)
+            let unlinkErr = errno
+            print("[DEBUG-SMB-SYNC]   Probe 3 (POSIX unlink): res=\(unlinkRes), errno=\(unlinkErr) (\(String(cString: strerror(unlinkErr))))")
+            if writeViaPOSIX(data: data, to: url.path) == nil {
+                print("[DEBUG-SMB-SYNC]   -> Recovery via POSIX unlink + POSIX write SUCCEEDED for \(url.lastPathComponent)!")
+                return url
+            }
+
+            // Probe 4: Write to fresh temporary file in same folder and atomic rename
+            let tempName = ".\(url.deletingPathExtension().lastPathComponent).tmp-\(UUID().uuidString.prefix(8)).xmp"
+            let tempURL = folderURL.appendingPathComponent(tempName)
+            var tempWriteSucceeded = false
+            do {
+                print("[DEBUG-SMB-SYNC]   Probe 4: Attempting write to temp file: \(tempName)")
+                try data.write(to: tempURL, options: [])
+                tempWriteSucceeded = true
+                print("[DEBUG-SMB-SYNC]   Probe 4: Temp write succeeded. Renaming to target...")
+                let renameRes = rename(tempURL.path, url.path)
+                if renameRes == 0 {
+                    print("[DEBUG-SMB-SYNC]   -> Recovery via temp file + rename SUCCEEDED for \(url.lastPathComponent)!")
+                    return url
+                } else {
+                    let renameErr = errno
+                    print("[DEBUG-SMB-SYNC]   Probe 4: rename failed with errno=\(renameErr) (\(String(cString: strerror(renameErr))))")
+                    do {
+                        _ = try fm.replaceItemAt(url, withItemAt: tempURL, backupItemName: nil, options: [])
+                        print("[DEBUG-SMB-SYNC]   -> Recovery via fm.replaceItemAt SUCCEEDED for \(url.lastPathComponent)!")
+                        return url
+                    } catch {
+                        print("[DEBUG-SMB-SYNC]   Probe 4: fm.replaceItemAt also failed: \(error.localizedDescription)")
+                    }
+                }
+            } catch {
+                print("[DEBUG-SMB-SYNC]   Probe 4: Temp write failed: \(error.localizedDescription)")
+            }
+
+            // Probe 5: Case-variant destination (.XMP)
+            // On SMB shares, file lookups are case-insensitive on the server. However, smbclientd
+            // on iOS caches nodes by the exact requested string. If "P9227373.xmp" has a poisoned/stale
+            // node in smbclientd that rejects all lookups, "P9227373.XMP" bypasses the poisoned entry,
+            // creates the file on the NAS, and persists the curation.
+            let upperName = "\(url.deletingPathExtension().lastPathComponent).XMP"
+            let upperURL = folderURL.appendingPathComponent(upperName)
+            print("[DEBUG-SMB-SYNC]   Probe 5: Attempting write to case-variant: \(upperName)")
+
+            var upperWriteSucceeded = false
+            if tempWriteSucceeded && fm.fileExists(atPath: tempURL.path) {
+                let renameUpperRes = rename(tempURL.path, upperURL.path)
+                if renameUpperRes == 0 {
+                    print("[DEBUG-SMB-SYNC]   Probe 5: rename temp -> \(upperName) SUCCEEDED!")
+                    upperWriteSucceeded = true
+                } else {
+                    let renameUpperErr = errno
+                    print("[DEBUG-SMB-SYNC]   Probe 5: rename temp -> \(upperName) failed with errno=\(renameUpperErr)")
+                    try? fm.removeItem(at: tempURL)
+                }
+            }
+
+            if !upperWriteSucceeded {
+                if writeViaPOSIX(data: data, to: upperURL.path) == nil {
+                    print("[DEBUG-SMB-SYNC]   Probe 5: writeViaPOSIX to \(upperName) SUCCEEDED!")
+                    upperWriteSucceeded = true
+                } else {
+                    do {
+                        try data.write(to: upperURL, options: [])
+                        print("[DEBUG-SMB-SYNC]   Probe 5: data.write to \(upperName) SUCCEEDED!")
+                        upperWriteSucceeded = true
+                    } catch {
+                        print("[DEBUG-SMB-SYNC]   Probe 5: data.write to \(upperName) failed: \(error.localizedDescription)")
+                    }
+                }
+            }
+
+            if upperWriteSucceeded {
+                let finalRenameRes = rename(upperURL.path, url.path)
+                if finalRenameRes == 0 {
+                    print("[DEBUG-SMB-SYNC]   -> Recovery via case-variant write + rename to lowercase SUCCEEDED for \(url.lastPathComponent)!")
+                    return url
+                } else {
+                    let finalRenameErr = errno
+                    print("[DEBUG-SMB-SYNC]   -> Recovery via case-variant write retained as \(upperName) (rename to lowercase errno=\(finalRenameErr))!")
+                    return upperURL
+                }
+            }
+
+            let finalError = lastAttempt.error ?? error
+            let nsError = finalError as NSError
+            let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+            print("[DEBUG-SMB-SYNC] SidecarCodec.write all retries and fallbacks failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
+            throw finalError
+        } else {
+            let nsError = error as NSError
+            let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+            print("[DEBUG-SMB-SYNC] SidecarCodec.write direct failed for \(url.lastPathComponent): domain=\(nsError.domain) code=\(nsError.code) underlying=\(underlying?.domain ?? "none")(\(underlying?.code ?? -1))")
+            throw error
         }
     }
 
