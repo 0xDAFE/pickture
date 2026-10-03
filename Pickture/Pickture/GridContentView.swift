@@ -119,6 +119,9 @@ struct GridContentView: View {
                             },
                             onThumbnailLoaded: { [session, item] image in
                                 session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
+                            },
+                            hydrateMetadata: { [session, item] in
+                                await session.hydrateMetadata(for: item)
                             }
                         )
                         .equatable()

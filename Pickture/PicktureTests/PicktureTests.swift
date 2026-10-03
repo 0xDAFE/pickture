@@ -109,6 +109,44 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(session.items.count == 1)
     }
 
+    @Test("Recursive discovery skips non-media cache bundles (*.lrdata, *.lrcat, CaptureOne, @eaDir, .Trashes, .Spotlight-V100)")
+    func discoverRecursiveSkipsCacheAndThumbnailDirectories() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Valid subfolder with photos
+        let shootDay = root.appendingPathComponent("Day1", isDirectory: true)
+        try FileManager.default.createDirectory(at: shootDay, withIntermediateDirectories: true)
+        try Data("jpg-day1".utf8).write(to: shootDay.appendingPathComponent("VALID_001.JPG"))
+
+        // Known non-media cache directories that MUST be skipped
+        let lrDataDir = root.appendingPathComponent("Lightroom Catalog.lrdata", isDirectory: true)
+        let lrCatDir = root.appendingPathComponent("Session.lrcat", isDirectory: true)
+        let c1Dir = root.appendingPathComponent("CaptureOne/Cache/Proxies", isDirectory: true)
+        let eaDir = root.appendingPathComponent("@eaDir/SubFolder", isDirectory: true)
+        let trashesDir = root.appendingPathComponent(".Trashes", isDirectory: true)
+        let spotlightDir = root.appendingPathComponent(".Spotlight-V100", isDirectory: true)
+        let fseventsDir = root.appendingPathComponent(".fseventsd", isDirectory: true)
+        let tempItemsDir = root.appendingPathComponent(".TemporaryItems", isDirectory: true)
+
+        let cacheDirs = [lrDataDir, lrCatDir, c1Dir, eaDir, trashesDir, spotlightDir, fseventsDir, tempItemsDir]
+        for dir in cacheDirs {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            // Put decoy image files inside cache directories
+            try Data("decoy-thumb".utf8).write(to: dir.appendingPathComponent("thumb.jpg"))
+            try Data("decoy-preview".utf8).write(to: dir.appendingPathComponent("preview.PNG"))
+        }
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        try session.openFolder(at: root)
+        try session.setSubfolderMode(.recursive)
+
+        // Only the valid photo in Day1 should be discovered; all decoys in cache dirs must be skipped
+        #expect(session.items.count == 1)
+        #expect(session.items[0].baseName == "VALID_001")
+        #expect(session.items[0].relativeDirectoryPath == "Day1")
+    }
+
     @Test("Video files (.mov, .mp4, .m4v) are discovered as standalone MediaItems even when sharing a basename with a still photo")
     func discoverVideoFilesRemainStandaloneEvenWithMatchingPhotoBasename() throws {
         let root = try makeTemporaryDirectory()
@@ -415,6 +453,205 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(session.cacheSizeLimitBytes == MediaCache.maxUserQuotaBytes)
     }
 
+    @Test("HeavyDecodeLimiter bounds concurrent heavy decodes to max 2 concurrent workers")
+    func heavyDecodeLimiterBoundsConcurrencyToTwo() async {
+        let limiter = HeavyDecodeLimiter(maxConcurrent: 2)
+        let peakCounter = PeakCounter()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    await limiter.withPermit {
+                        await peakCounter.increment()
+                        try? await Task.sleep(nanoseconds: 20_000_000)
+                        await peakCounter.decrement()
+                    }
+                }
+            }
+        }
+
+        let maxConcurrentReached = await peakCounter.maxCount
+        #expect(maxConcurrentReached <= 2)
+        #expect(maxConcurrentReached > 0)
+    }
+
+    @Test("ThumbnailQueueActor executes requests in LIFO order and cancels off-screen tasks")
+    func thumbnailQueueActorLIFOAndCancellation() async {
+        let queue = ThumbnailQueueActor(maxConcurrentWorkers: 1)
+        let orderTracker = ExecutionOrderTracker()
+
+        let blockerStarted = AsyncSignal()
+        let blockerRelease = AsyncSignal()
+
+        let blockerTask = Task {
+            await queue.enqueue(id: "blocker") {
+                await blockerStarted.signal()
+                await blockerRelease.wait()
+                return Data("blocker".utf8)
+            }
+        }
+
+        await blockerStarted.wait()
+
+        // Enqueue item 1, then item 2, then item 3
+        let task1 = Task {
+            await queue.enqueue(id: "item1") {
+                await orderTracker.record("item1")
+                return Data("item1".utf8)
+            }
+        }
+        while await queue.pendingCount < 1 {
+            await Task.yield()
+        }
+
+        let task2 = Task {
+            await queue.enqueue(id: "item2") {
+                await orderTracker.record("item2")
+                return Data("item2".utf8)
+            }
+        }
+        while await queue.pendingCount < 2 {
+            await Task.yield()
+        }
+
+        let task3 = Task {
+            await queue.enqueue(id: "item3") {
+                await orderTracker.record("item3")
+                return Data("item3".utf8)
+            }
+        }
+        while await queue.pendingCount < 3 {
+            await Task.yield()
+        }
+
+        // Cancel task2 before worker is released
+        task2.cancel()
+        try? await Task.sleep(nanoseconds: 10_000_000)
+
+        // Release the blocker so queue drains
+        await blockerRelease.signal()
+        _ = await blockerTask.value
+
+        _ = await task3.value
+        _ = await task1.value
+        let task2Result = await task2.value
+
+        // Cancelled task2 must return nil
+        #expect(task2Result == nil)
+
+        // LIFO order: item3 was enqueued last, so it must execute before item1
+        let order = await orderTracker.order
+        #expect(order == ["item3", "item1"])
+    }
+
+    @Test("500ms sidecar write debouncing coalesces rapid curation mutations and flushes on close")
+    func debouncedSidecarWritesCoalesceAndFlushOnClose() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("DSC0050.JPG")
+        try Data("jpg-content".utf8).write(to: jpgURL)
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        session.flushDebounceNanoseconds = 150_000_000 // 150ms for test execution
+        try session.openFolder(at: root)
+        let item = try #require(session.items.first)
+
+        let xmpURL = root.appendingPathComponent("DSC0050.xmp")
+        #expect(!FileManager.default.fileExists(atPath: xmpURL.path))
+
+        // Rapidly apply 3 mutations within the debounce window
+        session.setStarRating(3, for: item)
+        #expect(session.syncState(for: item) == .pendingWrite)
+        #expect(!FileManager.default.fileExists(atPath: xmpURL.path))
+
+        try? await Task.sleep(nanoseconds: 40_000_000) // 40ms < 150ms
+        session.setPickFlag(.picked, for: item)
+        #expect(session.syncState(for: item) == .pendingWrite)
+        #expect(!FileManager.default.fileExists(atPath: xmpURL.path))
+
+        try? await Task.sleep(nanoseconds: 40_000_000) // 40ms < 150ms
+        session.setColorLabel(.blue, for: item)
+        #expect(session.syncState(for: item) == .pendingWrite)
+        #expect(!FileManager.default.fileExists(atPath: xmpURL.path))
+
+        // Wait for debounce timer to fire (150ms + margin)
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        // Sidecar should now be written to disk with coalesced metadata
+        #expect(FileManager.default.fileExists(atPath: xmpURL.path))
+        #expect(session.syncState(for: item) == .synced)
+        let diskData = try #require(SidecarCodec.readData(from: xmpURL))
+        let parsed = try SidecarCodec.parse(data: diskData)
+        #expect(parsed.curation.starRating == 3)
+        #expect(parsed.curation.pickFlag == .picked)
+        #expect(parsed.curation.colorLabel == .blue)
+
+        // Now test immediate flush on folder close while a debounce is active
+        session.setStarRating(5, for: item)
+        #expect(session.syncState(for: item) == .pendingWrite)
+        // Immediately close folder before debounce timer fires
+        let closeResult = await session.closeFolder()
+        #expect(closeResult == .success)
+
+        // Verified written to disk immediately
+        let diskData2 = try #require(SidecarCodec.readData(from: xmpURL))
+        let parsed2 = try SidecarCodec.parse(data: diskData2)
+        #expect(parsed2.curation.starRating == 5)
+    }
+
+    @Test("Lazy sidecar hydration exposes loading state and hydrates on demand for visible items")
+    func lazySidecarHydrationExposesLoadingStateAndHydratesOnDemand() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("DSC0099.JPG")
+        try Data("jpg-data".utf8).write(to: jpgURL)
+
+        let initialMetadata = CurationMetadata(starRating: 4, pickFlag: .picked, colorLabel: .purple)
+        let initialXMP = try SidecarCodec.update(xmlData: nil, with: initialMetadata)
+        try initialXMP.write(to: root.appendingPathComponent("DSC0099.xmp"))
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        session.isSyncSuspended = true
+
+        // Open folder with lazy sidecar hydration enabled
+        try session.openFolder(at: root, lazySidecars: true)
+        #expect(session.isLazySidecarHydrationEnabled == true)
+        #expect(session.items.count == 1)
+
+        let item = try #require(session.items.first)
+        // Should start in loading state without blocking openFolder with synchronous sidecar reads
+        #expect(session.syncState(for: item) == .loading)
+
+        // Viewport hydration: when cell scrolls into view
+        await session.hydrateMetadata(for: item)
+
+        #expect(session.syncState(for: item) == .synced)
+        #expect(session.curationMetadata(for: item) == initialMetadata)
+    }
+
+    @Test("openFolderAsync reports isDiscovering and openFolderProgress")
+    func openFolderAsyncReportsProgress() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let dir1 = root.appendingPathComponent("FolderA", isDirectory: true)
+        let dir2 = root.appendingPathComponent("FolderB", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir1, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dir2, withIntermediateDirectories: true)
+        try Data("imgA".utf8).write(to: dir1.appendingPathComponent("A.JPG"))
+        try Data("imgB".utf8).write(to: dir2.appendingPathComponent("B.JPG"))
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        try session.setSubfolderMode(.recursive)
+
+        try await session.openFolderAsync(at: root, lazySidecars: true)
+        #expect(session.items.count == 2)
+        #expect(session.isDiscovering == false)
+    }
+
+
     private func makeTwoIFDDNGData() -> Data {
         var data = Data()
         func appendU16(_ v: UInt16) { var x = v.littleEndian; data.append(Data(bytes: &x, count: 2)) }
@@ -475,6 +712,49 @@ struct CullingSessionDiscoveryAndCacheTests {
         data.append(contentsOf: previewPixels)
         rawPixels.withUnsafeBytes { data.append(contentsOf: $0) }
         return data
+    }
+}
+
+private actor PeakCounter {
+    var current: Int = 0
+    var maxCount: Int = 0
+
+    func increment() {
+        current += 1
+        if current > maxCount {
+            maxCount = current
+        }
+    }
+
+    func decrement() {
+        current -= 1
+    }
+}
+
+private actor ExecutionOrderTracker {
+    var order: [String] = []
+    func record(_ id: String) {
+        order.append(id)
+    }
+}
+
+private actor AsyncSignal {
+    private var isSignaled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        isSignaled = true
+        for waiter in waiters {
+            waiter.resume()
+        }
+        waiters.removeAll()
+    }
+
+    func wait() async {
+        if isSignaled { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
     }
 }
 
