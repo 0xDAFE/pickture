@@ -20,7 +20,7 @@ actor HeavyDecodeLimiter {
 
     private let maxConcurrent: Int
     private var activeCount: Int = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Never>)] = []
 
     init(maxConcurrent: Int = 2) {
         self.maxConcurrent = maxConcurrent
@@ -41,15 +41,29 @@ actor HeavyDecodeLimiter {
             activeCount += 1
             return
         }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                waiters.append((id: id, continuation: continuation))
+            }
+        } onCancel: {
+            Task { [weak self] in
+                await self?.cancelWaiter(id: id)
+            }
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        if let idx = waiters.firstIndex(where: { $0.id == id }) {
+            let waiter = waiters.remove(at: idx)
+            waiter.continuation.resume()
         }
     }
 
     func release() {
         if !waiters.isEmpty {
             let next = waiters.removeFirst()
-            next.resume()
+            next.continuation.resume()
         } else {
             activeCount = max(0, activeCount - 1)
         }
@@ -82,56 +96,61 @@ nonisolated enum PreviewLoader {
         }
     }
 
-    static func extractImageThumbnail(from url: URL, maxPixelSize: Int = 360) -> PreviewExtractionResult? {
-        let isRaw = MediaFormatKind.classify(fileExtension: url.pathExtension) == .raw
-
-        // Step 1: For RAW files, probe sequential header prefix into memory first
+    private static func extractEmbeddedPreview(
+        from source: CGImageSource?,
+        url: URL,
+        isRaw: Bool,
+        maxPixelSize: Int
+    ) -> PreviewExtractionResult? {
         if isRaw {
             if let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(at: url, maxPixelSize: maxPixelSize) {
                 return PreviewExtractionResult(jpegData: headerJPEG, strategy: .embeddedPreview)
             }
         }
+        guard let source, CGImageSourceGetCount(source) > 0 else { return nil }
 
-        let sourceOptions: [CFString: Any] = [
-            kCGImageSourceShouldCache: false
+        let sizedEmbeddedOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
+            kCGImageSourceCreateThumbnailFromImageAlways: false,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
         ]
-
-        if let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary),
-           CGImageSourceGetCount(source) > 0 {
-            // Step 1a: Probe CGImageSource for an embedded preview matching maxPixelSize
-            let sizedEmbeddedOptions: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
-                kCGImageSourceCreateThumbnailFromImageAlways: false,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
-            ]
-            if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, sizedEmbeddedOptions as CFDictionary) {
-                let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
-                if let jpegData = encodeToJPEG(cgImage: scaled) {
-                    return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
-                }
+        if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, sizedEmbeddedOptions as CFDictionary) {
+            let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
+            if let jpegData = encodeToJPEG(cgImage: scaled) {
+                return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
             }
+        }
 
-            // Step 1b: Probe CGImageSource without kCGImageSourceThumbnailMaxPixelSize
-            let unsizedEmbeddedOptions: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
-                kCGImageSourceCreateThumbnailFromImageAlways: false,
-                kCGImageSourceCreateThumbnailWithTransform: true
-            ]
-            if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, unsizedEmbeddedOptions as CFDictionary) {
-                let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
-                if let jpegData = encodeToJPEG(cgImage: scaled) {
-                    return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
-                }
+        let unsizedEmbeddedOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
+            kCGImageSourceCreateThumbnailFromImageAlways: false,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, unsizedEmbeddedOptions as CFDictionary) {
+            let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
+            if let jpegData = encodeToJPEG(cgImage: scaled) {
+                return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
             }
+        }
 
+        return nil
+    }
+
+    static func extractImageThumbnail(from url: URL, maxPixelSize: Int = 360) -> PreviewExtractionResult? {
+        let isRaw = MediaFormatKind.classify(fileExtension: url.pathExtension) == .raw
+        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary)
+
+        if let embedded = extractEmbeddedPreview(from: source, url: url, isRaw: isRaw, maxPixelSize: maxPixelSize) {
+            return embedded
+        }
+
+        if let source, CGImageSourceGetCount(source) > 0 {
             if let fallback = extractFullDecodeFallback(from: source, url: url, isRaw: isRaw, maxPixelSize: maxPixelSize) {
                 return fallback
             }
         } else if isRaw {
-            if let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(at: url, maxPixelSize: maxPixelSize) {
-                return PreviewExtractionResult(jpegData: headerJPEG, strategy: .embeddedPreview)
-            }
             if let tiffFallbackJPEG = extractTIFFHintFullDecode(from: url, maxPixelSize: maxPixelSize) {
                 return PreviewExtractionResult(jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
             }
@@ -143,56 +162,21 @@ nonisolated enum PreviewLoader {
     static func extractImageThumbnailAsync(from url: URL, maxPixelSize: Int = 360) async -> PreviewExtractionResult? {
         guard !Task.isCancelled else { return nil }
         let isRaw = MediaFormatKind.classify(fileExtension: url.pathExtension) == .raw
+        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary)
 
-        // Step 1: For RAW files, probe sequential header prefix into memory first
-        if isRaw {
-            if let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(at: url, maxPixelSize: maxPixelSize) {
-                return PreviewExtractionResult(jpegData: headerJPEG, strategy: .embeddedPreview)
-            }
+        if let embedded = extractEmbeddedPreview(from: source, url: url, isRaw: isRaw, maxPixelSize: maxPixelSize) {
+            return embedded
         }
 
         guard !Task.isCancelled else { return nil }
-        let sourceOptions: [CFString: Any] = [
-            kCGImageSourceShouldCache: false
-        ]
 
-        if let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary),
-           CGImageSourceGetCount(source) > 0 {
-            let sizedEmbeddedOptions: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
-                kCGImageSourceCreateThumbnailFromImageAlways: false,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
-            ]
-            if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, sizedEmbeddedOptions as CFDictionary) {
-                let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
-                if let jpegData = encodeToJPEG(cgImage: scaled) {
-                    return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
-                }
-            }
-
-            let unsizedEmbeddedOptions: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
-                kCGImageSourceCreateThumbnailFromImageAlways: false,
-                kCGImageSourceCreateThumbnailWithTransform: true
-            ]
-            if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, unsizedEmbeddedOptions as CFDictionary) {
-                let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
-                if let jpegData = encodeToJPEG(cgImage: scaled) {
-                    return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
-                }
-            }
-
-            guard !Task.isCancelled else { return nil }
+        if let source, CGImageSourceGetCount(source) > 0 {
             return await HeavyDecodeLimiter.shared.withPermit {
                 guard !Task.isCancelled else { return nil }
                 return extractFullDecodeFallback(from: source, url: url, isRaw: isRaw, maxPixelSize: maxPixelSize)
             }
         } else if isRaw {
-            if let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(at: url, maxPixelSize: maxPixelSize) {
-                return PreviewExtractionResult(jpegData: headerJPEG, strategy: .embeddedPreview)
-            }
-            guard !Task.isCancelled else { return nil }
             return await HeavyDecodeLimiter.shared.withPermit {
                 guard !Task.isCancelled else { return nil }
                 if let tiffFallbackJPEG = extractTIFFHintFullDecode(from: url, maxPixelSize: maxPixelSize) {

@@ -46,13 +46,15 @@ struct ContentView: View {
             switch result {
             case .success(let urls):
                 guard let folderURL = urls.first else { return }
-                do {
-                    try session.openFolder(at: folderURL)
-                    session.lastErrorMessage = nil
-                    preferredCompactColumn = .detail
-                } catch {
-                    session.lastErrorMessage = error.localizedDescription
-                    preferredCompactColumn = .sidebar
+                Task {
+                    do {
+                        try await session.openFolderAsync(at: folderURL, lazySidecars: true)
+                        session.lastErrorMessage = nil
+                        preferredCompactColumn = .detail
+                    } catch {
+                        session.lastErrorMessage = error.localizedDescription
+                        preferredCompactColumn = .sidebar
+                    }
                 }
             case .failure(let error):
                 session.lastErrorMessage = error.localizedDescription
@@ -80,13 +82,15 @@ struct ContentView: View {
     }
 
     private func handleReopenRecentFolder(_ recent: RecentFolder) {
-        do {
-            try session.reopenRecentFolder(recent)
-            session.lastErrorMessage = nil
-            preferredCompactColumn = .detail
-        } catch {
-            session.lastErrorMessage = error.localizedDescription
-            preferredCompactColumn = .sidebar
+        Task {
+            do {
+                try await session.reopenRecentFolderAsync(recent, lazySidecars: true)
+                session.lastErrorMessage = nil
+                preferredCompactColumn = .detail
+            } catch {
+                session.lastErrorMessage = error.localizedDescription
+                preferredCompactColumn = .sidebar
+            }
         }
     }
 
@@ -113,7 +117,24 @@ struct ContentView: View {
                     onReopenRecentFolder: handleReopenRecentFolder
                 )
             } else if session.items.isEmpty {
-                emptyFolderView
+                if session.isDiscovering {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .controlSize(.large)
+                        if let progress = session.openFolderProgress {
+                            Text("Discovering files… \(Int(progress * 100))%")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Discovering files…")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    emptyFolderView
+                }
             } else {
                 FilterCriteriaBarView(session: session)
 

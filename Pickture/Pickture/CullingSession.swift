@@ -17,6 +17,8 @@ actor ThumbnailQueueActor {
 
     private var pendingQueue: [PendingRequest] = []
 
+    private var activeTasks: [String: Task<Void, Never>] = [:]
+
     var pendingCount: Int {
         pendingQueue.count
     }
@@ -31,7 +33,7 @@ actor ThumbnailQueueActor {
     ) async -> Data? {
         guard !Task.isCancelled else { return nil }
 
-        removePending(for: id)
+        cancel(id: id)
 
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -56,12 +58,8 @@ actor ThumbnailQueueActor {
             let removed = pendingQueue.remove(at: idx)
             removed.continuation.resume(returning: nil)
         }
-    }
-
-    private func removePending(for id: String) {
-        if let idx = pendingQueue.firstIndex(where: { $0.id == id }) {
-            let removed = pendingQueue.remove(at: idx)
-            removed.continuation.resume(returning: nil)
+        if let task = activeTasks.removeValue(forKey: id) {
+            task.cancel()
         }
     }
 
@@ -69,10 +67,12 @@ actor ThumbnailQueueActor {
         while activeWorkers < maxConcurrentWorkers && !pendingQueue.isEmpty {
             let next = pendingQueue.removeFirst()
             activeWorkers += 1
+            let itemID = next.id
 
-            Task {
+            let workerTask = Task {
                 defer {
                     self.activeWorkers -= 1
+                    self.activeTasks.removeValue(forKey: itemID)
                     self.pump()
                 }
                 if Task.isCancelled {
@@ -80,8 +80,9 @@ actor ThumbnailQueueActor {
                     return
                 }
                 let result = await next.operation()
-                next.continuation.resume(returning: result)
+                next.continuation.resume(returning: Task.isCancelled ? nil : result)
             }
+            activeTasks[itemID] = workerTask
         }
     }
 }
@@ -1268,7 +1269,20 @@ final class CullingSession {
         }
     }
 
+    func reopenRecentFolderAsync(_ recentFolder: RecentFolder, lazySidecars: Bool = true) async throws {
+        let (resolvedURL, updatedRecents) = try folderAccessService.resolveAndAccess(recentFolder: recentFolder)
+        try await openResolvedFolderAsync(resolvedURL: resolvedURL, updatedRecents: updatedRecents, lazySidecars: lazySidecars)
+    }
+
     func openFolderAsync(at url: URL, lazySidecars: Bool = true) async throws {
+        let (resolvedURL, updatedRecents) = try folderAccessService.beginAccessingAndRecordFolder(at: url)
+        try await openResolvedFolderAsync(resolvedURL: resolvedURL, updatedRecents: updatedRecents, lazySidecars: lazySidecars)
+    }
+
+    private func openResolvedFolderAsync(resolvedURL: URL, updatedRecents: [RecentFolder], lazySidecars: Bool) async throws {
+        if pendingWritesCount > 0 {
+            await flushPendingWrites()
+        }
         self.isLazySidecarHydrationEnabled = lazySidecars
         self.isDiscovering = true
         self.openFolderProgress = 0.0
@@ -1276,7 +1290,6 @@ final class CullingSession {
             self.isDiscovering = false
             self.openFolderProgress = nil
         }
-        let (resolvedURL, updatedRecents) = try folderAccessService.beginAccessingAndRecordFolder(at: url)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: resolvedURL.standardizedFileURL.path, isDirectory: &isDir), isDir.boolValue else {
             folderAccessService.stopAccessingCurrentFolder()
@@ -1311,6 +1324,11 @@ final class CullingSession {
     }
 
     private func applyOpenedFolder(resolvedURL: URL, updatedRecents: [RecentFolder]) throws {
+        if pendingWritesCount > 0 {
+            Task { [weak self] in
+                await self?.flushPendingWrites()
+            }
+        }
         self.isDiscovering = true
         defer { self.isDiscovering = false }
         do {
@@ -1507,26 +1525,28 @@ final class CullingSession {
         }
     }
 
-    func hydrateMetadata(for item: MediaItem) async {
+    private enum HydrationOutcome: Sendable {
+        case sidecar(curation: CurationMetadata, exif: ExifMetadata?, digest: String, modDate: Date?)
+        case none
+    }
+
+    nonisolated private static func readSidecarData(for item: MediaItem) -> HydrationOutcome {
+        let sidecarURL = item.sidecarURL ?? SidecarCodec.resolveSidecarReadURL(for: item)
+        guard let sidecarURL, let data = SidecarCodec.readData(from: sidecarURL) else {
+            return .none
+        }
+        let digest = SidecarCodec.computeDigest(for: data)
+        let modDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        if let parsed = try? SidecarCodec.parse(data: data) {
+            return .sidecar(curation: parsed.curation, exif: parsed.exif, digest: digest, modDate: modDate)
+        }
+        return .sidecar(curation: CurationMetadata(), exif: nil, digest: digest, modDate: modDate)
+    }
+
+    func hydrateMetadata(for item: MediaItem, refreshCounts: Bool = true) async {
         guard syncStateByItemID[item.id] == .loading else { return }
 
-        enum HydrationOutcome: Sendable {
-            case sidecar(curation: CurationMetadata, exif: ExifMetadata?, digest: String, modDate: Date?)
-            case none
-        }
-
-        let outcome = await Task.detached(priority: .utility) { () -> HydrationOutcome in
-            let sidecarURL = item.sidecarURL ?? SidecarCodec.resolveSidecarReadURL(for: item)
-            guard let sidecarURL, let data = SidecarCodec.readData(from: sidecarURL) else {
-                return .none
-            }
-            let digest = SidecarCodec.computeDigest(for: data)
-            let modDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            if let parsed = try? SidecarCodec.parse(data: data) {
-                return .sidecar(curation: parsed.curation, exif: parsed.exif, digest: digest, modDate: modDate)
-            }
-            return .sidecar(curation: CurationMetadata(), exif: nil, digest: digest, modDate: modDate)
-        }.value
+        let outcome = Self.readSidecarData(for: item)
 
         guard !Task.isCancelled else { return }
         guard syncStateByItemID[item.id] == .loading else { return }
@@ -1550,19 +1570,27 @@ final class CullingSession {
             metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: exifByItemID[item.id], for: item.id)
         }
 
-        refreshDerivedCounts()
+        if refreshCounts {
+            refreshDerivedCounts()
+        }
     }
 
     func startBackgroundSidecarHydration() {
         backgroundHydrationTask?.cancel()
-        backgroundHydrationTask = Task { @MainActor [weak self] in
+        backgroundHydrationTask = Task(priority: .utility) { [weak self] in
             guard let self else { return }
-            for item in self.items {
+            let pendingItems: [MediaItem] = await MainActor.run {
+                self.items.filter { self.syncStateByItemID[$0.id] == .loading }
+            }
+            guard !pendingItems.isEmpty else { return }
+
+            for item in pendingItems {
                 if Task.isCancelled { break }
-                if self.syncStateByItemID[item.id] == .loading {
-                    await self.hydrateMetadata(for: item)
-                    await Task.yield()
-                }
+                await self.hydrateMetadata(for: item, refreshCounts: false)
+                await Task.yield()
+            }
+            await MainActor.run {
+                self.refreshDerivedCounts()
             }
         }
     }

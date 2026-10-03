@@ -218,6 +218,27 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(session2.items[0].isMediaPair == true)
     }
 
+    @Test func reopenRecentFolderAsyncStreamsAndOpensFolder() async throws {
+        let tempRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let storeURL = tempRoot.appendingPathComponent(".session-store", isDirectory: true)
+        let shootFolder = tempRoot.appendingPathComponent("AsyncShoot", isDirectory: true)
+        try FileManager.default.createDirectory(at: shootFolder, withIntermediateDirectories: true)
+
+        let jpgURL = shootFolder.appendingPathComponent("DSC0001.JPG")
+        try writeSampleRasterImage(to: jpgURL, red: 10, green: 20, blue: 30)
+
+        let session1 = CullingSession(storageRootURL: storeURL)
+        try await session1.openFolderAsync(at: shootFolder)
+        #expect(session1.recentFolders.count == 1)
+        let saved = session1.recentFolders[0]
+
+        let session2 = CullingSession(storageRootURL: storeURL)
+        try await session2.reopenRecentFolderAsync(saved)
+        #expect(session2.currentFolderURL?.lastPathComponent == "AsyncShoot")
+        #expect(session2.items.count == 1)
+    }
+
     private func writeSampleRasterImage(to url: URL, red: UInt8, green: UInt8, blue: UInt8) throws {
         let width = 96
         let height = 96

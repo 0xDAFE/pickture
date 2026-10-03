@@ -26,7 +26,7 @@ struct MediaGridCellView: View, Equatable {
     @Environment(\.colorScheme) private var colorScheme
 
     private var taskKey: String {
-        "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)"
+        "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)-\(syncState.rawValue)"
     }
 
     private var displayedThumbnail: CGImage? {
