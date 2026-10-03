@@ -6,6 +6,9 @@ enum ExifHeaderExtractor {
     /// Extracts ExifMetadata for a MediaItem by reading headers only (CGImageSourceCopyPropertiesAtIndex),
     /// preferring the smaller raster file in a MediaPair before falling back to RAW header bytes.
     nonisolated static func extractHeaderExif(for item: MediaItem) -> ExifMetadata {
+        guard item.kind != .video else {
+            return ExifMetadata()
+        }
         if let pair = item.mediaPair {
             let rasterExif = extract(from: pair.rasterFile.url)
             let isRasterComplete = rasterExif.cameraModel != nil
@@ -32,6 +35,10 @@ enum ExifHeaderExtractor {
         var results: [(String, ExifMetadata)] = []
         for item in items {
             if Task.isCancelled { break }
+            guard item.kind != .video else {
+                results.append((item.id, ExifMetadata()))
+                continue
+            }
             let exif = extractHeaderExif(for: item)
             results.append((item.id, exif))
         }
@@ -41,6 +48,11 @@ enum ExifHeaderExtractor {
     /// Header-only extraction from a single file URL using CGImageSourceCopyPropertiesAtIndex
     /// with caching disabled so full rasters are never decoded into memory.
     nonisolated static func extract(from fileURL: URL) -> ExifMetadata {
+        let ext = fileURL.pathExtension.lowercased()
+        if MediaFormatKind.classify(fileExtension: ext) == .video || ["mov", "mp4", "m4v"].contains(ext) {
+            return ExifMetadata()
+        }
+
         let options = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceShouldCacheImmediately: false

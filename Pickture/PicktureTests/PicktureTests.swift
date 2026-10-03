@@ -597,7 +597,12 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(!FileManager.default.fileExists(atPath: xmpURL.path))
 
         // Wait for debounce timer to fire (150ms + margin)
-        try? await Task.sleep(nanoseconds: 250_000_000)
+        for _ in 0..<15 {
+            if FileManager.default.fileExists(atPath: xmpURL.path) && session.syncState(for: item) == .synced {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
 
         // Sidecar should now be written to disk with coalesced metadata
         #expect(FileManager.default.fileExists(atPath: xmpURL.path))
@@ -733,6 +738,263 @@ struct CullingSessionDiscoveryAndCacheTests {
         data.append(contentsOf: previewPixels)
         rawPixels.withUnsafeBytes { data.append(contentsOf: $0) }
         return data
+    }
+
+    @Test("ExifHeaderExtractor returns empty metadata for video formats (.mov, .mp4, .m4v) without calling CGImageSource")
+    func videoExifBypassReturnsEmptyMetadata() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let movURL = root.appendingPathComponent("clip.MOV")
+        let mp4URL = root.appendingPathComponent("clip.mp4")
+        let m4vURL = root.appendingPathComponent("clip.m4v")
+
+        let videoBytes = Data([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32])
+        try videoBytes.write(to: movURL)
+        try videoBytes.write(to: mp4URL)
+        try videoBytes.write(to: m4vURL)
+
+        // Directly test extract(from: URL)
+        let movExif = ExifHeaderExtractor.extract(from: movURL)
+        #expect(movExif.cameraModel == nil)
+        #expect(movExif.lensModel == nil)
+        #expect(movExif.focalLength == nil)
+        #expect(movExif.fNumber == nil)
+        #expect(movExif.exposureTime == nil)
+        #expect(movExif.isoSpeedRatings.isEmpty)
+        #expect(movExif.dateTimeOriginal == nil)
+
+        let mp4Exif = ExifHeaderExtractor.extract(from: mp4URL)
+        #expect(mp4Exif.cameraModel == nil)
+
+        let m4vExif = ExifHeaderExtractor.extract(from: m4vURL)
+        #expect(m4vExif.cameraModel == nil)
+
+        // Test extractHeaderExif(for: MediaItem)
+        let videoFile = MediaFile(url: movURL, formatKind: .video)
+        let videoItem = MediaItem(
+            id: movURL.path,
+            baseName: "clip",
+            directoryURL: root,
+            relativeDirectoryPath: "",
+            kind: .video,
+            primaryFile: videoFile,
+            mediaPair: nil,
+            sidecarURL: nil
+        )
+        let itemExif = ExifHeaderExtractor.extractHeaderExif(for: videoItem)
+        #expect(itemExif.cameraModel == nil)
+
+        // Test extractBatch
+        let batch = await ExifHeaderExtractor.extractBatch(for: [videoItem])
+        #expect(batch.count == 1)
+        #expect(batch[0].0 == videoItem.id)
+        #expect(batch[0].1.cameraModel == nil)
+    }
+
+    @Test("PreviewLoader adaptively scales prefix probing up to 3.5 MB for embedded previews without full demosaicing fallback")
+    func adaptivePrefixProbingExtractsLargeEmbeddedJPEG() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sampleJPEGURL = root.appendingPathComponent("temp_sample.jpg")
+        try writeSampleRasterImage(to: sampleJPEGURL, red: 180, green: 90, blue: 45)
+        let sampleJPEGData = try Data(contentsOf: sampleJPEGURL)
+
+        // Make an expanded JPEG by injecting COM (comment) segments so the total JPEG is ~1.5 MB (> 1MB initialHeaderBytes)
+        let largeEmbeddedJPEG = makeJPEGWithComments(baseJPEG: sampleJPEGData, targetSize: 1_500_000)
+        #expect(largeEmbeddedJPEG.count > 1_200_000)
+
+        // Embed the large JPEG in a mock RAW file (.ARW) with a 256-byte header
+        var rawData = Data(repeating: 0x00, count: 256)
+        rawData[0] = 0x49
+        rawData[1] = 0x49
+        rawData[2] = 0x2A
+        rawData[3] = 0x00
+        rawData.append(largeEmbeddedJPEG)
+
+        let mockRawURL = root.appendingPathComponent("LARGE_PREVIEW.ARW")
+        try rawData.write(to: mockRawURL)
+
+        let result = await PreviewLoader.extractImageThumbnailAsync(from: mockRawURL, maxPixelSize: 360)
+        let unwrapped = try #require(result)
+        #expect(unwrapped.strategy == .embeddedPreview)
+        #expect(!unwrapped.jpegData.isEmpty)
+    }
+
+    @Test("MediaCache readData updates LRU in memory without writing to disk synchronously on every read")
+    func mediaCacheReadDataDoesNotWriteToDiskSynchronously() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let cacheDir = root.appendingPathComponent("media-cache", isDirectory: true)
+        let cache = MediaCache(cacheDirectoryURL: cacheDir, initialLimitBytes: 10_000_000)
+
+        let testKey = "test_item_thumb_360"
+        let testData = Data("sample-cached-thumbnail".utf8)
+        cache.storeData(testData, forKey: testKey)
+        cache.flushIndexImmediately()
+
+        let initialEntry = try #require(cache.entry(forKey: testKey))
+        let initialSeq = initialEntry.accessSequence
+
+        let indexURL = cacheDir.appendingPathComponent("cache-index.json")
+        let diskIndexDataBefore = try Data(contentsOf: indexURL)
+        let decodedBefore = try JSONDecoder().decode(MediaCacheIndexState.self, from: diskIndexDataBefore)
+        #expect(decodedBefore.entries[testKey]?.accessSequence == initialSeq)
+
+        // Read cached data
+        let readResult = cache.readData(forKey: testKey)
+        #expect(readResult == testData)
+
+        // In-memory accessSequence is updated immediately for LRU tracking
+        let updatedEntry = try #require(cache.entry(forKey: testKey))
+        #expect(updatedEntry.accessSequence > initialSeq)
+
+        // Verify that disk index was NOT written synchronously during readData
+        let diskIndexDataImmediately = try Data(contentsOf: indexURL)
+        let decodedImmediately = try JSONDecoder().decode(MediaCacheIndexState.self, from: diskIndexDataImmediately)
+        #expect(decodedImmediately.entries[testKey]?.accessSequence == initialSeq)
+
+        // After flushing immediately (e.g. on session close or background persist), disk reflects updated LRU
+        cache.flushIndexImmediately()
+        let diskIndexDataFlushed = try Data(contentsOf: indexURL)
+        let decodedFlushed = try JSONDecoder().decode(MediaCacheIndexState.self, from: diskIndexDataFlushed)
+        #expect(decodedFlushed.entries[testKey]?.accessSequence == updatedEntry.accessSequence)
+    }
+
+    @Test("openFolderAsync and reopenRecentFolderAsync stream discovered items progressively without blocking actor execution")
+    func openFolderAsyncAndReopenRecentProgressivelyStreamBatches() async throws {
+        let tempRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let storeURL = tempRoot.appendingPathComponent(".session-store", isDirectory: true)
+
+        let folder1 = tempRoot.appendingPathComponent("Sub1", isDirectory: true)
+        let folder2 = tempRoot.appendingPathComponent("Sub2", isDirectory: true)
+        let folder3 = tempRoot.appendingPathComponent("Sub3", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder1, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder2, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder3, withIntermediateDirectories: true)
+
+        try Data("img1A".utf8).write(to: folder1.appendingPathComponent("F1_A.JPG"))
+        try Data("img1B".utf8).write(to: folder1.appendingPathComponent("F1_B.JPG"))
+        try Data("img2A".utf8).write(to: folder2.appendingPathComponent("F2_A.JPG"))
+        try Data("img2B".utf8).write(to: folder2.appendingPathComponent("F2_B.JPG"))
+        try Data("img3A".utf8).write(to: folder3.appendingPathComponent("F3_A.JPG"))
+        try Data("img3B".utf8).write(to: folder3.appendingPathComponent("F3_B.JPG"))
+
+        let session1 = CullingSession(storageRootURL: storeURL)
+        try session1.setSubfolderMode(.recursive)
+
+        try await session1.openFolderAsync(at: tempRoot, lazySidecars: true)
+        #expect(session1.items.count == 6)
+        #expect(session1.isDiscovering == false)
+        #expect(session1.recentFolders.count == 1)
+
+        let recent = session1.recentFolders[0]
+        let session2 = CullingSession(storageRootURL: storeURL)
+        try session2.setSubfolderMode(.recursive)
+        try await session2.reopenRecentFolderAsync(recent)
+
+        #expect(session2.currentFolderURL == tempRoot)
+        #expect(session2.items.count == 6)
+        #expect(session2.isDiscovering == false)
+    }
+
+    @Test("openFolderAsync completes and sets items before background EXIF preloading completes")
+    func openFolderAsyncDecouplesExifPreload() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for i in 1...5 {
+            let jpgURL = root.appendingPathComponent("PHOTO_\(i).JPG")
+            try writeSampleRasterImage(to: jpgURL, red: UInt8(i * 40), green: 100, blue: 120)
+        }
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        try await session.openFolderAsync(at: root, lazySidecars: true)
+
+        // openFolderAsync completes promptly and populates items without waiting for EXIF preloading
+        #expect(session.items.count == 5)
+        #expect(session.isDiscovering == false)
+
+        // Session close cleanly cancels any in-flight background EXIF task
+        _ = await session.closeFolder()
+        #expect(session.isExifPreloading == false)
+    }
+
+    @Test("openFolderAsync handles folders containing mixed RAW, JPG, and video files smoothly without hanging")
+    func mixedMediaFolderOpeningHandlesSmoothly() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // RAW + JPG pair
+        try Data("raw".utf8).write(to: root.appendingPathComponent("SHOOT_01.CR3"))
+        try Data("jpg".utf8).write(to: root.appendingPathComponent("SHOOT_01.JPG"))
+
+        // Standalone RAW
+        try Data("raw2".utf8).write(to: root.appendingPathComponent("SHOOT_02.ARW"))
+
+        // Standalone JPG
+        try Data("jpg3".utf8).write(to: root.appendingPathComponent("SHOOT_03.JPG"))
+
+        // Video files
+        try Data("mov".utf8).write(to: root.appendingPathComponent("CLIP_01.MOV"))
+        try Data("mp4".utf8).write(to: root.appendingPathComponent("CLIP_02.mp4"))
+        try Data("m4v".utf8).write(to: root.appendingPathComponent("CLIP_03.m4v"))
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        try await session.openFolderAsync(at: root)
+
+        #expect(session.lastErrorMessage == nil)
+        #expect(session.items.count == 6)
+
+        let pairItem = try #require(session.items.first { $0.baseName == "SHOOT_01" })
+        #expect(pairItem.isMediaPair == true)
+        #expect(pairItem.kind == .photo)
+
+        let rawItem = try #require(session.items.first { $0.baseName == "SHOOT_02" })
+        #expect(rawItem.isMediaPair == false)
+        #expect(rawItem.kind == .photo)
+
+        let jpgItem = try #require(session.items.first { $0.baseName == "SHOOT_03" })
+        #expect(jpgItem.isMediaPair == false)
+        #expect(jpgItem.kind == .photo)
+
+        let videoItems = session.items.filter { $0.kind == .video }
+        #expect(videoItems.count == 3)
+        #expect(videoItems.allSatisfy { $0.badgeText == "VIDEO" && $0.mediaTypeBadge == "Video" })
+
+        // Ensure background EXIF preloading completes cleanly without stalling on video files
+        var attempts = 0
+        while session.isExifPreloading && attempts < 20 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            attempts += 1
+        }
+        #expect(session.isExifPreloading == false)
+    }
+
+    private func makeJPEGWithComments(baseJPEG: Data, targetSize: Int) -> Data {
+        guard baseJPEG.count > 4, baseJPEG[0] == 0xFF, baseJPEG[1] == 0xD8 else {
+            return baseJPEG
+        }
+        var insertOffset = 2
+        if baseJPEG[2] == 0xFF && (baseJPEG[3] == 0xE0 || baseJPEG[3] == 0xE1) && baseJPEG.count > 6 {
+            let segLen = (Int(baseJPEG[4]) << 8) | Int(baseJPEG[5])
+            insertOffset = min(baseJPEG.count, 4 + segLen)
+        }
+        var result = Data()
+        result.append(baseJPEG.prefix(insertOffset))
+        var currentSize = baseJPEG.count
+        while currentSize < targetSize {
+            let chunkPayloadSize = min(65533, targetSize - currentSize)
+            let totalSegmentLength = UInt16(chunkPayloadSize + 2)
+            result.append(contentsOf: [0xFF, 0xFE, UInt8(totalSegmentLength >> 8), UInt8(totalSegmentLength & 0xFF)])
+            result.append(Data(repeating: 0x20, count: chunkPayloadSize))
+            currentSize += chunkPayloadSize + 4
+        }
+        result.append(baseJPEG.suffix(from: insertOffset))
+        return result
     }
 }
 

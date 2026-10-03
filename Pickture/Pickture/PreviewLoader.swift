@@ -248,15 +248,39 @@ nonisolated enum PreviewLoader {
 
     private static func extractEmbeddedJPEGFromHeaderPrefix(
         at url: URL,
-        maxHeaderBytes: Int = 1_048_576,
+        initialHeaderBytes: Int = 1_048_576,
+        maxHeaderBytes: Int = 3_670_016,
         maxPixelSize: Int
     ) -> Data? {
         guard let handle = try? FileHandle(forReadingFrom: url) else {
             return nil
         }
         defer { try? handle.close() }
-        guard let prefixData = try? handle.read(upToCount: maxHeaderBytes), prefixData.count > 4 else {
+        guard var prefixData = try? handle.read(upToCount: initialHeaderBytes), prefixData.count > 4 else {
             return nil
+        }
+
+        let soi = Data([0xFF, 0xD8, 0xFF])
+        let eoi = Data([0xFF, 0xD9])
+
+        // Adaptively scale prefix buffer up to 3.5 MB when an SOI marker indicates a larger embedded preview
+        if prefixData.range(of: soi) != nil && prefixData.count < maxHeaderBytes {
+            var needsExpansion = false
+            var searchStart = prefixData.startIndex
+            while let soiRange = prefixData.range(of: soi, in: searchStart..<prefixData.endIndex) {
+                if prefixData.range(of: eoi, in: soiRange.upperBound..<prefixData.endIndex) == nil {
+                    needsExpansion = true
+                    break
+                }
+                searchStart = soiRange.upperBound
+            }
+
+            if needsExpansion {
+                let remainingBytes = maxHeaderBytes - prefixData.count
+                if let moreData = try? handle.read(upToCount: remainingBytes), !moreData.isEmpty {
+                    prefixData.append(moreData)
+                }
+            }
         }
 
         // 1. Direct in-memory container probe (e.g. IFD0/SubIFD preview in DNG/TIFF header)
@@ -289,7 +313,13 @@ nonisolated enum PreviewLoader {
         }
 
         // 2. Scan for embedded JPEG SOI streams [0xFF, 0xD8, 0xFF]
-        let soi = Data([0xFF, 0xD8, 0xFF])
+        if prefixData.count < maxHeaderBytes && prefixData.range(of: soi) != nil {
+            let remainingBytes = maxHeaderBytes - prefixData.count
+            if let moreData = try? handle.read(upToCount: remainingBytes), !moreData.isEmpty {
+                prefixData.append(moreData)
+            }
+        }
+
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,

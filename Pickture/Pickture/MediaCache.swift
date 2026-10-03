@@ -74,6 +74,10 @@ final class MediaCache {
         return FileManager.default.fileExists(atPath: fileURL.path)
     }
 
+    func entry(forKey key: String) -> MediaCacheEntry? {
+        state.entries[key]
+    }
+
     func readData(forKey key: String) -> Data? {
         guard var entry = state.entries[key] else {
             return nil
@@ -87,7 +91,7 @@ final class MediaCache {
         entry.lastAccessedAt = Date()
         entry.accessSequence = nextSequenceNumber()
         state.entries[key] = entry
-        persistIndex()
+        scheduleDebouncedPersistIndex()
         return data
     }
 
@@ -133,7 +137,7 @@ final class MediaCache {
             try? fm.removeItem(at: fileURL)
         }
         state.entries.removeAll()
-        persistIndex()
+        flushIndexImmediately()
     }
 
     private func evictIfNeeded() {
@@ -167,7 +171,29 @@ final class MediaCache {
         return current
     }
 
-    private func persistIndex() {
+    private var debouncedPersistTask: Task<Void, Never>? = nil
+
+    func scheduleDebouncedPersistIndex(delayNanoseconds: UInt64 = 1_000_000_000) {
+        guard debouncedPersistTask == nil else { return }
+        debouncedPersistTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard let self, !Task.isCancelled else { return }
+            self.debouncedPersistTask = nil
+            self.persistIndex()
+        }
+    }
+
+    func persistIndex() {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        let targetURL = indexFileURL
+        Task.detached(priority: .utility) {
+            try? data.write(to: targetURL, options: .atomic)
+        }
+    }
+
+    func flushIndexImmediately() {
+        debouncedPersistTask?.cancel()
+        debouncedPersistTask = nil
         guard let data = try? JSONEncoder().encode(state) else { return }
         try? data.write(to: indexFileURL, options: .atomic)
     }

@@ -154,6 +154,8 @@ final class CullingSession {
     private(set) var isDiscovering: Bool = false
     private(set) var openFolderProgress: Double? = nil
     var isLazySidecarHydrationEnabled: Bool = false
+    private(set) var isExifPreloading: Bool = false
+    private var backgroundExifTask: Task<Void, Never>? = nil
     var flushDebounceNanoseconds: UInt64 = 500_000_000
     private var debouncedFlushTask: Task<Void, Never>? = nil
     private var backgroundHydrationTask: Task<Void, Never>? = nil
@@ -687,6 +689,7 @@ final class CullingSession {
 
     func preloadExifMetadata(for targetItems: [MediaItem]) async {
         let itemsToLoad = targetItems.filter { item in
+            guard item.kind != .video else { return false }
             if headerSupplementedItemIDs.contains(item.id) { return false }
             let existing = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif ?? ExifMetadata()
             if existing.cameraModel != nil && existing.lensModel != nil && existing.dateTimeOriginal != nil && !existing.isoSpeedRatings.isEmpty && existing.focalLength != nil {
@@ -709,6 +712,46 @@ final class CullingSession {
         }
         if filterCriteria.isCameraModelActive || filterCriteria.isLensModelActive {
             refreshDerivedCounts()
+        }
+    }
+
+    func startBackgroundExifPreloading(for targetItems: [MediaItem]) {
+        backgroundExifTask?.cancel()
+        let itemsToLoad = targetItems.filter { item in
+            guard item.kind != .video else { return false }
+            if headerSupplementedItemIDs.contains(item.id) { return false }
+            let existing = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif ?? ExifMetadata()
+            if existing.cameraModel != nil && existing.lensModel != nil && existing.dateTimeOriginal != nil && !existing.isoSpeedRatings.isEmpty && existing.focalLength != nil {
+                headerSupplementedItemIDs.insert(item.id)
+                exifByItemID[item.id] = existing
+                return false
+            }
+            return true
+        }
+        guard !itemsToLoad.isEmpty else {
+            isExifPreloading = false
+            return
+        }
+
+        isExifPreloading = true
+        backgroundExifTask = Task.detached(priority: .utility) { [weak self] in
+            let extracted = await ExifHeaderExtractor.extractBatch(for: itemsToLoad)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self, !Task.isCancelled else { return }
+                self.isExifPreloading = false
+                self.backgroundExifTask = nil
+                for (itemID, headerExif) in extracted {
+                    let existing = self.exifByItemID[itemID] ?? self.metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
+                    let merged = existing.supplementing(with: headerExif)
+                    self.headerSupplementedItemIDs.insert(itemID)
+                    self.exifByItemID[itemID] = merged
+                    self.metadataSyncStore.recordExif(merged, for: itemID)
+                }
+                if self.filterCriteria.isCameraModelActive || self.filterCriteria.isLensModelActive {
+                    self.refreshDerivedCounts()
+                }
+            }
         }
     }
 
@@ -996,6 +1039,10 @@ final class CullingSession {
         debouncedFlushTask = nil
         backgroundHydrationTask?.cancel()
         backgroundHydrationTask = nil
+        backgroundExifTask?.cancel()
+        backgroundExifTask = nil
+        isExifPreloading = false
+        mediaCache.flushIndexImmediately()
         isDiscovering = false
         openFolderProgress = nil
         folderAccessService.stopAccessingCurrentFolder()
@@ -1173,12 +1220,18 @@ final class CullingSession {
 
     func refreshFolder() async throws {
         guard let currentFolderURL else { return }
-        self.items = try discoverItems(in: currentFolderURL.standardizedFileURL, mode: subfolderMode)
+        let rootURL = currentFolderURL.standardizedFileURL
+        let mode = self.subfolderMode
+        let storeURL = self.storageRootURL
+        let discoveredItems = try await Task.detached(priority: .userInitiated) {
+            try Self.discoverItems(in: rootURL, mode: mode, storageRootURL: storeURL)
+        }.value
+        self.items = discoveredItems
         initializeMetadata(for: self.items)
         if !isSyncSuspended {
             await flushPendingWrites()
         }
-        await preloadExifMetadata(for: self.items)
+        startBackgroundExifPreloading(for: self.items)
     }
 
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
@@ -1290,33 +1343,48 @@ final class CullingSession {
             self.isDiscovering = false
             self.openFolderProgress = nil
         }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: resolvedURL.standardizedFileURL.path, isDirectory: &isDir), isDir.boolValue else {
-            folderAccessService.stopAccessingCurrentFolder()
-            throw CocoaError(.fileReadNoSuchFile)
-        }
-        self.recentFolders = updatedRecents
-        self.currentFolderURL = resolvedURL
 
-        let directories = try collectDirectories(from: resolvedURL.standardizedFileURL, mode: subfolderMode, fileManager: FileManager.default)
         var accumulatedItems: [MediaItem] = []
-        let totalDirs = max(directories.count, 1)
+        var hasSetCurrentFolder = false
 
-        for (index, dirURL) in directories.enumerated() {
-            if Task.isCancelled { break }
-            let dirItems = try discoverItems(inSingleDirectory: dirURL, rootURL: resolvedURL.standardizedFileURL)
-            accumulatedItems.append(contentsOf: dirItems)
-            self.items = accumulatedItems.sorted(by: Self.mediaItemSortComparator)
-            self.openFolderProgress = Double(index + 1) / Double(totalDirs)
-            await Task.yield()
+        let stream = Self.streamDiscoveredItems(
+            from: resolvedURL,
+            mode: subfolderMode,
+            storageRootURL: storageRootURL
+        )
+
+        do {
+            for try await batch in stream {
+                if !hasSetCurrentFolder {
+                    self.recentFolders = updatedRecents
+                    self.currentFolderURL = resolvedURL
+                    hasSetCurrentFolder = true
+                }
+                if Task.isCancelled { break }
+                accumulatedItems.append(contentsOf: batch.items)
+                self.items = accumulatedItems.sorted(by: Self.mediaItemSortComparator)
+                self.initializeMetadata(for: batch.items)
+                self.openFolderProgress = batch.progress
+                await Task.yield()
+            }
+        } catch {
+            if !hasSetCurrentFolder {
+                folderAccessService.stopAccessingCurrentFolder()
+            }
+            self.lastErrorMessage = error.localizedDescription
+            throw error
         }
 
-        initializeMetadata(for: self.items)
+        if !hasSetCurrentFolder {
+            self.recentFolders = updatedRecents
+            self.currentFolderURL = resolvedURL
+        }
+
         self.lastErrorMessage = nil
         if !isSyncSuspended {
             scheduleFlushPendingWrites()
         }
-        await preloadExifMetadata(for: self.items)
+        startBackgroundExifPreloading(for: self.items)
     }
 
     func removeRecentFolder(_ recentFolder: RecentFolder) {
@@ -1341,10 +1409,7 @@ final class CullingSession {
             if !isSyncSuspended {
                 scheduleFlushPendingWrites()
             }
-            Task { [weak self] in
-                guard let self else { return }
-                await self.preloadExifMetadata(for: self.items)
-            }
+            startBackgroundExifPreloading(for: self.items)
         } catch {
             folderAccessService.stopAccessingCurrentFolder()
             throw error
@@ -1359,10 +1424,7 @@ final class CullingSession {
             if !isSyncSuspended {
                 scheduleFlushPendingWrites()
             }
-            Task { [weak self] in
-                guard let self else { return }
-                await self.preloadExifMetadata(for: self.items)
-            }
+            startBackgroundExifPreloading(for: self.items)
         }
     }
 
@@ -1600,9 +1662,16 @@ final class CullingSession {
         try setSubfolderMode(next)
     }
 
-    private func discoverItems(inSingleDirectory directoryURL: URL, rootURL: URL) throws -> [MediaItem] {
-        let fm = FileManager.default
-        let contents = try fm.contentsOfDirectory(
+    func discoverItems(in rootURL: URL, mode: SubfolderMode) throws -> [MediaItem] {
+        try Self.discoverItems(in: rootURL, mode: mode, storageRootURL: storageRootURL)
+    }
+
+    nonisolated static func discoverItems(
+        inSingleDirectory directoryURL: URL,
+        rootURL: URL,
+        fileManager: FileManager = FileManager()
+    ) throws -> [MediaItem] {
+        let contents = try fileManager.contentsOfDirectory(
             at: directoryURL,
             includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isHiddenKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
@@ -1638,13 +1707,26 @@ final class CullingSession {
         )
     }
 
-    private func discoverItems(in rootURL: URL, mode: SubfolderMode) throws -> [MediaItem] {
-        let fm = FileManager.default
-        let directories = try collectDirectories(from: rootURL, mode: mode, fileManager: fm)
+    nonisolated static func discoverItems(
+        in rootURL: URL,
+        mode: SubfolderMode,
+        storageRootURL: URL,
+        fileManager: FileManager = FileManager()
+    ) throws -> [MediaItem] {
+        let directories = try collectDirectories(
+            from: rootURL,
+            mode: mode,
+            storageRootURL: storageRootURL,
+            fileManager: fileManager
+        )
         var allItems: [MediaItem] = []
 
         for directoryURL in directories {
-            let dirItems = try discoverItems(inSingleDirectory: directoryURL, rootURL: rootURL)
+            let dirItems = try discoverItems(
+                inSingleDirectory: directoryURL,
+                rootURL: rootURL,
+                fileManager: fileManager
+            )
             allItems.append(contentsOf: dirItems)
         }
 
@@ -1680,7 +1762,12 @@ final class CullingSession {
         return false
     }
 
-    private func collectDirectories(from rootURL: URL, mode: SubfolderMode, fileManager: FileManager) throws -> [URL] {
+    nonisolated static func collectDirectories(
+        from rootURL: URL,
+        mode: SubfolderMode,
+        storageRootURL: URL,
+        fileManager: FileManager = FileManager()
+    ) throws -> [URL] {
         let standardizedRoot = rootURL.standardizedFileURL
         guard mode == .recursive else {
             return [standardizedRoot]
@@ -1708,6 +1795,56 @@ final class CullingSession {
         }
 
         return directories.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    nonisolated struct DiscoveredBatch: Sendable {
+        let items: [MediaItem]
+        let progress: Double
+    }
+
+    nonisolated static func streamDiscoveredItems(
+        from rootURL: URL,
+        mode: SubfolderMode,
+        storageRootURL: URL
+    ) -> AsyncThrowingStream<DiscoveredBatch, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task.detached(priority: .userInitiated) {
+                do {
+                    let fm = FileManager()
+                    let standardizedRoot = rootURL.standardizedFileURL
+                    var isDir: ObjCBool = false
+                    guard fm.fileExists(atPath: standardizedRoot.path, isDirectory: &isDir), isDir.boolValue else {
+                        continuation.finish(throwing: CocoaError(.fileReadNoSuchFile))
+                        return
+                    }
+
+                    let directories = try collectDirectories(
+                        from: standardizedRoot,
+                        mode: mode,
+                        storageRootURL: storageRootURL,
+                        fileManager: fm
+                    )
+                    let totalDirs = max(directories.count, 1)
+
+                    for (index, dirURL) in directories.enumerated() {
+                        if Task.isCancelled { break }
+                        let dirItems = try discoverItems(
+                            inSingleDirectory: dirURL,
+                            rootURL: standardizedRoot,
+                            fileManager: fm
+                        )
+                        let progress = Double(index + 1) / Double(totalDirs)
+                        continuation.yield(DiscoveredBatch(items: dirItems, progress: progress))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
     }
 
     nonisolated static func pairDirectoryMediaFiles(
