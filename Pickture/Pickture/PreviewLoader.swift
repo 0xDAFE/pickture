@@ -313,13 +313,6 @@ nonisolated enum PreviewLoader {
         }
 
         // 2. Scan for embedded JPEG SOI streams [0xFF, 0xD8, 0xFF]
-        if prefixData.count < maxHeaderBytes && prefixData.range(of: soi) != nil {
-            let remainingBytes = maxHeaderBytes - prefixData.count
-            if let moreData = try? handle.read(upToCount: remainingBytes), !moreData.isEmpty {
-                prefixData.append(moreData)
-            }
-        }
-
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,

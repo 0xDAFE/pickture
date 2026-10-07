@@ -74,10 +74,6 @@ final class MediaCache {
         return FileManager.default.fileExists(atPath: fileURL.path)
     }
 
-    func entry(forKey key: String) -> MediaCacheEntry? {
-        state.entries[key]
-    }
-
     func readData(forKey key: String) -> Data? {
         guard var entry = state.entries[key] else {
             return nil
@@ -172,35 +168,66 @@ final class MediaCache {
     }
 
     private var debouncedPersistTask: Task<Void, Never>? = nil
+    private var backgroundWriteTask: Task<Void, Never>? = nil
+    private let indexWriter = IndexDiskWriter()
 
     func scheduleDebouncedPersistIndex(delayNanoseconds: UInt64 = 1_000_000_000) {
-        guard debouncedPersistTask == nil else { return }
-        debouncedPersistTask = Task { @MainActor [weak self] in
+        debouncedPersistTask?.cancel()
+        // Run debounce sleep off-actor at utility priority to keep @MainActor responsive
+        debouncedPersistTask = Task(priority: .utility) { [weak self] in
             try? await Task.sleep(nanoseconds: delayNanoseconds)
-            guard let self, !Task.isCancelled else { return }
-            self.debouncedPersistTask = nil
-            self.persistIndex()
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self, !Task.isCancelled else { return }
+                self.debouncedPersistTask = nil
+                self.persistIndex()
+            }
         }
     }
 
     func persistIndex() {
         guard let data = try? JSONEncoder().encode(state) else { return }
         let targetURL = indexFileURL
-        Task.detached(priority: .utility) {
-            try? data.write(to: targetURL, options: .atomic)
+        let seq = state.nextSequence
+        let writer = indexWriter
+        // Serialized background write: IndexDiskWriter guarantees monotonic sequence ordering
+        // so delayed disk operations can never overwrite newer snapshots.
+        backgroundWriteTask = Task(priority: .utility) {
+            await writer.write(data, sequence: seq, to: targetURL)
         }
     }
 
     func flushIndexImmediately() {
         debouncedPersistTask?.cancel()
         debouncedPersistTask = nil
+        backgroundWriteTask?.cancel()
+        backgroundWriteTask = nil
         guard let data = try? JSONEncoder().encode(state) else { return }
+        let seq = state.nextSequence
+        let writer = indexWriter
         try? data.write(to: indexFileURL, options: .atomic)
+        Task(priority: .utility) {
+            await writer.markWritten(sequence: seq)
+        }
     }
 
     private static func safeFileName(forKey key: String) -> String {
         let digest = SHA256.hash(data: Data(key.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         return "\(hex).thumb.jpg"
+    }
+}
+
+private actor IndexDiskWriter {
+    private var lastWrittenSequence: UInt64 = 0
+
+    func write(_ data: Data, sequence: UInt64, to url: URL) {
+        guard sequence >= lastWrittenSequence else { return }
+        lastWrittenSequence = sequence
+        try? data.write(to: url, options: .atomic)
+    }
+
+    func markWritten(sequence: UInt64) {
+        lastWrittenSequence = max(lastWrittenSequence, sequence)
     }
 }

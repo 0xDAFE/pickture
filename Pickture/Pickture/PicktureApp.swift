@@ -19,6 +19,7 @@ struct PicktureApp: App {
                     if newPhase == .background {
                         Task {
                             await session.flushPendingWrites()
+                            session.flushMediaCacheIndex()
                         }
                     }
                 }
@@ -26,6 +27,7 @@ struct PicktureApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     Task {
                         await session.flushPendingWrites()
+                        session.flushMediaCacheIndex()
                     }
                 }
                 #endif

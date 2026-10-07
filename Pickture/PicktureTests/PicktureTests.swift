@@ -54,7 +54,7 @@ struct CullingSessionDiscoveryAndCacheTests {
     }
 
     @Test("Toggling SubfolderMode switches between immediate and recursive discovery without pairing across directories")
-    func discoverSubfolderModeAndDirectoryScopedPairing() throws {
+    func discoverSubfolderModeAndDirectoryScopedPairing() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -84,7 +84,7 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(session.items[0].isMediaPair == false)
 
         // Switch to recursive SubfolderMode
-        try session.setSubfolderMode(.recursive)
+        try await session.setSubfolderMode(.recursive)
         #expect(session.subfolderMode == .recursive)
         #expect(session.items.count == 4)
 
@@ -104,13 +104,13 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(day2Standalone.isMediaPair == false)
 
         // Toggle back to .immediate
-        try session.toggleSubfolderMode()
+        try await session.toggleSubfolderMode()
         #expect(session.subfolderMode == .immediate)
         #expect(session.items.count == 1)
     }
 
     @Test("Recursive discovery skips non-media cache bundles (*.lrdata, *.lrcat, CaptureOne, @eaDir, .Trashes, .Spotlight-V100)")
-    func discoverRecursiveSkipsCacheAndThumbnailDirectories() throws {
+    func discoverRecursiveSkipsCacheAndThumbnailDirectories() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -139,7 +139,7 @@ struct CullingSessionDiscoveryAndCacheTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
         try session.openFolder(at: root)
-        try session.setSubfolderMode(.recursive)
+        try await session.setSubfolderMode(.recursive)
 
         // Only the valid photo in Day1 should be discovered; all decoys in cache dirs must be skipped
         #expect(session.items.count == 1)
@@ -670,7 +670,7 @@ struct CullingSessionDiscoveryAndCacheTests {
         try Data("imgB".utf8).write(to: dir2.appendingPathComponent("B.JPG"))
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
-        try session.setSubfolderMode(.recursive)
+        try await session.setSubfolderMode(.recursive)
 
         try await session.openFolderAsync(at: root, lazySidecars: true)
         #expect(session.items.count == 2)
@@ -828,39 +828,47 @@ struct CullingSessionDiscoveryAndCacheTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let cacheDir = root.appendingPathComponent("media-cache", isDirectory: true)
-        let cache = MediaCache(cacheDirectoryURL: cacheDir, initialLimitBytes: 10_000_000)
+        // Set quota for 2 entries (each entry 100 bytes, quota = 250 bytes)
+        let cache = MediaCache(cacheDirectoryURL: cacheDir, initialLimitBytes: 250)
 
-        let testKey = "test_item_thumb_360"
-        let testData = Data("sample-cached-thumbnail".utf8)
-        cache.storeData(testData, forKey: testKey)
+        let key1 = "item_1"
+        let key2 = "item_2"
+        let key3 = "item_3"
+        let data1 = Data(repeating: 0xAA, count: 100)
+        let data2 = Data(repeating: 0xBB, count: 100)
+        let data3 = Data(repeating: 0xCC, count: 100)
+
+        cache.storeData(data1, forKey: key1)
+        cache.storeData(data2, forKey: key2)
         cache.flushIndexImmediately()
 
-        let initialEntry = try #require(cache.entry(forKey: testKey))
-        let initialSeq = initialEntry.accessSequence
+        #expect(cache.contains(key: key1) == true)
+        #expect(cache.contains(key: key2) == true)
 
         let indexURL = cacheDir.appendingPathComponent("cache-index.json")
         let diskIndexDataBefore = try Data(contentsOf: indexURL)
-        let decodedBefore = try JSONDecoder().decode(MediaCacheIndexState.self, from: diskIndexDataBefore)
-        #expect(decodedBefore.entries[testKey]?.accessSequence == initialSeq)
 
-        // Read cached data
-        let readResult = cache.readData(forKey: testKey)
-        #expect(readResult == testData)
+        // Read key1: moves key1 to most recently used, leaving key2 as least recently used
+        let readResult = cache.readData(forKey: key1)
+        #expect(readResult == data1)
 
-        // In-memory accessSequence is updated immediately for LRU tracking
-        let updatedEntry = try #require(cache.entry(forKey: testKey))
-        #expect(updatedEntry.accessSequence > initialSeq)
-
-        // Verify that disk index was NOT written synchronously during readData
+        // Verify that disk index was NOT written synchronously during readData:
+        // disk file contents are still identical to diskIndexDataBefore
         let diskIndexDataImmediately = try Data(contentsOf: indexURL)
-        let decodedImmediately = try JSONDecoder().decode(MediaCacheIndexState.self, from: diskIndexDataImmediately)
-        #expect(decodedImmediately.entries[testKey]?.accessSequence == initialSeq)
+        #expect(diskIndexDataImmediately == diskIndexDataBefore)
 
-        // After flushing immediately (e.g. on session close or background persist), disk reflects updated LRU
+        // Store third item: exceeding 250-byte quota triggers LRU eviction.
+        // Because key1 was read, key2 is the least recently used and MUST be evicted,
+        // while key1 and key3 remain!
+        cache.storeData(data3, forKey: key3)
+        #expect(cache.contains(key: key1) == true)
+        #expect(cache.contains(key: key2) == false)
+        #expect(cache.contains(key: key3) == true)
+
+        // After flushing immediately, disk reflects updated index
         cache.flushIndexImmediately()
         let diskIndexDataFlushed = try Data(contentsOf: indexURL)
-        let decodedFlushed = try JSONDecoder().decode(MediaCacheIndexState.self, from: diskIndexDataFlushed)
-        #expect(decodedFlushed.entries[testKey]?.accessSequence == updatedEntry.accessSequence)
+        #expect(diskIndexDataFlushed != diskIndexDataBefore)
     }
 
     @Test("openFolderAsync and reopenRecentFolderAsync stream discovered items progressively without blocking actor execution")
@@ -884,7 +892,7 @@ struct CullingSessionDiscoveryAndCacheTests {
         try Data("img3B".utf8).write(to: folder3.appendingPathComponent("F3_B.JPG"))
 
         let session1 = CullingSession(storageRootURL: storeURL)
-        try session1.setSubfolderMode(.recursive)
+        try await session1.setSubfolderMode(.recursive)
 
         try await session1.openFolderAsync(at: tempRoot, lazySidecars: true)
         #expect(session1.items.count == 6)
@@ -893,7 +901,7 @@ struct CullingSessionDiscoveryAndCacheTests {
 
         let recent = session1.recentFolders[0]
         let session2 = CullingSession(storageRootURL: storeURL)
-        try session2.setSubfolderMode(.recursive)
+        try await session2.setSubfolderMode(.recursive)
         try await session2.reopenRecentFolderAsync(recent)
 
         #expect(session2.currentFolderURL == tempRoot)

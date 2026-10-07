@@ -35,10 +35,6 @@ enum ExifHeaderExtractor {
         var results: [(String, ExifMetadata)] = []
         for item in items {
             if Task.isCancelled { break }
-            guard item.kind != .video else {
-                results.append((item.id, ExifMetadata()))
-                continue
-            }
             let exif = extractHeaderExif(for: item)
             results.append((item.id, exif))
         }
@@ -49,7 +45,7 @@ enum ExifHeaderExtractor {
     /// with caching disabled so full rasters are never decoded into memory.
     nonisolated static func extract(from fileURL: URL) -> ExifMetadata {
         let ext = fileURL.pathExtension.lowercased()
-        if MediaFormatKind.classify(fileExtension: ext) == .video || ["mov", "mp4", "m4v"].contains(ext) {
+        if MediaFormatKind.classify(fileExtension: ext) == .video {
             return ExifMetadata()
         }
 

@@ -204,7 +204,9 @@ struct ContentView: View {
         } actions: {
             if session.subfolderMode == .immediate {
                 Button("Enable Subfolder Mode") {
-                    try? session.setSubfolderMode(.recursive)
+                    Task {
+                        try? await session.setSubfolderMode(.recursive)
+                    }
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -263,8 +265,7 @@ private enum SelfContainedPreviewData {
         let videoThumbData = try? Data(contentsOf: videoThumbURL)
 
         let storeURL = root.appendingPathComponent(".preview-store", isDirectory: true)
-        let session = CullingSession(storageRootURL: storeURL)
-        try? session.setSubfolderMode(.recursive)
+        let session = CullingSession(storageRootURL: storeURL, subfolderMode: .recursive)
         try? session.openFolder(at: root)
         for item in session.items {
             let key = session.thumbnailCacheKey(for: item, maxPixelSize: 360)

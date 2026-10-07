@@ -120,10 +120,16 @@ final class CullingSession {
             subfolderMode == .recursive
         }
         set {
-            do {
-                try setSubfolderMode(newValue ? .recursive : .immediate)
-            } catch {
-                lastErrorMessage = "Failed to switch subfolder mode: \(error.localizedDescription)"
+            let targetMode: SubfolderMode = newValue ? .recursive : .immediate
+            guard subfolderMode != targetMode else { return }
+            subfolderMode = targetMode
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.rediscoverItemsForSubfolderModeChange()
+                } catch {
+                    self.lastErrorMessage = "Failed to switch subfolder mode: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -537,7 +543,7 @@ final class CullingSession {
         ByteCountFormatter.string(fromByteCount: cacheSizeLimitBytes, countStyle: .file)
     }
 
-    init(storageRootURL: URL? = nil, cacheDirectoryURL: URL? = nil) {
+    init(storageRootURL: URL? = nil, cacheDirectoryURL: URL? = nil, subfolderMode: SubfolderMode = .immediate) {
         let resolvedStorageRoot: URL
         let resolvedCacheDir: URL
         if let storageRootURL {
@@ -551,6 +557,7 @@ final class CullingSession {
                 ?? FileManager.default.temporaryDirectory
             resolvedCacheDir = (cacheDirectoryURL ?? cachesRoot.appendingPathComponent("PicktureMediaCache", isDirectory: true)).standardizedFileURL
         }
+        self.subfolderMode = subfolderMode
         self.storageRootURL = resolvedStorageRoot
         self.folderAccessService = FolderAccessService(storageRootURL: resolvedStorageRoot)
         self.mediaCache = MediaCache(cacheDirectoryURL: resolvedCacheDir)
@@ -599,6 +606,12 @@ final class CullingSession {
         thumbnailAspectRatios.removeAll()
         self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
         self.cacheGeneration &+= 1
+    }
+
+    /// Flushes the thumbnail cache index immediately to disk.
+    /// Called on session close, background transition, or application termination.
+    func flushMediaCacheIndex() {
+        mediaCache.flushIndexImmediately()
     }
 
     func setStarRating(_ rating: StarRating, for item: MediaItem) {
@@ -687,34 +700,9 @@ final class CullingSession {
         return resolved
     }
 
-    func preloadExifMetadata(for targetItems: [MediaItem]) async {
-        let itemsToLoad = targetItems.filter { item in
-            guard item.kind != .video else { return false }
-            if headerSupplementedItemIDs.contains(item.id) { return false }
-            let existing = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif ?? ExifMetadata()
-            if existing.cameraModel != nil && existing.lensModel != nil && existing.dateTimeOriginal != nil && !existing.isoSpeedRatings.isEmpty && existing.focalLength != nil {
-                headerSupplementedItemIDs.insert(item.id)
-                exifByItemID[item.id] = existing
-                return false
-            }
-            return true
-        }
-        guard !itemsToLoad.isEmpty else { return }
-
-        let extracted = await ExifHeaderExtractor.extractBatch(for: itemsToLoad)
-
-        for (itemID, headerExif) in extracted {
-            let existing = exifByItemID[itemID] ?? metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
-            let merged = existing.supplementing(with: headerExif)
-            headerSupplementedItemIDs.insert(itemID)
-            exifByItemID[itemID] = merged
-            metadataSyncStore.recordExif(merged, for: itemID)
-        }
-        if filterCriteria.isCameraModelActive || filterCriteria.isLensModelActive {
-            refreshDerivedCounts()
-        }
-    }
-
+    /// Preloads EXIF metadata in the background off the MainActor.
+    /// Runs via Task.detached at .utility priority so network-bound header reads over NAS/SMB
+    /// do not inherit @MainActor isolation or block UI event processing.
     func startBackgroundExifPreloading(for targetItems: [MediaItem]) {
         backgroundExifTask?.cancel()
         let itemsToLoad = targetItems.filter { item in
@@ -1218,6 +1206,9 @@ final class CullingSession {
         }
     }
 
+    /// Refreshes the active folder by re-discovering items.
+    /// Traversal runs in Task.detached at .userInitiated priority to prevent
+    /// synchronous file system calls from blocking @MainActor.
     func refreshFolder() async throws {
         guard let currentFolderURL else { return }
         let rootURL = currentFolderURL.standardizedFileURL
@@ -1416,16 +1407,31 @@ final class CullingSession {
         }
     }
 
-    func setSubfolderMode(_ mode: SubfolderMode) throws {
+    /// Sets the subfolder mode and re-discovers items asynchronously off the MainActor.
+    /// If a folder is open, directory traversal runs in Task.detached to prevent
+    /// synchronous FileManager operations from blocking @MainActor.
+    func setSubfolderMode(_ mode: SubfolderMode) async throws {
         self.subfolderMode = mode
-        if let currentFolderURL {
-            self.items = try discoverItems(in: currentFolderURL.standardizedFileURL, mode: mode)
-            initializeMetadata(for: self.items)
-            if !isSyncSuspended {
-                scheduleFlushPendingWrites()
-            }
-            startBackgroundExifPreloading(for: self.items)
+        try await rediscoverItemsForSubfolderModeChange()
+    }
+
+    private func rediscoverItemsForSubfolderModeChange() async throws {
+        guard let currentFolderURL else { return }
+        let rootURL = currentFolderURL.standardizedFileURL
+        let mode = self.subfolderMode
+        let storeURL = self.storageRootURL
+        self.isDiscovering = true
+        defer { self.isDiscovering = false }
+        let discoveredItems = try await Task.detached(priority: .userInitiated) {
+            try Self.discoverItems(in: rootURL, mode: mode, storageRootURL: storeURL)
+        }.value
+        guard self.subfolderMode == mode, self.currentFolderURL == currentFolderURL else { return }
+        self.items = discoveredItems
+        initializeMetadata(for: self.items)
+        if !isSyncSuspended {
+            scheduleFlushPendingWrites()
         }
+        startBackgroundExifPreloading(for: self.items)
     }
 
     private func initializeMetadata(for items: [MediaItem]) {
@@ -1657,9 +1663,9 @@ final class CullingSession {
         }
     }
 
-    func toggleSubfolderMode() throws {
+    func toggleSubfolderMode() async throws {
         let next: SubfolderMode = (subfolderMode == .immediate) ? .recursive : .immediate
-        try setSubfolderMode(next)
+        try await setSubfolderMode(next)
     }
 
     func discoverItems(in rootURL: URL, mode: SubfolderMode) throws -> [MediaItem] {
@@ -1802,6 +1808,9 @@ final class CullingSession {
         let progress: Double
     }
 
+    /// Streams discovered items asynchronously in directory batches.
+    /// Traversal runs in Task.detached at .userInitiated priority with an isolated FileManager
+    /// to eliminate Main Thread NAS beachballs and stream results progressively to the UI.
     nonisolated static func streamDiscoveredItems(
         from rootURL: URL,
         mode: SubfolderMode,

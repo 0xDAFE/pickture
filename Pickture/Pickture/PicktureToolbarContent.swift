@@ -213,7 +213,9 @@ struct PicktureToolbarContent: ToolbarContent {
         }
 
         Button {
-            try? session.toggleSubfolderMode()
+            Task {
+                try? await session.toggleSubfolderMode()
+            }
         } label: {
             Label(
                 session.subfolderMode == .recursive ? "Subfolders: On" : "Subfolders: Off",
