@@ -1006,6 +1006,11 @@ struct CullingSessionDiscoveryAndCacheTests {
     }
 
     private func findORFTestFileURL() -> URL? {
+        // Sandboxed test execution cannot read repository paths outside the container.
+        if ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil {
+            return nil
+        }
+
         let fileManager = FileManager.default
         let relativePath = "testfiles/raws/P9227357.ORF"
 
@@ -1234,14 +1239,14 @@ private actor PeakCounter {
     }
 }
 
-private actor ExecutionOrderTracker {
+actor ExecutionOrderTracker {
     var order: [String] = []
     func record(_ id: String) {
         order.append(id)
     }
 }
 
-private actor AsyncSignal {
+actor AsyncSignal {
     private var isSignaled = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 

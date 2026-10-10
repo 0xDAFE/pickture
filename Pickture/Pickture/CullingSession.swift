@@ -3,97 +3,14 @@ import Foundation
 import Observation
 import OSLog
 
-actor ThumbnailQueueActor {
-    static let shared = ThumbnailQueueActor(maxConcurrentWorkers: 4)
-
-    private let maxConcurrentWorkers: Int
-    private var activeWorkers: Int = 0
-
-    private struct PendingRequest {
-        let id: String
-        let operation: @Sendable () async -> Data?
-        let continuation: CheckedContinuation<Data?, Never>
-    }
-
-    private var pendingQueue: [PendingRequest] = []
-
-    private var activeTasks: [String: Task<Void, Never>] = [:]
-
-    var pendingCount: Int {
-        pendingQueue.count
-    }
-
-    init(maxConcurrentWorkers: Int = 4) {
-        self.maxConcurrentWorkers = maxConcurrentWorkers
-    }
-
-    func enqueue(
-        id: String,
-        operation: @escaping @Sendable () async -> Data?
-    ) async -> Data? {
-        guard !Task.isCancelled else { return nil }
-
-        cancel(id: id)
-
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                let request = PendingRequest(
-                    id: id,
-                    operation: operation,
-                    continuation: continuation
-                )
-                // LIFO: newest visible cell is placed at the front of the queue
-                pendingQueue.insert(request, at: 0)
-                pump()
-            }
-        } onCancel: {
-            Task {
-                await self.cancel(id: id)
-            }
-        }
-    }
-
-    func cancel(id: String) {
-        if let idx = pendingQueue.firstIndex(where: { $0.id == id }) {
-            let removed = pendingQueue.remove(at: idx)
-            removed.continuation.resume(returning: nil)
-        }
-        if let task = activeTasks.removeValue(forKey: id) {
-            task.cancel()
-        }
-    }
-
-    private func pump() {
-        while activeWorkers < maxConcurrentWorkers && !pendingQueue.isEmpty {
-            let next = pendingQueue.removeFirst()
-            activeWorkers += 1
-            let itemID = next.id
-
-            let workerTask = Task {
-                defer {
-                    self.activeWorkers -= 1
-                    self.activeTasks.removeValue(forKey: itemID)
-                    self.pump()
-                }
-                if Task.isCancelled {
-                    next.continuation.resume(returning: nil)
-                    return
-                }
-                let result = await next.operation()
-                next.continuation.resume(returning: Task.isCancelled ? nil : result)
-            }
-            activeTasks[itemID] = workerTask
-        }
-    }
-}
-
 @MainActor
 @Observable
 final class CullingSession {
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.pickture", category: "sync")
     let storageRootURL: URL
     private let folderAccessService: FolderAccessService
-    let mediaCache: MediaCache
+    let mediaPipeline: MediaPipeline
+    var mediaCache: MediaCache { mediaPipeline.cache }
     let metadataSyncStore: MetadataSyncStore
     private(set) var currentFolderURL: URL?
     private(set) var items: [MediaItem] = [] {
@@ -560,58 +477,52 @@ final class CullingSession {
         self.subfolderMode = subfolderMode
         self.storageRootURL = resolvedStorageRoot
         self.folderAccessService = FolderAccessService(storageRootURL: resolvedStorageRoot)
-        self.mediaCache = MediaCache(cacheDirectoryURL: resolvedCacheDir)
+        self.mediaPipeline = MediaPipeline(cacheDirectoryURL: resolvedCacheDir)
         self.metadataSyncStore = MetadataSyncStore(
             storeDirectoryURL: resolvedStorageRoot.appendingPathComponent("MetadataSyncStore", isDirectory: true)
         )
         self.recentFolders = self.folderAccessService.loadRecentFolders()
-        self.mediaCacheTotalBytes = self.mediaCache.totalCachedBytes
-        self.cacheSizeLimitBytes = self.mediaCache.cacheSizeLimitBytes
+        self.mediaCacheTotalBytes = self.mediaPipeline.totalCachedBytes
+        self.cacheSizeLimitBytes = self.mediaPipeline.cacheSizeLimitBytes
     }
 
     func thumbnailCacheKey(for item: MediaItem, maxPixelSize: Int = 360) -> String {
-        let file = item.preferredFile(for: previewSource)
-        return "\(file.id)#\(previewSource.rawValue)#\(maxPixelSize)"
+        mediaPipeline.thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func isThumbnailCached(for item: MediaItem, maxPixelSize: Int = 360) -> Bool {
-        mediaCache.contains(key: thumbnailCacheKey(for: item, maxPixelSize: maxPixelSize))
+        mediaPipeline.isThumbnailCached(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func cachedThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) -> CGImage? {
-        let key = thumbnailCacheKey(for: item, maxPixelSize: maxPixelSize)
-        guard let cachedData = mediaCache.readData(forKey: key) else {
-            return nil
-        }
-        self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
-        return PreviewLoader.decodeCGImage(from: cachedData)
+        let image = mediaPipeline.cachedThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
+        return image
     }
 
     func setCacheSizeLimitBytes(_ limitBytes: Int64) {
-        mediaCache.setCacheSizeLimitBytes(limitBytes)
-        self.cacheSizeLimitBytes = mediaCache.cacheSizeLimitBytes
-        self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
+        mediaPipeline.setCacheSizeLimitBytes(limitBytes)
+        self.cacheSizeLimitBytes = mediaPipeline.cacheSizeLimitBytes
+        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
     }
 
     func setUserConfiguredCacheSizeLimitBytes(_ limitBytes: Int64) {
-        let clamped = min(
-            MediaCache.maxUserQuotaBytes,
-            max(MediaCache.minUserQuotaBytes, limitBytes)
-        )
-        setCacheSizeLimitBytes(clamped)
+        mediaPipeline.setUserConfiguredCacheSizeLimitBytes(limitBytes)
+        self.cacheSizeLimitBytes = mediaPipeline.cacheSizeLimitBytes
+        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
     }
 
     func clearMediaCache() {
-        mediaCache.clear()
+        mediaPipeline.clearCache()
         thumbnailAspectRatios.removeAll()
-        self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
+        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
         self.cacheGeneration &+= 1
     }
 
     /// Flushes the thumbnail cache index immediately to disk.
     /// Called on session close, background transition, or application termination.
     func flushMediaCacheIndex() {
-        mediaCache.flushIndexImmediately()
+        mediaPipeline.flushIndexImmediately()
     }
 
     func setStarRating(_ rating: StarRating, for item: MediaItem) {
@@ -1030,7 +941,7 @@ final class CullingSession {
         backgroundExifTask?.cancel()
         backgroundExifTask = nil
         isExifPreloading = false
-        mediaCache.flushIndexImmediately()
+        mediaPipeline.flushIndexImmediately()
         isDiscovering = false
         openFolderProgress = nil
         folderAccessService.stopAccessingCurrentFolder()
@@ -1226,55 +1137,29 @@ final class CullingSession {
     }
 
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
-        let key = thumbnailCacheKey(for: item, maxPixelSize: maxPixelSize)
-        if let cached = mediaCache.readData(forKey: key) {
-            self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
-            return cached
-        }
-        guard !Task.isCancelled else { return nil }
-        let source = previewSource
-        let data = await ThumbnailQueueActor.shared.enqueue(id: key) {
-            guard !Task.isCancelled else { return nil }
-            let extracted = await PreviewLoader.extractThumbnail(for: item, previewSource: source, maxPixelSize: maxPixelSize)
-            return extracted?.jpegData
-        }
-        guard let data, !Task.isCancelled else {
-            return nil
-        }
-        mediaCache.storeData(data, forKey: key)
-        self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
+        let data = await mediaPipeline.loadThumbnailData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
         return data
     }
 
     func previewCacheKey(for item: MediaItem, maxPixelSize: Int = 2048) -> String {
-        let file = item.preferredFile(for: previewSource)
-        return "\(file.id)#preview#\(previewSource.rawValue)#\(maxPixelSize)"
+        mediaPipeline.previewCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func cachedPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {
-        let key = previewCacheKey(for: item, maxPixelSize: maxPixelSize)
-        guard let cachedData = mediaCache.readData(forKey: key) else {
-            return nil
-        }
-        self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
-        return PreviewLoader.decodeCGImage(from: cachedData)
+        let image = mediaPipeline.cachedPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
+        return image
     }
 
     func loadPreviewImageData(for item: MediaItem, maxPixelSize: Int = 2048) async -> Data? {
-        let key = previewCacheKey(for: item, maxPixelSize: maxPixelSize)
-        if let cached = mediaCache.readData(forKey: key) {
-            self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
-            return cached
-        }
-        guard !Task.isCancelled else { return nil }
-        let source = previewSource
-        let extracted = await PreviewLoader.extractThumbnail(for: item, previewSource: source, maxPixelSize: maxPixelSize)
-        guard let extracted, !Task.isCancelled else {
-            return nil
-        }
-        mediaCache.storeData(extracted.jpegData, forKey: key)
-        self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
-        return extracted.jpegData
+        let data = await mediaPipeline.loadPreviewImageData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
+        return data
+    }
+
+    func cancelThumbnail(for item: MediaItem, maxPixelSize: Int = 360) {
+        mediaPipeline.cancelThumbnail(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func openFolder(at url: URL, lazySidecars: Bool? = nil) throws {
