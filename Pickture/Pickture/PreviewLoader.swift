@@ -103,7 +103,7 @@ nonisolated enum PreviewLoader {
         maxPixelSize: Int
     ) -> PreviewExtractionResult? {
         if isRaw {
-            if let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(at: url, maxPixelSize: maxPixelSize) {
+            if let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(containerSource: source, at: url, maxPixelSize: maxPixelSize) {
                 return PreviewExtractionResult(jpegData: headerJPEG, strategy: .embeddedPreview)
             }
         }
@@ -207,13 +207,13 @@ nonisolated enum PreviewLoader {
         }
 
         if let fullCGImage = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-            var oriented = fullCGImage
-            if let containerOrientation = extractContainerOrientation(from: source, url: url),
-               (2...8).contains(containerOrientation) {
-                oriented = applyOrientation(cgImage: fullCGImage, orientation: containerOrientation)
-            }
-            let scaled = downsampleIfNeeded(cgImage: oriented, maxPixelSize: maxPixelSize)
-            if let jpegData = encodeToJPEG(cgImage: scaled) {
+            let containerOrientation = extractContainerOrientation(from: source, url: url)
+            if let jpegData = orientAndEncodeJPEG(
+                cgImage: fullCGImage,
+                hasOwnOrientation: false,
+                containerOrientation: containerOrientation,
+                maxPixelSize: maxPixelSize
+            ) {
                 return PreviewExtractionResult(jpegData: jpegData, strategy: .fullDecodeFallback)
             }
         }
@@ -245,18 +245,19 @@ nonisolated enum PreviewLoader {
             return jpegData
         }
         if let fullCGImage = CGImageSourceCreateImageAtIndex(tiffSource, 0, nil) {
-            var oriented = fullCGImage
-            if let containerOrientation = extractContainerOrientation(from: tiffSource, url: url),
-               (2...8).contains(containerOrientation) {
-                oriented = applyOrientation(cgImage: fullCGImage, orientation: containerOrientation)
-            }
-            let scaled = downsampleIfNeeded(cgImage: oriented, maxPixelSize: maxPixelSize)
-            return encodeToJPEG(cgImage: scaled)
+            let containerOrientation = extractContainerOrientation(from: tiffSource, url: url)
+            return orientAndEncodeJPEG(
+                cgImage: fullCGImage,
+                hasOwnOrientation: false,
+                containerOrientation: containerOrientation,
+                maxPixelSize: maxPixelSize
+            )
         }
         return nil
     }
 
     private static func extractEmbeddedJPEGFromHeaderPrefix(
+        containerSource: CGImageSource? = nil,
         at url: URL,
         initialHeaderBytes: Int = 1_048_576,
         maxHeaderBytes: Int = 3_670_016,
@@ -294,10 +295,18 @@ nonisolated enum PreviewLoader {
         }
 
         // 1. Direct in-memory container probe (e.g. IFD0/SubIFD preview in DNG/TIFF header)
-        let containerOrientation = extractContainerOrientation(from: nil, prefixData: prefixData, url: url)
+        let containerOrientation = extractContainerOrientation(from: containerSource, prefixData: prefixData, url: url)
 
         if let directSource = CGImageSourceCreateWithData(prefixData as CFData, nil),
            CGImageSourceGetCount(directSource) > 0 {
+            let directHasOwnOrientation: Bool = {
+                if let props = CGImageSourceCopyPropertiesAtIndex(directSource, 0, nil) as? [CFString: Any],
+                   let num = props[kCGImagePropertyOrientation] as? NSNumber,
+                   let ori = CGImagePropertyOrientation(rawValue: num.uint32Value) {
+                    return ori != .up
+                }
+                return false
+            }()
             let embeddedOptions: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
                 kCGImageSourceCreateThumbnailFromImageAlways: false,
@@ -305,19 +314,12 @@ nonisolated enum PreviewLoader {
                 kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
             ]
             if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(directSource, 0, embeddedOptions as CFDictionary) {
-                var oriented = embeddedCGImage
-                let directHasOwnOrientation: Bool = {
-                    if let props = CGImageSourceCopyPropertiesAtIndex(directSource, 0, nil) as? [CFString: Any],
-                       let num = props[kCGImagePropertyOrientation] as? NSNumber {
-                        return (2...8).contains(num.uint32Value)
-                    }
-                    return false
-                }()
-                if !directHasOwnOrientation, let containerOrientation, (2...8).contains(containerOrientation) {
-                    oriented = applyOrientation(cgImage: embeddedCGImage, orientation: containerOrientation)
-                }
-                let scaled = downsampleIfNeeded(cgImage: oriented, maxPixelSize: maxPixelSize)
-                if let jpeg = encodeToJPEG(cgImage: scaled) {
+                if let jpeg = orientAndEncodeJPEG(
+                    cgImage: embeddedCGImage,
+                    hasOwnOrientation: directHasOwnOrientation,
+                    containerOrientation: containerOrientation,
+                    maxPixelSize: maxPixelSize
+                ) {
                     return jpeg
                 }
             }
@@ -328,19 +330,12 @@ nonisolated enum PreviewLoader {
                 kCGImageSourceCreateThumbnailWithTransform: true
             ]
             if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(directSource, 0, unsizedOptions as CFDictionary) {
-                var oriented = embeddedCGImage
-                let directHasOwnOrientation: Bool = {
-                    if let props = CGImageSourceCopyPropertiesAtIndex(directSource, 0, nil) as? [CFString: Any],
-                       let num = props[kCGImagePropertyOrientation] as? NSNumber {
-                        return (2...8).contains(num.uint32Value)
-                    }
-                    return false
-                }()
-                if !directHasOwnOrientation, let containerOrientation, (2...8).contains(containerOrientation) {
-                    oriented = applyOrientation(cgImage: embeddedCGImage, orientation: containerOrientation)
-                }
-                let scaled = downsampleIfNeeded(cgImage: oriented, maxPixelSize: maxPixelSize)
-                if let jpeg = encodeToJPEG(cgImage: scaled) {
+                if let jpeg = orientAndEncodeJPEG(
+                    cgImage: embeddedCGImage,
+                    hasOwnOrientation: directHasOwnOrientation,
+                    containerOrientation: containerOrientation,
+                    maxPixelSize: maxPixelSize
+                ) {
                     return jpeg
                 }
             }
@@ -365,8 +360,9 @@ nonisolated enum PreviewLoader {
                let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
                 let sliceHasOwnOrientation: Bool = {
                     if let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-                       let num = props[kCGImagePropertyOrientation] as? NSNumber {
-                        return (2...8).contains(num.uint32Value)
+                       let num = props[kCGImagePropertyOrientation] as? NSNumber,
+                       let ori = CGImagePropertyOrientation(rawValue: num.uint32Value) {
+                        return ori != .up
                     }
                     return false
                 }()
@@ -383,13 +379,29 @@ nonisolated enum PreviewLoader {
             searchStart = startRange.upperBound
         }
 
-        guard var finalImage = bestImage else {
+        guard let bestImage else {
             return nil
         }
-        if !bestHasOwnOrientation, let containerOrientation, (2...8).contains(containerOrientation) {
-            finalImage = applyOrientation(cgImage: finalImage, orientation: containerOrientation)
+        return orientAndEncodeJPEG(
+            cgImage: bestImage,
+            hasOwnOrientation: bestHasOwnOrientation,
+            containerOrientation: containerOrientation,
+            maxPixelSize: maxPixelSize
+        )
+    }
+
+    private static func orientAndEncodeJPEG(
+        cgImage: CGImage,
+        hasOwnOrientation: Bool,
+        containerOrientation: CGImagePropertyOrientation?,
+        maxPixelSize: Int
+    ) -> Data? {
+        let scaled = downsampleIfNeeded(cgImage: cgImage, maxPixelSize: maxPixelSize)
+        var oriented = scaled
+        if !hasOwnOrientation, let containerOrientation, containerOrientation != .up {
+            oriented = applyOrientation(cgImage: scaled, orientation: containerOrientation)
         }
-        return encodeToJPEG(cgImage: finalImage)
+        return encodeToJPEG(cgImage: oriented)
     }
 
     private static func downsampleIfNeeded(cgImage: CGImage, maxPixelSize: Int) -> CGImage {
@@ -454,11 +466,11 @@ nonisolated enum PreviewLoader {
         return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
-    static func applyOrientation(cgImage: CGImage, orientation: UInt32) -> CGImage {
-        guard (2...8).contains(orientation) else { return cgImage }
+    static func applyOrientation(cgImage: CGImage, orientation: CGImagePropertyOrientation) -> CGImage {
+        guard orientation != .up else { return cgImage }
         let w = CGFloat(cgImage.width)
         let h = CGFloat(cgImage.height)
-        let isSwapped = (orientation >= 5 && orientation <= 8)
+        let isSwapped = (orientation == .leftMirrored || orientation == .right || orientation == .rightMirrored || orientation == .left)
         let targetWidth = Int(isSwapped ? h : w)
         let targetHeight = Int(isSwapped ? w : h)
 
@@ -475,21 +487,23 @@ nonisolated enum PreviewLoader {
 
         var transform = CGAffineTransform.identity
         switch orientation {
-        case 2: // Flip horizontal
+        case .up:
+            break
+        case .upMirrored: // Flip horizontal
             transform = transform.translatedBy(x: w, y: 0).scaledBy(x: -1, y: 1)
-        case 3: // 180 deg
+        case .down: // 180 deg
             transform = transform.translatedBy(x: w, y: h).scaledBy(x: -1, y: -1)
-        case 4: // Flip vertical
+        case .downMirrored: // Flip vertical
             transform = transform.translatedBy(x: 0, y: h).scaledBy(x: 1, y: -1)
-        case 5: // Transpose
+        case .leftMirrored: // Transpose
             transform = transform.translatedBy(x: h, y: w).rotated(by: -.pi / 2).scaledBy(x: 1, y: -1)
-        case 6: // Rotate 90 CW
+        case .right: // Rotate 90 CW
             transform = transform.translatedBy(x: 0, y: w).rotated(by: -.pi / 2)
-        case 7: // Transverse
+        case .rightMirrored: // Transverse
             transform = transform.rotated(by: -.pi / 2).scaledBy(x: -1, y: 1)
-        case 8: // Rotate 270 CW (90 CCW)
+        case .left: // Rotate 270 CW (90 CCW)
             transform = transform.translatedBy(x: h, y: 0).rotated(by: .pi / 2)
-        default:
+        @unknown default:
             break
         }
 
@@ -499,7 +513,14 @@ nonisolated enum PreviewLoader {
         return ctx.makeImage() ?? cgImage
     }
 
-    static func extractTIFFOrientation(from data: Data) -> UInt32? {
+    static func applyOrientation(cgImage: CGImage, orientation: UInt32) -> CGImage {
+        guard let propOrientation = CGImagePropertyOrientation(rawValue: orientation) else {
+            return cgImage
+        }
+        return applyOrientation(cgImage: cgImage, orientation: propOrientation)
+    }
+
+    static func extractTIFFOrientation(from data: Data) -> CGImagePropertyOrientation? {
         guard data.count >= 8 else { return nil }
         let isLittleEndian: Bool
         if data[0] == 0x49 && data[1] == 0x49 {
@@ -538,12 +559,14 @@ nonisolated enum PreviewLoader {
             if tag == 274 { // Tag 274 (0x0112): Orientation
                 guard let type = readU16(current + 2) else { break }
                 if type == 3 {
-                    if let val = readU16(current + 8), (1...8).contains(val) {
-                        return UInt32(val)
+                    if let val = readU16(current + 8),
+                       let ori = CGImagePropertyOrientation(rawValue: UInt32(val)) {
+                        return ori
                     }
                 } else if type == 4 {
-                    if let val = readU32(current + 8), (1...8).contains(val) {
-                        return val
+                    if let val = readU32(current + 8),
+                       let ori = CGImagePropertyOrientation(rawValue: val) {
+                        return ori
                     }
                 }
             }
@@ -552,27 +575,23 @@ nonisolated enum PreviewLoader {
         return nil
     }
 
-    static func extractContainerOrientation(from source: CGImageSource?, prefixData: Data? = nil, url: URL? = nil) -> UInt32? {
+    static func extractContainerOrientation(from source: CGImageSource?, prefixData: Data? = nil, url: URL? = nil) -> CGImagePropertyOrientation? {
         if let prefixData, let val = extractTIFFOrientation(from: prefixData) {
             return val
         }
         if let source, CGImageSourceGetCount(source) > 0,
            let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
-            if let num = props[kCGImagePropertyOrientation] as? NSNumber {
-                let val = num.uint32Value
-                if (1...8).contains(val) {
-                    return val
-                }
+            if let num = props[kCGImagePropertyOrientation] as? NSNumber,
+               let ori = CGImagePropertyOrientation(rawValue: num.uint32Value) {
+                return ori
             }
             if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any],
-               let num = tiff[kCGImagePropertyTIFFOrientation] as? NSNumber {
-                let val = num.uint32Value
-                if (1...8).contains(val) {
-                    return val
-                }
+               let num = tiff[kCGImagePropertyTIFFOrientation] as? NSNumber,
+               let ori = CGImagePropertyOrientation(rawValue: num.uint32Value) {
+                return ori
             }
         }
-        if let url, let handle = try? FileHandle(forReadingFrom: url) {
+        if prefixData == nil, let url, let handle = try? FileHandle(forReadingFrom: url) {
             defer { try? handle.close() }
             if let header = try? handle.read(upToCount: 65536),
                let val = extractTIFFOrientation(from: header) {

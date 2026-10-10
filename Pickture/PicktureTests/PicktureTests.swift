@@ -1005,6 +1005,30 @@ struct CullingSessionDiscoveryAndCacheTests {
         return result
     }
 
+    private func findORFTestFileURL() -> URL? {
+        let fileManager = FileManager.default
+        let relativePath = "testfiles/raws/P9227357.ORF"
+
+        // 1. Check current working directory
+        let cwdCandidate = URL(fileURLWithPath: fileManager.currentDirectoryPath).appendingPathComponent(relativePath)
+        if fileManager.fileExists(atPath: cwdCandidate.path) {
+            return cwdCandidate
+        }
+
+        // 2. Walk upwards from current source file directory
+        var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for _ in 0..<6 {
+            let candidate = dir.appendingPathComponent(relativePath)
+            if fileManager.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+            let parent = dir.deletingLastPathComponent()
+            if parent.path == dir.path { break }
+            dir = parent
+        }
+        return nil
+    }
+
     @Test("RAW preview extraction respects container orientation 6 and 8 for embedded previews and preserves raster/landscape")
     func rawPreviewOrientationEmbeddedPreviewRespectsContainerOrientation6And8() async throws {
         let root = try makeTemporaryDirectory()
@@ -1017,11 +1041,19 @@ struct CullingSessionDiscoveryAndCacheTests {
         let rawData6 = makeSyntheticRAWWithEmbeddedJPEG(orientation: 6, embeddedJPEG: landscapeJPEG)
         try rawData6.write(to: rawURL6)
 
+        // Synchronous extraction
         let result6 = try #require(PreviewLoader.extractImageThumbnail(from: rawURL6, maxPixelSize: 360))
         #expect(result6.strategy == .embeddedPreview)
         let decoded6 = try #require(PreviewLoader.decodeCGImage(from: result6.jpegData))
         #expect(decoded6.height > decoded6.width)
         #expect(decoded6.aspectRatio < 1.0)
+
+        // Asynchronous extraction
+        let asyncResult6 = try #require(await PreviewLoader.extractImageThumbnailAsync(from: rawURL6, maxPixelSize: 360))
+        #expect(asyncResult6.strategy == .embeddedPreview)
+        let asyncDecoded6 = try #require(PreviewLoader.decodeCGImage(from: asyncResult6.jpegData))
+        #expect(asyncDecoded6.height > asyncDecoded6.width)
+        #expect(asyncDecoded6.aspectRatio < 1.0)
 
         // 1b. Orientation 8 (Rotated 270 CW in container): embedded unoriented JPEG must be oriented to portrait
         let rawURL8 = root.appendingPathComponent("SYNTHETIC_ORI_8.ARW")
@@ -1034,16 +1066,14 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(decoded8.height > decoded8.width)
         #expect(decoded8.aspectRatio < 1.0)
 
+        let asyncResult8 = try #require(await PreviewLoader.extractImageThumbnailAsync(from: rawURL8, maxPixelSize: 360))
+        #expect(asyncResult8.strategy == .embeddedPreview)
+        let asyncDecoded8 = try #require(PreviewLoader.decodeCGImage(from: asyncResult8.jpegData))
+        #expect(asyncDecoded8.height > asyncDecoded8.width)
+        #expect(asyncDecoded8.aspectRatio < 1.0)
+
         // 2. Real RAW sample: if testfiles/raws/P9227357.ORF exists on disk and is readable, assert it decodes in portrait
-        let relativeORF = URL(fileURLWithPath: "testfiles/raws/P9227357.ORF")
-        let sourceRootORF = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("testfiles/raws/P9227357.ORF")
-        let orfCandidate = FileManager.default.fileExists(atPath: relativeORF.path) ? relativeORF :
-            (FileManager.default.fileExists(atPath: sourceRootORF.path) ? sourceRootORF : nil)
-        if let orfURL = orfCandidate,
+        if let orfURL = findORFTestFileURL(),
            let handle = try? FileHandle(forReadingFrom: orfURL) {
             try? handle.close()
             let orfResult = try #require(PreviewLoader.extractImageThumbnail(from: orfURL, maxPixelSize: 360))
@@ -1051,6 +1081,12 @@ struct CullingSessionDiscoveryAndCacheTests {
             let decodedORF = try #require(PreviewLoader.decodeCGImage(from: orfResult.jpegData))
             #expect(decodedORF.height > decodedORF.width)
             #expect(decodedORF.aspectRatio < 1.0)
+
+            let asyncORFResult = try #require(await PreviewLoader.extractImageThumbnailAsync(from: orfURL, maxPixelSize: 360))
+            #expect(asyncORFResult.strategy == .embeddedPreview)
+            let asyncDecodedORF = try #require(PreviewLoader.decodeCGImage(from: asyncORFResult.jpegData))
+            #expect(asyncDecodedORF.height > asyncDecodedORF.width)
+            #expect(asyncDecodedORF.aspectRatio < 1.0)
         }
 
         // 3a. Orientation 1 (Normal landscape): landscape RAW remains landscape
@@ -1064,6 +1100,12 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(decoded1.width > decoded1.height)
         #expect(decoded1.aspectRatio > 1.0)
 
+        let asyncResult1 = try #require(await PreviewLoader.extractImageThumbnailAsync(from: rawURL1, maxPixelSize: 360))
+        #expect(asyncResult1.strategy == .embeddedPreview)
+        let asyncDecoded1 = try #require(PreviewLoader.decodeCGImage(from: asyncResult1.jpegData))
+        #expect(asyncDecoded1.width > asyncDecoded1.height)
+        #expect(asyncDecoded1.aspectRatio > 1.0)
+
         // 3b. Standard raster JPG with Orientation 6 continues to extract portrait without regression
         let rasterURL6 = root.appendingPathComponent("RASTER_ORI_6.JPG")
         let rasterData6 = try makeSampleRasterJPEGDataWithOrientation(orientation: 6, width: 120, height: 80)
@@ -1073,41 +1115,40 @@ struct CullingSessionDiscoveryAndCacheTests {
         let decodedRaster = try #require(PreviewLoader.decodeCGImage(from: rasterResult.jpegData))
         #expect(decodedRaster.height > decodedRaster.width)
         #expect(decodedRaster.aspectRatio < 1.0)
+
+        // 4. Session integration: MediaItem extraction, caching, aspect ratio, and preview loading
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".test-store", isDirectory: true))
+        try await session.openFolderAsync(at: root)
+        #expect(session.items.count >= 4)
+
+        let sessionRawItem6 = try #require(session.items.first { $0.baseName == "SYNTHETIC_ORI_6" })
+        let thumbItemResult6 = try #require(await PreviewLoader.extractThumbnail(for: sessionRawItem6, previewSource: .preferRAW, maxPixelSize: 360))
+        #expect(thumbItemResult6.strategy == .embeddedPreview)
+        let thumbItemDecoded6 = try #require(PreviewLoader.decodeCGImage(from: thumbItemResult6.jpegData))
+        #expect(thumbItemDecoded6.height > thumbItemDecoded6.width)
+        #expect(thumbItemDecoded6.aspectRatio < 1.0)
+
+        let sessionThumb6 = try #require(await session.loadThumbnailData(for: sessionRawItem6))
+        let sessionThumbDecoded6 = try #require(PreviewLoader.decodeCGImage(from: sessionThumb6))
+        #expect(sessionThumbDecoded6.height > sessionThumbDecoded6.width)
+        #expect(sessionThumbDecoded6.aspectRatio < 1.0)
+        #expect(session.thumbnailAspectRatio(for: sessionRawItem6) < 1.0)
+
+        let sessionPreview6 = try #require(await session.loadPreviewImageData(for: sessionRawItem6, maxPixelSize: 1024))
+        let sessionPreviewDecoded6 = try #require(PreviewLoader.decodeCGImage(from: sessionPreview6))
+        #expect(sessionPreviewDecoded6.height > sessionPreviewDecoded6.width)
+        #expect(sessionPreviewDecoded6.aspectRatio < 1.0)
+
+        let sessionRawItem1 = try #require(session.items.first { $0.baseName == "SYNTHETIC_ORI_1" })
+        let sessionThumb1 = try #require(await session.loadThumbnailData(for: sessionRawItem1))
+        let sessionThumbDecoded1 = try #require(PreviewLoader.decodeCGImage(from: sessionThumb1))
+        #expect(sessionThumbDecoded1.width > sessionThumbDecoded1.height)
+        #expect(sessionThumbDecoded1.aspectRatio > 1.0)
+        #expect(session.thumbnailAspectRatio(for: sessionRawItem1) > 1.0)
     }
 
     private func makeSampleLandscapeJPEGData(width: Int = 120, height: Int = 80) throws -> Data {
-        let pixels = [UInt8](repeating: 160, count: width * height * 4)
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
-              let cgImage = CGImage(
-                  width: width,
-                  height: height,
-                  bitsPerComponent: 8,
-                  bitsPerPixel: 32,
-                  bytesPerRow: width * 4,
-                  space: colorSpace,
-                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                  provider: provider,
-                  decode: nil,
-                  shouldInterpolate: false,
-                  intent: .defaultIntent
-              ) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        let mutableData = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(
-            mutableData as CFMutableData,
-            UTType.jpeg.identifier as CFString,
-            1,
-            nil
-        ) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        CGImageDestinationAddImage(destination, cgImage, nil)
-        guard CGImageDestinationFinalize(destination) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        return mutableData as Data
+        try makeSampleRasterJPEGDataWithOrientation(orientation: 1, width: width, height: height)
     }
 
     private func makeSampleRasterJPEGDataWithOrientation(orientation: UInt32, width: Int = 120, height: Int = 80) throws -> Data {
