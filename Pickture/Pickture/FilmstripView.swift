@@ -704,17 +704,10 @@ struct FilmstripThumbnailCell: View, Equatable {
         thumbnail ?? cachedThumbnail
     }
 
-    private var currentAspectRatio: CGFloat {
-        CullingLayoutCalculator.resolveAspectRatio(
-            aspectRatio: aspectRatio,
-            displayedThumbnail: displayedImage,
-            mediaKind: item.kind
-        )
-    }
-
     private var thumbnailSize: CGSize {
         CullingLayoutCalculator.filmstripThumbnailSize(
-            aspectRatio: currentAspectRatio,
+            aspectRatio: aspectRatio,
+            displayedThumbnail: displayedImage,
             dockPosition: dockPosition,
             mediaKind: item.kind
         )

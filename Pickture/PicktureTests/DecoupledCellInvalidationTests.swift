@@ -333,6 +333,46 @@ struct DecoupledCellInvalidationTests {
         #expect(rightSize.width == 112.0)
         #expect(rightSize.height == 75.0)
 
+        // Filmstrip thumbnail size helper (Ticket 4 AC 2) with optional aspectRatio & displayedThumbnail
+        let helperBottomDefault = CullingLayoutCalculator.filmstripThumbnailSize(
+            aspectRatio: nil,
+            displayedThumbnail: nil,
+            dockPosition: .bottom,
+            mediaKind: .photo
+        )
+        #expect(helperBottomDefault.height == 72.0)
+        #expect(helperBottomDefault.width == 108.0) // 1.5 fallback -> 108
+
+        let helperBottomVideo = CullingLayoutCalculator.filmstripThumbnailSize(
+            aspectRatio: nil,
+            displayedThumbnail: nil,
+            dockPosition: .bottom,
+            mediaKind: .video
+        )
+        #expect(helperBottomVideo.height == 72.0)
+        #expect(helperBottomVideo.width == 128.0) // 1.777 * 72 = 127.9 -> 128 clamped
+
+        let context = CGContext(
+            data: nil,
+            width: 200,
+            height: 100,
+            bitsPerComponent: 8,
+            bytesPerRow: 800,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )
+        if let dummyCGImage = context?.makeImage() {
+            let helperWithImage = CullingLayoutCalculator.filmstripThumbnailSize(
+                aspectRatio: nil,
+                displayedThumbnail: dummyCGImage,
+                dockPosition: .bottom,
+                mediaKind: .photo
+            )
+            // 200/100 = 2.0 -> 72 * 2.0 = 144 -> clamped to 128
+            #expect(helperWithImage.height == 72.0)
+            #expect(helperWithImage.width == 128.0)
+        }
+
         // Grid silhouette size
         let silhouette = CullingLayoutCalculator.gridItemSilhouetteSize(
             aspectRatio: 1.5,
@@ -355,17 +395,17 @@ struct DecoupledCellInvalidationTests {
 
         // Border tap direction detection
         let containerSize = CGSize(width: 1000.0, height: 800.0)
-        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 30.0, y: 400.0), containerSize: containerSize) == .previous)
-        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 64.0, y: 400.0), containerSize: containerSize) == .previous)
-        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 65.0, y: 400.0), containerSize: containerSize) == nil)
-        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 500.0, y: 400.0), containerSize: containerSize) == nil)
-        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 935.0, y: 400.0), containerSize: containerSize) == nil)
-        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 936.0, y: 400.0), containerSize: containerSize) == .next)
-        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 990.0, y: 400.0), containerSize: containerSize) == .next)
+        #expect(CullingLayoutCalculator.borderTapDirection(at: CGPoint(x: 30.0, y: 400.0), in: containerSize) == .previous)
+        #expect(CullingLayoutCalculator.borderTapDirection(at: CGPoint(x: 64.0, y: 400.0), in: containerSize) == .previous)
+        #expect(CullingLayoutCalculator.borderTapDirection(at: CGPoint(x: 65.0, y: 400.0), in: containerSize) == nil)
+        #expect(CullingLayoutCalculator.borderTapDirection(at: CGPoint(x: 500.0, y: 400.0), in: containerSize) == nil)
+        #expect(CullingLayoutCalculator.borderTapDirection(at: CGPoint(x: 935.0, y: 400.0), in: containerSize) == nil)
+        #expect(CullingLayoutCalculator.borderTapDirection(at: CGPoint(x: 936.0, y: 400.0), in: containerSize) == .next)
+        #expect(CullingLayoutCalculator.borderTapDirection(at: CGPoint(x: 990.0, y: 400.0), in: containerSize) == .next)
 
         // Invalid container sizes
-        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 10.0, y: 10.0), containerSize: .zero) == nil)
-        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 10.0, y: 10.0), containerSize: CGSize(width: -100.0, height: 100.0)) == nil)
+        #expect(CullingLayoutCalculator.borderTapDirection(at: CGPoint(x: 10.0, y: 10.0), in: .zero) == nil)
+        #expect(CullingLayoutCalculator.borderTapDirection(at: CGPoint(x: 10.0, y: 10.0), in: CGSize(width: -100.0, height: 100.0)) == nil)
     }
 
     @Test("CullingLayoutCalculator computes grid item silhouette size from column width")

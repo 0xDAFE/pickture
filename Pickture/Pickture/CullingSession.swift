@@ -296,7 +296,7 @@ final class CullingSession: CullingInteractionTarget {
     @discardableResult
     func handleBorderTap(at location: CGPoint, in containerSize: CGSize) -> Bool {
         guard isBorderTapNavigationEnabled else { return false }
-        guard let direction = CullingLayoutCalculator.isBorderTapZone(location: location, containerSize: containerSize) else {
+        guard let direction = CullingLayoutCalculator.borderTapDirection(at: location, in: containerSize) else {
             return false
         }
         switch direction {
@@ -390,6 +390,13 @@ final class CullingSession: CullingInteractionTarget {
     @discardableResult
     func undoLastSwipe() -> Bool {
         interactionController.undoLastSwipe()
+    }
+
+    func restoreSwipeState(for itemID: String, metadata: CurationMetadata) -> Bool {
+        guard let item = items.first(where: { $0.id == itemID }) else { return false }
+        updateCurationMetadata(metadata, for: item)
+        selectedItemID = itemID
+        return true
     }
 
     var formattedCacheUsage: String {
@@ -740,11 +747,6 @@ final class CullingSession: CullingInteractionTarget {
             cleanCloseSession()
         }
         return result
-    }
-
-    func reset() {
-        interactionController.clearSwipeHistory()
-        cleanCloseSession()
     }
 
     private func cleanCloseSession() {

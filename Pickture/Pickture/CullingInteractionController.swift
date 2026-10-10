@@ -5,12 +5,10 @@ import Observation
 @MainActor
 protocol CullingInteractionTarget: AnyObject {
     var selectedItem: MediaItem? { get }
-    var selectedItemID: String? { get set }
-    var isAutoAdvanceEnabled: Bool { get set }
-    var items: [MediaItem] { get }
+    var selectedItemID: String? { get }
     func applyCurationAction(_ action: CurationAction, to item: MediaItem, shouldAutoAdvance: Bool)
     func curationMetadata(for item: MediaItem) -> CurationMetadata
-    func updateCurationMetadata(_ metadata: CurationMetadata, for item: MediaItem)
+    func restoreSwipeState(for itemID: String, metadata: CurationMetadata) -> Bool
     func selectNextItem()
     func selectPreviousItem()
     func selectFirstItem()
@@ -160,17 +158,20 @@ final class CullingInteractionController {
             direction: direction
         )
         swipeHistory.append(record)
-        target.selectNextItem()
+        if target.selectedItemID == nil || target.selectedItemID == item.id {
+            target.selectNextItem()
+        }
         return true
     }
 
     @discardableResult
     func undoLastSwipe() -> Bool {
         guard let target else { return false }
-        guard let last = swipeHistory.popLast() else { return false }
-        guard let item = target.items.first(where: { $0.id == last.itemID }) else { return false }
-        target.updateCurationMetadata(last.previousMetadata, for: item)
-        target.selectedItemID = last.itemID
+        guard let last = swipeHistory.last else { return false }
+        guard target.restoreSwipeState(for: last.itemID, metadata: last.previousMetadata) else {
+            return false
+        }
+        _ = swipeHistory.popLast()
         return true
     }
 

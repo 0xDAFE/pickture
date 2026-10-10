@@ -16,7 +16,7 @@ enum CullingLayoutCalculator {
         return min(containerWidth * 0.12, 64.0)
     }
 
-    static func isBorderTapZone(location: CGPoint, containerSize: CGSize) -> BorderTapDirection? {
+    static func borderTapDirection(at location: CGPoint, in containerSize: CGSize) -> BorderTapDirection? {
         guard containerSize.width > 0 else { return nil }
         let zoneWidth = borderTapZoneWidth(for: containerSize.width)
         guard zoneWidth > 0 else { return nil }
@@ -26,6 +26,24 @@ enum CullingLayoutCalculator {
             return .next
         }
         return nil
+    }
+
+    static func filmstripThumbnailSize(
+        aspectRatio: CGFloat?,
+        displayedThumbnail: CGImage? = nil,
+        dockPosition: FilmstripDockPosition,
+        mediaKind: MediaKind = .photo
+    ) -> CGSize {
+        let resolvedRatio = resolveAspectRatio(
+            aspectRatio: aspectRatio,
+            displayedThumbnail: displayedThumbnail,
+            mediaKind: mediaKind
+        )
+        return filmstripThumbnailSize(
+            aspectRatio: resolvedRatio,
+            dockPosition: dockPosition,
+            mediaKind: mediaKind
+        )
     }
 
     static func filmstripThumbnailSize(

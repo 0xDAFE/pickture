@@ -13,10 +13,19 @@ final class MockCullingInteractionTarget: CullingInteractionTarget {
     var viewMode: ViewMode = .grid
     var previewSource: PreviewSource = .preferRaster
     var metadataByItemID: [String: CurationMetadata] = [:]
+    var shouldFailRestoreSwipe: Bool = false
 
     init(items: [MediaItem] = []) {
         self.items = items
         self.selectedItemID = items.first?.id
+    }
+
+    func restoreSwipeState(for itemID: String, metadata: CurationMetadata) -> Bool {
+        if shouldFailRestoreSwipe { return false }
+        guard let item = items.first(where: { $0.id == itemID }) else { return false }
+        updateCurationMetadata(metadata, for: item)
+        selectedItemID = itemID
+        return true
     }
 
     var selectedItem: MediaItem? {
@@ -301,6 +310,33 @@ struct CullingInteractionControllerTests {
         #expect(controller.swipeHistory.count == 3)
     }
 
+    @Test("Item-specific swipe does not advance selection when swiping an unselected item")
+    func itemSpecificSwipeDoesNotAdvanceSelectionForUnselectedItem() {
+        let items = makeTestItems()
+        let target = MockCullingInteractionTarget(items: items)
+        let controller = CullingInteractionController(target: target)
+
+        #expect(target.selectedItemID == "item1")
+
+        // 1. Swipe on item2 (which is NOT selected): curation updates, selection remains on item1
+        let swipedUnselected = controller.executeSwipe(.right, for: items[1])
+        #expect(swipedUnselected == true)
+        #expect(target.curationMetadata(for: items[1]).pickFlag == .picked)
+        #expect(target.selectedItemID == "item1")
+
+        // 2. Swipe on item1 (which IS selected): curation updates and selection advances to item2
+        let swipedSelected = controller.executeSwipe(.left, for: items[0])
+        #expect(swipedSelected == true)
+        #expect(target.curationMetadata(for: items[0]).pickFlag == .rejected)
+        #expect(target.selectedItemID == "item2")
+
+        // 3. Swipe when selectedItemID is nil: curation updates and selectNextItem selects first item
+        target.selectedItemID = nil
+        let swipedWhenNil = controller.executeSwipe(.right, for: items[0])
+        #expect(swipedWhenNil == true)
+        #expect(target.selectedItemID == "item1")
+    }
+
     // MARK: - Undo Last Swipe
 
     @Test("Undo last swipe restores previous metadata and item selection")
@@ -335,6 +371,30 @@ struct CullingInteractionControllerTests {
         #expect(controller.executeCommand(.undoLastSwipe) == true)
         #expect(target.selectedItemID == "item1")
         #expect(controller.canUndoSwipe == false)
+    }
+
+    @Test("Non-destructive undo retains swipe history and canUndoSwipe when target cannot restore item")
+    func nonDestructiveUndoRetainsHistoryOnFailure() {
+        let items = makeTestItems()
+        let target = MockCullingInteractionTarget(items: items)
+        let controller = CullingInteractionController(target: target)
+
+        #expect(controller.executeSwipe(.right) == true)
+        #expect(controller.canUndoSwipe == true)
+        #expect(controller.swipeHistory.count == 1)
+
+        // 1. When target fails to restore state (e.g. item deleted from session or invalid item ID)
+        target.shouldFailRestoreSwipe = true
+        let undoResult = controller.undoLastSwipe()
+        #expect(undoResult == false)
+        #expect(controller.canUndoSwipe == true)
+        #expect(controller.swipeHistory.count == 1)
+
+        // 2. When target is subsequently able to restore state
+        target.shouldFailRestoreSwipe = false
+        #expect(controller.undoLastSwipe() == true)
+        #expect(controller.canUndoSwipe == false)
+        #expect(controller.swipeHistory.isEmpty == true)
     }
 
     // MARK: - Edge Cases
