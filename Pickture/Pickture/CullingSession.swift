@@ -1126,7 +1126,7 @@ final class CullingSession {
         let mode = self.subfolderMode
         let storeURL = self.storageRootURL
         let discoveredItems = try await Task.detached(priority: .userInitiated) {
-            try Self.discoverItems(in: rootURL, mode: mode, storageRootURL: storeURL)
+            try MediaDiscovery.discoverItems(in: rootURL, mode: mode, storageRootURL: storeURL)
         }.value
         self.items = discoveredItems
         initializeMetadata(for: self.items)
@@ -1223,7 +1223,7 @@ final class CullingSession {
         var accumulatedItems: [MediaItem] = []
         var hasSetCurrentFolder = false
 
-        let stream = Self.streamDiscoveredItems(
+        let stream = MediaDiscovery.streamDiscoveredItems(
             from: resolvedURL,
             mode: subfolderMode,
             storageRootURL: storageRootURL
@@ -1238,7 +1238,7 @@ final class CullingSession {
                 }
                 if Task.isCancelled { break }
                 accumulatedItems.append(contentsOf: batch.items)
-                self.items = accumulatedItems.sorted(by: Self.mediaItemSortComparator)
+                self.items = accumulatedItems.sorted(by: MediaDiscovery.mediaItemSortComparator)
                 self.initializeMetadata(for: batch.items)
                 self.openFolderProgress = batch.progress
                 await Task.yield()
@@ -1308,7 +1308,7 @@ final class CullingSession {
         self.isDiscovering = true
         defer { self.isDiscovering = false }
         let discoveredItems = try await Task.detached(priority: .userInitiated) {
-            try Self.discoverItems(in: rootURL, mode: mode, storageRootURL: storeURL)
+            try MediaDiscovery.discoverItems(in: rootURL, mode: mode, storageRootURL: storeURL)
         }.value
         guard self.subfolderMode == mode, self.currentFolderURL == currentFolderURL else { return }
         self.items = discoveredItems
@@ -1554,7 +1554,7 @@ final class CullingSession {
     }
 
     func discoverItems(in rootURL: URL, mode: SubfolderMode) throws -> [MediaItem] {
-        try Self.discoverItems(in: rootURL, mode: mode, storageRootURL: storageRootURL)
+        try MediaDiscovery.discoverItems(in: rootURL, mode: mode, storageRootURL: storageRootURL)
     }
 
     typealias DiscoveredBatch = MediaDiscovery.DiscoveredBatch
@@ -1589,47 +1589,17 @@ final class CullingSession {
         MediaDiscovery.mediaItemSortComparator(lhs: lhs, rhs: rhs)
     }
 
-    nonisolated static func isIgnoredNonMediaDirectory(name: String) -> Bool {
-        MediaDiscovery.isIgnoredNonMediaDirectory(name: name)
-    }
-
-    nonisolated static func collectDirectories(
+    nonisolated static func streamDiscoveredItems(
         from rootURL: URL,
         mode: SubfolderMode,
         storageRootURL: URL,
         fileManager: FileManager = FileManager()
-    ) throws -> [URL] {
-        try MediaDiscovery.collectDirectories(
-            from: rootURL,
-            mode: mode,
-            storageRootURL: storageRootURL,
-            fileManager: fileManager
-        )
-    }
-
-    nonisolated static func streamDiscoveredItems(
-        from rootURL: URL,
-        mode: SubfolderMode,
-        storageRootURL: URL
     ) -> AsyncThrowingStream<DiscoveredBatch, Error> {
         MediaDiscovery.streamDiscoveredItems(
             from: rootURL,
             mode: mode,
-            storageRootURL: storageRootURL
-        )
-    }
-
-    nonisolated static func pairDirectoryMediaFiles(
-        _ files: [MediaFile],
-        sidecarsByLowerBase: [String: URL],
-        directoryURL: URL,
-        rootURL: URL
-    ) -> [MediaItem] {
-        MediaDiscovery.pairDirectoryMediaFiles(
-            files,
-            sidecarsByLowerBase: sidecarsByLowerBase,
-            directoryURL: directoryURL,
-            rootURL: rootURL
+            storageRootURL: storageRootURL,
+            fileManager: fileManager
         )
     }
 }

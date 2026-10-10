@@ -50,6 +50,7 @@ nonisolated enum MediaDiscovery {
 
         var mediaFiles: [MediaFile] = []
         var sidecarsByLowerBase: [String: URL] = [:]
+        var exactBasenameSidecars: Set<String> = []
 
         for fileURL in contents {
             let values = try? fileURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
@@ -58,10 +59,24 @@ nonisolated enum MediaDiscovery {
             }
             let ext = fileURL.pathExtension.lowercased()
             if ext == "xmp" {
-                let baseLower = fileURL.deletingPathExtension().lastPathComponent.lowercased()
-                sidecarsByLowerBase[baseLower] = fileURL.standardizedFileURL
-                let doubleBase = URL(fileURLWithPath: baseLower).deletingPathExtension().lastPathComponent
-                sidecarsByLowerBase[doubleBase] = fileURL.standardizedFileURL
+                let urlWithoutXmp = fileURL.deletingPathExtension()
+                let nameWithoutXmp = urlWithoutXmp.lastPathComponent
+                let innerExt = urlWithoutXmp.pathExtension.lowercased()
+                let isDarktableFormat = !innerExt.isEmpty && MediaFormatKind.classify(fileExtension: innerExt) != nil
+
+                if isDarktableFormat {
+                    let fileKey = nameWithoutXmp.lowercased()
+                    let doubleBase = urlWithoutXmp.deletingPathExtension().lastPathComponent.lowercased()
+                    sidecarsByLowerBase[fileKey] = fileURL.standardizedFileURL
+                    // Only populate doubleBase fallback if not already claimed by an exact <basename>.xmp
+                    if !exactBasenameSidecars.contains(doubleBase) && sidecarsByLowerBase[doubleBase] == nil {
+                        sidecarsByLowerBase[doubleBase] = fileURL.standardizedFileURL
+                    }
+                } else {
+                    let baseLower = nameWithoutXmp.lowercased()
+                    sidecarsByLowerBase[baseLower] = fileURL.standardizedFileURL
+                    exactBasenameSidecars.insert(baseLower)
+                }
                 continue
             }
             guard let formatKind = MediaFormatKind.classify(fileExtension: ext) else {
@@ -151,12 +166,13 @@ nonisolated enum MediaDiscovery {
     static func streamDiscoveredItems(
         from rootURL: URL,
         mode: SubfolderMode,
-        storageRootURL: URL
+        storageRootURL: URL,
+        fileManager: FileManager = FileManager()
     ) -> AsyncThrowingStream<DiscoveredBatch, Error> {
         AsyncThrowingStream { continuation in
             let task = Task.detached(priority: .userInitiated) {
                 do {
-                    let fm = FileManager()
+                    let fm = fileManager
                     let standardizedRoot = rootURL.standardizedFileURL
                     var isDir: ObjCBool = false
                     guard fm.fileExists(atPath: standardizedRoot.path, isDirectory: &isDir), isDir.boolValue else {
@@ -201,7 +217,7 @@ nonisolated enum MediaDiscovery {
         directoryURL: URL,
         rootURL: URL
     ) -> [MediaItem] {
-        var photosByLowerBase: [String: [MediaFile]] = [:]
+        var mediaFilesByLowerBase: [String: [MediaFile]] = [:]
         var result: [MediaItem] = []
 
         let relativeDir: String = {
@@ -215,128 +231,118 @@ nonisolated enum MediaDiscovery {
             return directoryURL.lastPathComponent
         }()
 
+        func resolveSidecarURL(for item: MediaItem, lowerBase: String) -> URL? {
+            if let sidecar = sidecarsByLowerBase[lowerBase] {
+                return sidecar
+            }
+            let primaryFileNameKey = item.primaryFile.fileName.lowercased()
+            if let sidecar = sidecarsByLowerBase[primaryFileNameKey] {
+                return sidecar
+            }
+            if let rawFile = item.mediaPair?.rawFile {
+                let rawFileNameKey = rawFile.fileName.lowercased()
+                if let sidecar = sidecarsByLowerBase[rawFileNameKey] {
+                    return sidecar
+                }
+            }
+            return SidecarCodec.resolveSidecarReadURL(for: item)
+        }
+
+        func makeItem(
+            id: String,
+            baseName: String,
+            kind: MediaKind,
+            primaryFile: MediaFile,
+            mediaPair: MediaPair?
+        ) -> MediaItem {
+            let lowerBase = baseName.lowercased()
+            let prototype = MediaItem(
+                id: id,
+                baseName: baseName,
+                directoryURL: directoryURL,
+                relativeDirectoryPath: relativeDir,
+                kind: kind,
+                primaryFile: primaryFile,
+                mediaPair: mediaPair,
+                sidecarURL: nil
+            )
+            let sidecarURL = resolveSidecarURL(for: prototype, lowerBase: lowerBase)
+            return MediaItem(
+                id: id,
+                baseName: baseName,
+                directoryURL: directoryURL,
+                relativeDirectoryPath: relativeDir,
+                kind: kind,
+                primaryFile: primaryFile,
+                mediaPair: mediaPair,
+                sidecarURL: sidecarURL
+            )
+        }
+
         for file in files {
             if file.formatKind == .video {
-                let lowerBase = file.baseName.lowercased()
-                let item = MediaItem(
-                    id: file.id,
-                    baseName: file.baseName,
-                    directoryURL: directoryURL,
-                    relativeDirectoryPath: relativeDir,
-                    kind: .video,
-                    primaryFile: file,
-                    mediaPair: nil,
-                    sidecarURL: nil
-                )
-                let sidecar = SidecarCodec.resolveSidecarReadURL(for: item) ?? sidecarsByLowerBase[lowerBase]
                 result.append(
-                    MediaItem(
+                    makeItem(
                         id: file.id,
                         baseName: file.baseName,
-                        directoryURL: directoryURL,
-                        relativeDirectoryPath: relativeDir,
                         kind: .video,
                         primaryFile: file,
-                        mediaPair: nil,
-                        sidecarURL: sidecar
+                        mediaPair: nil
                     )
                 )
             } else {
-                photosByLowerBase[file.baseName.lowercased(), default: []].append(file)
+                mediaFilesByLowerBase[file.baseName.lowercased(), default: []].append(file)
             }
         }
 
-        for (lowerBase, candidates) in photosByLowerBase {
+        for (lowerBase, candidates) in mediaFilesByLowerBase {
             let raws = candidates
                 .filter { $0.formatKind == .raw }
                 .sorted { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }
             let rasters = candidates
                 .filter { $0.formatKind == .raster }
                 .sorted {
-                    let p0 = MediaFormatKind.rasterPriority(fileExtension: $0.fileExtension)
-                    let p1 = MediaFormatKind.rasterPriority(fileExtension: $1.fileExtension)
-                    if p0 != p1 { return p0 < p1 }
+                    let lhsPriority = MediaFormatKind.rasterPriority(fileExtension: $0.fileExtension)
+                    let rhsPriority = MediaFormatKind.rasterPriority(fileExtension: $1.fileExtension)
+                    if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
                     return $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending
                 }
 
             if let primaryRaw = raws.first, let primaryRaster = rasters.first {
                 let pair = MediaPair(rawFile: primaryRaw, rasterFile: primaryRaster)
                 let itemID = "\(directoryURL.path)#pair:\(lowerBase)"
-                let pairItem = MediaItem(
-                    id: itemID,
-                    baseName: primaryRaw.baseName,
-                    directoryURL: directoryURL,
-                    relativeDirectoryPath: relativeDir,
-                    kind: .photo,
-                    primaryFile: primaryRaster,
-                    mediaPair: pair,
-                    sidecarURL: nil
-                )
-                let sidecarURL = SidecarCodec.resolveSidecarReadURL(for: pairItem) ?? sidecarsByLowerBase[lowerBase]
-
                 result.append(
-                    MediaItem(
+                    makeItem(
                         id: itemID,
                         baseName: primaryRaw.baseName,
-                        directoryURL: directoryURL,
-                        relativeDirectoryPath: relativeDir,
                         kind: .photo,
                         primaryFile: primaryRaster,
-                        mediaPair: pair,
-                        sidecarURL: sidecarURL
+                        mediaPair: pair
                     )
                 )
 
                 // Preserve any additional unpaired files sharing the same basename in this directory
                 let remainingFiles = Array(raws.dropFirst()) + Array(rasters.dropFirst())
                 for extraFile in remainingFiles.sorted(by: { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }) {
-                    let extraItem = MediaItem(
-                        id: extraFile.id,
-                        baseName: extraFile.baseName,
-                        directoryURL: directoryURL,
-                        relativeDirectoryPath: relativeDir,
-                        kind: .photo,
-                        primaryFile: extraFile,
-                        mediaPair: nil,
-                        sidecarURL: nil
-                    )
-                    let extraSidecar = SidecarCodec.resolveSidecarReadURL(for: extraItem) ?? sidecarsByLowerBase[lowerBase]
                     result.append(
-                        MediaItem(
+                        makeItem(
                             id: extraFile.id,
                             baseName: extraFile.baseName,
-                            directoryURL: directoryURL,
-                            relativeDirectoryPath: relativeDir,
                             kind: .photo,
                             primaryFile: extraFile,
-                            mediaPair: nil,
-                            sidecarURL: extraSidecar
+                            mediaPair: nil
                         )
                     )
                 }
             } else {
                 for single in candidates.sorted(by: { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }) {
-                    let singleItem = MediaItem(
-                        id: single.id,
-                        baseName: single.baseName,
-                        directoryURL: directoryURL,
-                        relativeDirectoryPath: relativeDir,
-                        kind: .photo,
-                        primaryFile: single,
-                        mediaPair: nil,
-                        sidecarURL: nil
-                    )
-                    let singleSidecar = SidecarCodec.resolveSidecarReadURL(for: singleItem) ?? sidecarsByLowerBase[lowerBase]
                     result.append(
-                        MediaItem(
+                        makeItem(
                             id: single.id,
                             baseName: single.baseName,
-                            directoryURL: directoryURL,
-                            relativeDirectoryPath: relativeDir,
                             kind: .photo,
                             primaryFile: single,
-                            mediaPair: nil,
-                            sidecarURL: singleSidecar
+                            mediaPair: nil
                         )
                     )
                 }
