@@ -146,7 +146,8 @@ nonisolated enum MediaDiscovery {
         ) {
             for case let url as URL in enumerator {
                 let standardized = url.standardizedFileURL
-                if standardized.path.hasPrefix(storagePathPrefix) || Self.isIgnoredNonMediaDirectory(name: standardized.lastPathComponent) {
+                let isStoragePath = standardized.path == storagePathPrefix || standardized.path.hasPrefix(storagePathPrefix + "/")
+                if isStoragePath || Self.isIgnoredNonMediaDirectory(name: standardized.lastPathComponent) {
                     enumerator.skipDescendants()
                     continue
                 }
@@ -161,18 +162,18 @@ nonisolated enum MediaDiscovery {
     }
 
     /// Streams discovered items asynchronously in directory batches.
-    /// Traversal runs in Task.detached at .userInitiated priority with an isolated FileManager
+    /// Traversal runs in Task.detached at .userInitiated priority with an isolated local FileManager
     /// to eliminate Main Thread NAS beachballs and stream results progressively to the UI.
     static func streamDiscoveredItems(
         from rootURL: URL,
         mode: SubfolderMode,
         storageRootURL: URL,
-        fileManager: FileManager = FileManager()
+        fileManagerFactory: (@Sendable () -> FileManager)? = nil
     ) -> AsyncThrowingStream<DiscoveredBatch, Error> {
         AsyncThrowingStream { continuation in
             let task = Task.detached(priority: .userInitiated) {
                 do {
-                    let fm = fileManager
+                    let fm = fileManagerFactory?() ?? FileManager()
                     let standardizedRoot = rootURL.standardizedFileURL
                     var isDir: ObjCBool = false
                     guard fm.fileExists(atPath: standardizedRoot.path, isDirectory: &isDir), isDir.boolValue else {

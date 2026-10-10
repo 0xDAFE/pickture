@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Observation
 
 actor ThumbnailQueueActor {
     static let shared = ThumbnailQueueActor(maxConcurrentWorkers: 4)
@@ -87,29 +88,36 @@ actor ThumbnailQueueActor {
 /// Coordinates thumbnail and preview image generation, LIFO concurrency scheduling,
 /// decode limiting, and evictable caching behind a deep module seam.
 @MainActor
+@Observable
 final class MediaPipeline {
+    @ObservationIgnored
     let cache: MediaCache
+    @ObservationIgnored
     let thumbnailQueue: ThumbnailQueueActor
 
-    var totalCachedBytes: Int64 {
-        cache.totalCachedBytes
-    }
-
-    var cacheSizeLimitBytes: Int64 {
-        cache.cacheSizeLimitBytes
-    }
+    private(set) var totalCachedBytes: Int64 = 0
+    private(set) var cacheSizeLimitBytes: Int64 = MediaCache.defaultQuotaBytes
 
     init(
         cacheDirectoryURL: URL,
         initialLimitBytes: Int64 = MediaCache.defaultQuotaBytes,
         maxConcurrentThumbnailWorkers: Int = 4
     ) {
-        self.cache = MediaCache(cacheDirectoryURL: cacheDirectoryURL, initialLimitBytes: initialLimitBytes)
+        let cache = MediaCache(cacheDirectoryURL: cacheDirectoryURL, initialLimitBytes: initialLimitBytes)
+        self.cache = cache
         self.thumbnailQueue = ThumbnailQueueActor(maxConcurrentWorkers: maxConcurrentThumbnailWorkers)
+        self.totalCachedBytes = cache.totalCachedBytes
+        self.cacheSizeLimitBytes = cache.cacheSizeLimitBytes
+    }
+
+    func syncCacheMetrics() {
+        self.totalCachedBytes = cache.totalCachedBytes
+        self.cacheSizeLimitBytes = cache.cacheSizeLimitBytes
     }
 
     func setCacheSizeLimitBytes(_ bytes: Int64) {
         cache.setCacheSizeLimitBytes(bytes)
+        syncCacheMetrics()
     }
 
     func setUserConfiguredCacheSizeLimitBytes(_ limitBytes: Int64) {
@@ -122,6 +130,7 @@ final class MediaPipeline {
 
     func clearCache() {
         cache.clear()
+        syncCacheMetrics()
     }
 
     func flushIndexImmediately() {
@@ -146,6 +155,7 @@ final class MediaPipeline {
     func cachedThumbnailImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) -> CGImage? {
         let key = thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
         guard let cachedData = cache.readData(forKey: key) else {
+            syncCacheMetrics()
             return nil
         }
         return PreviewLoader.decodeCGImage(from: cachedData)
@@ -154,6 +164,7 @@ final class MediaPipeline {
     func cachedPreviewImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 2048) -> CGImage? {
         let key = previewCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
         guard let cachedData = cache.readData(forKey: key) else {
+            syncCacheMetrics()
             return nil
         }
         return PreviewLoader.decodeCGImage(from: cachedData)
@@ -175,6 +186,7 @@ final class MediaPipeline {
             return nil
         }
         cache.storeData(data, forKey: key)
+        syncCacheMetrics()
         return data
     }
 
@@ -184,11 +196,15 @@ final class MediaPipeline {
             return cached
         }
         guard !Task.isCancelled else { return nil }
-        let extracted = await PreviewLoader.extractThumbnail(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        let extracted = await HeavyDecodeLimiter.shared.withPermit { () -> PreviewExtractionResult? in
+            guard !Task.isCancelled else { return nil }
+            return await PreviewLoader.extractThumbnail(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        }
         guard let extracted, !Task.isCancelled else {
             return nil
         }
         cache.storeData(extracted.jpegData, forKey: key)
+        syncCacheMetrics()
         return extracted.jpegData
     }
 

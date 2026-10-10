@@ -20,8 +20,12 @@ final class CullingSession {
         }
     }
     private(set) var recentFolders: [RecentFolder] = []
-    private(set) var mediaCacheTotalBytes: Int64 = 0
-    private(set) var cacheSizeLimitBytes: Int64 = MediaCache.defaultQuotaBytes
+    var mediaCacheTotalBytes: Int64 {
+        mediaPipeline.totalCachedBytes
+    }
+    var cacheSizeLimitBytes: Int64 {
+        mediaPipeline.cacheSizeLimitBytes
+    }
     private(set) var cacheGeneration: Int = 0
 
     var cacheSizeLimitMegabytes: Double {
@@ -480,8 +484,6 @@ final class CullingSession {
         let syncStoreURL = resolvedStorageRoot.appendingPathComponent("MetadataSyncStore", isDirectory: true)
         self.metadataSyncEngine = MetadataSyncEngine(storeDirectoryURL: syncStoreURL)
         self.recentFolders = self.folderAccessService.loadRecentFolders()
-        self.mediaCacheTotalBytes = self.mediaPipeline.totalCachedBytes
-        self.cacheSizeLimitBytes = self.mediaPipeline.cacheSizeLimitBytes
         self.setupMetadataSyncEngineBindings()
     }
 
@@ -512,27 +514,20 @@ final class CullingSession {
     }
 
     func cachedThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) -> CGImage? {
-        let image = mediaPipeline.cachedThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
-        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
-        return image
+        mediaPipeline.cachedThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func setCacheSizeLimitBytes(_ limitBytes: Int64) {
         mediaPipeline.setCacheSizeLimitBytes(limitBytes)
-        self.cacheSizeLimitBytes = mediaPipeline.cacheSizeLimitBytes
-        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
     }
 
     func setUserConfiguredCacheSizeLimitBytes(_ limitBytes: Int64) {
         mediaPipeline.setUserConfiguredCacheSizeLimitBytes(limitBytes)
-        self.cacheSizeLimitBytes = mediaPipeline.cacheSizeLimitBytes
-        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
     }
 
     func clearMediaCache() {
         mediaPipeline.clearCache()
         thumbnailAspectRatios.removeAll()
-        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
         self.cacheGeneration &+= 1
     }
 
@@ -881,9 +876,7 @@ final class CullingSession {
     }
 
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
-        let data = await mediaPipeline.loadThumbnailData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
-        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
-        return data
+        await mediaPipeline.loadThumbnailData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func previewCacheKey(for item: MediaItem, maxPixelSize: Int = 2048) -> String {
@@ -891,15 +884,11 @@ final class CullingSession {
     }
 
     func cachedPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {
-        let image = mediaPipeline.cachedPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
-        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
-        return image
+        mediaPipeline.cachedPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func loadPreviewImageData(for item: MediaItem, maxPixelSize: Int = 2048) async -> Data? {
-        let data = await mediaPipeline.loadPreviewImageData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
-        self.mediaCacheTotalBytes = mediaPipeline.totalCachedBytes
-        return data
+        await mediaPipeline.loadPreviewImageData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func cancelThumbnail(for item: MediaItem, maxPixelSize: Int = 360) {
@@ -1121,13 +1110,13 @@ final class CullingSession {
         from rootURL: URL,
         mode: SubfolderMode,
         storageRootURL: URL,
-        fileManager: FileManager = FileManager()
+        fileManagerFactory: (@Sendable () -> FileManager)? = nil
     ) -> AsyncThrowingStream<DiscoveredBatch, Error> {
         MediaDiscovery.streamDiscoveredItems(
             from: rootURL,
             mode: mode,
             storageRootURL: storageRootURL,
-            fileManager: fileManager
+            fileManagerFactory: fileManagerFactory
         )
     }
 }

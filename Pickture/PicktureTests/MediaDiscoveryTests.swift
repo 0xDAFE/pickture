@@ -168,12 +168,11 @@ struct MediaDiscoveryTests {
         try Data("jpg".utf8).write(to: dir2.appendingPathComponent("IMG_B.JPG"))
 
         let storageRoot = root.appendingPathComponent(".store", isDirectory: true)
-        let customFM = FileManager()
         let stream = MediaDiscovery.streamDiscoveredItems(
             from: root,
             mode: .recursive,
             storageRootURL: storageRoot,
-            fileManager: customFM
+            fileManagerFactory: { FileManager() }
         )
 
         var batches: [MediaDiscovery.DiscoveredBatch] = []
@@ -195,6 +194,28 @@ struct MediaDiscoveryTests {
         #expect(names.contains("IMG_A"))
         #expect(names.contains("IMG_B"))
         #expect(allItems.count == 3)
+    }
+
+    @Test("MediaDiscovery collectDirectories does not skip sibling directory sharing storage root prefix")
+    func collectDirectoriesPreservesSiblingSharingStoragePrefix() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let storageRoot = root.appendingPathComponent("store", isDirectory: true)
+        let siblingDir = root.appendingPathComponent("store-extra", isDirectory: true)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: siblingDir, withIntermediateDirectories: true)
+
+        try Data("jpg".utf8).write(to: siblingDir.appendingPathComponent("PHOTO.JPG"))
+
+        let dirs = try MediaDiscovery.collectDirectories(
+            from: root,
+            mode: .recursive,
+            storageRootURL: storageRoot
+        )
+        let paths = dirs.map(\.standardizedFileURL.path)
+        #expect(paths.contains(siblingDir.standardizedFileURL.path))
+        #expect(!paths.contains(storageRoot.standardizedFileURL.path))
     }
 
     @Test("MediaDiscovery streamDiscoveredItems finishes throwing when given a non-existent directory")

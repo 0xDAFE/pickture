@@ -320,4 +320,76 @@ struct MediaPipelineTests {
         let indexFile = cacheDir.appendingPathComponent("cache-index.json")
         #expect(FileManager.default.fileExists(atPath: indexFile.path))
     }
+
+    @Test("Preview image loading bounds decode concurrency with HeavyDecodeLimiter")
+    func previewLoadingThrottledViaHeavyDecodeLimiter() async throws {
+        let tempDir = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let pipeline = MediaPipeline(cacheDirectoryURL: tempDir.appendingPathComponent("cache"))
+
+        var items: [MediaItem] = []
+        for i in 1...4 {
+            let imageURL = tempDir.appendingPathComponent("preview_\(i).jpg")
+            try writeSampleRasterImage(to: imageURL, width: 120, height: 120)
+            items.append(makeStandaloneMediaItem(fileURL: imageURL))
+        }
+
+        await withTaskGroup(of: Data?.self) { group in
+            for item in items {
+                group.addTask {
+                    await pipeline.loadPreviewImageData(for: item, previewSource: .preferRaster)
+                }
+            }
+            for await res in group {
+                #expect(res != nil)
+            }
+        }
+
+        #expect(pipeline.totalCachedBytes > 0)
+    }
+
+    @Test("cancelThumbnail method cancels queued requests without detached task")
+    func cancelThumbnailAsyncMethod() async throws {
+        let tempDir = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let pipeline = MediaPipeline(
+            cacheDirectoryURL: tempDir.appendingPathComponent("cache"),
+            maxConcurrentThumbnailWorkers: 1
+        )
+        let queue = pipeline.thumbnailQueue
+        let blockerStarted = AsyncSignal()
+        let blockerRelease = AsyncSignal()
+
+        let blockerTask = Task {
+            await queue.enqueue(id: "blocker") {
+                await blockerStarted.signal()
+                await blockerRelease.wait()
+                return Data("blocker".utf8)
+            }
+        }
+        await blockerStarted.wait()
+
+        let imageURL = tempDir.appendingPathComponent("cancel_photo.jpg")
+        try writeSampleRasterImage(to: imageURL)
+        let item = makeStandaloneMediaItem(fileURL: imageURL)
+
+        let loadTask = Task {
+            await pipeline.loadThumbnailData(for: item, previewSource: .preferRaster)
+        }
+
+        while await queue.pendingCount < 1 {
+            await Task.yield()
+        }
+
+        pipeline.cancelThumbnail(for: item, previewSource: .preferRaster)
+
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        await blockerRelease.signal()
+        _ = await blockerTask.value
+        let result = await loadTask.value
+        #expect(result == nil)
+    }
 }

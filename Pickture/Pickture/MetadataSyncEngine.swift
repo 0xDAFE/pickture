@@ -300,6 +300,66 @@ final class MetadataSyncEngine {
         try await flushPendingWrite(for: item)
     }
 
+    enum FlushOutcome: Sendable {
+        case conflict(MetadataConflict)
+        case success(BaseSnapshot)
+    }
+
+    nonisolated static func performDiskFlush(
+        item: MediaItem,
+        pendingCuration: CurationMetadata,
+        base: BaseSnapshot?
+    ) async throws -> FlushOutcome {
+        let readURL = SidecarCodec.resolveSidecarReadURL(for: item)
+        var diskCuration: CurationMetadata? = nil
+        var diskDigest = ""
+
+        if let readURL, let data = SidecarCodec.readData(from: readURL) {
+            diskDigest = SidecarCodec.computeDigest(for: data)
+            if let parsed = try? SidecarCodec.parse(data: data) {
+                diskCuration = parsed.curation
+            }
+        }
+
+        let remoteDigestChanged = (base?.fileDigest != diskDigest)
+
+        let mergeEvaluation = XMPConflictEngine.evaluateThreeWay(
+            itemID: item.id,
+            base: base,
+            local: pendingCuration,
+            remote: diskCuration,
+            remoteDigestChanged: remoteDigestChanged
+        )
+
+        let curationToWrite: CurationMetadata
+
+        switch mergeEvaluation {
+        case .conflict(let conflict):
+            return .conflict(conflict)
+
+        case .cleanMerge(let mergedCuration):
+            if diskCuration == nil && pendingCuration == base?.metadata {
+                return .success(BaseSnapshot(metadata: CurationMetadata(), fileDigest: ""))
+            }
+            curationToWrite = mergedCuration
+
+        case .noChange:
+            curationToWrite = pendingCuration
+        }
+
+        let writtenTargets = try await SidecarCodec.write(curation: curationToWrite, for: item)
+
+        if let primaryTarget = writtenTargets.first, let writtenData = SidecarCodec.readData(from: primaryTarget) {
+            let newDigest = SidecarCodec.computeDigest(for: writtenData)
+            let modDate = (try? primaryTarget.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            let newBase = BaseSnapshot(metadata: curationToWrite, fileDigest: newDigest, modificationDate: modDate)
+            return .success(newBase)
+        } else {
+            let fallbackBase = BaseSnapshot(metadata: curationToWrite, fileDigest: "")
+            return .success(fallbackBase)
+        }
+    }
+
     func flushPendingWrite(for item: MediaItem) async throws {
         let pendingCuration = curationMetadata(for: item.id)
         let base = baseSnapshot(for: item.id)
@@ -307,62 +367,12 @@ final class MetadataSyncEngine {
         syncStateByItemID[item.id] = .loading
         onStateChange?()
 
-        enum FlushOutcome: Sendable {
-            case conflict(MetadataConflict)
-            case success(BaseSnapshot)
-        }
-
         do {
-            let outcome = try await Task.detached(priority: .utility) { () -> FlushOutcome in
-                let readURL = SidecarCodec.resolveSidecarReadURL(for: item)
-                var diskCuration: CurationMetadata? = nil
-                var diskDigest = ""
-
-                if let readURL, let data = SidecarCodec.readData(from: readURL) {
-                    diskDigest = SidecarCodec.computeDigest(for: data)
-                    if let parsed = try? SidecarCodec.parse(data: data) {
-                        diskCuration = parsed.curation
-                    }
-                }
-
-                let remoteDigestChanged = (base?.fileDigest != diskDigest)
-
-                let mergeEvaluation = XMPConflictEngine.evaluateThreeWay(
-                    itemID: item.id,
-                    base: base,
-                    local: pendingCuration,
-                    remote: diskCuration,
-                    remoteDigestChanged: remoteDigestChanged
-                )
-
-                let curationToWrite: CurationMetadata
-
-                switch mergeEvaluation {
-                case .conflict(let conflict):
-                    return .conflict(conflict)
-
-                case .cleanMerge(let mergedCuration):
-                    if diskCuration == nil && pendingCuration == base?.metadata {
-                        return .success(BaseSnapshot(metadata: CurationMetadata(), fileDigest: ""))
-                    }
-                    curationToWrite = mergedCuration
-
-                case .noChange:
-                    curationToWrite = pendingCuration
-                }
-
-                let writtenTargets = try await SidecarCodec.write(curation: curationToWrite, for: item)
-
-                if let primaryTarget = writtenTargets.first, let writtenData = SidecarCodec.readData(from: primaryTarget) {
-                    let newDigest = SidecarCodec.computeDigest(for: writtenData)
-                    let modDate = (try? primaryTarget.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                    let newBase = BaseSnapshot(metadata: curationToWrite, fileDigest: newDigest, modificationDate: modDate)
-                    return .success(newBase)
-                } else {
-                    let fallbackBase = BaseSnapshot(metadata: curationToWrite, fileDigest: "")
-                    return .success(fallbackBase)
-                }
-            }.value
+            let outcome = try await Self.performDiskFlush(
+                item: item,
+                pendingCuration: pendingCuration,
+                base: base
+            )
 
             switch outcome {
             case .conflict(let conflict):
@@ -389,6 +399,15 @@ final class MetadataSyncEngine {
 
     // MARK: - Conflict Resolution
 
+    private func writeAndCreateSnapshot(curation: CurationMetadata, for item: MediaItem) async throws -> BaseSnapshot {
+        let writtenTargets = try await SidecarCodec.write(curation: curation, for: item)
+        let primaryTarget = writtenTargets.first ?? SidecarCodec.resolveSidecarReadURL(for: item)
+        let writtenData = primaryTarget.flatMap { SidecarCodec.readData(from: $0) } ?? Data()
+        let digest = SidecarCodec.computeDigest(for: writtenData)
+        let modDate = primaryTarget.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+        return BaseSnapshot(metadata: curation, fileDigest: digest, modificationDate: modDate)
+    }
+
     func resolveConflict(for item: MediaItem, strategy: ConflictResolutionStrategy) async throws {
         guard let conflict = conflict(for: item.id) else { return }
 
@@ -404,25 +423,13 @@ final class MetadataSyncEngine {
             let modDate = readURL.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
             newBase = BaseSnapshot(metadata: resolvedMetadata, fileDigest: digest, modificationDate: modDate)
 
-        case .useLocal, .cherryPick:
-            let chosen: CurationMetadata
-            switch strategy {
-            case .useLocal:
-                chosen = conflict.local
-            case .cherryPick(let custom):
-                chosen = custom
-            case .useRemote:
-                chosen = conflict.remote
-            }
-            resolvedMetadata = chosen
+        case .useLocal:
+            resolvedMetadata = conflict.local
+            newBase = try await writeAndCreateSnapshot(curation: resolvedMetadata, for: item)
 
-            let writtenTargets = try await SidecarCodec.write(curation: chosen, for: item)
-
-            let primaryTarget = writtenTargets.first ?? SidecarCodec.resolveSidecarReadURL(for: item)
-            let writtenData = primaryTarget.flatMap { SidecarCodec.readData(from: $0) } ?? Data()
-            let digest = SidecarCodec.computeDigest(for: writtenData)
-            let modDate = primaryTarget.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
-            newBase = BaseSnapshot(metadata: resolvedMetadata, fileDigest: digest, modificationDate: modDate)
+        case .cherryPick(let custom):
+            resolvedMetadata = custom
+            newBase = try await writeAndCreateSnapshot(curation: resolvedMetadata, for: item)
         }
 
         metadataByItemID[item.id] = resolvedMetadata
@@ -537,6 +544,22 @@ final class MetadataSyncEngine {
 
         let existingExif = existingExifProvider?(item.id)
 
+        func recordSyncedSnapshot(curation: CurationMetadata?, exif: ExifMetadata?) {
+            let snapshot: BaseSnapshot
+            let effectiveCuration: CurationMetadata
+            if let curation {
+                snapshot = BaseSnapshot(metadata: curation, fileDigest: diskDigest, modificationDate: diskModDate)
+                effectiveCuration = curation
+            } else {
+                snapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+                effectiveCuration = CurationMetadata()
+            }
+            metadataByItemID[item.id] = effectiveCuration
+            syncStateByItemID[item.id] = .synced
+            baseSnapshotByItemID[item.id] = snapshot
+            syncStore.recordBaseSnapshot(snapshot, exif: exif, for: item.id)
+        }
+
         if let persisted {
             if let diskExif, !diskExif.isEmpty {
                 let mergedExif: ExifMetadata
@@ -603,38 +626,13 @@ final class MetadataSyncEngine {
                 conflictsByItemID[item.id] = conflict
                 baseSnapshotByItemID[item.id] = persisted.baseSnapshot
             } else {
-                if let diskCuration {
-                    let snapshot = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
-                    metadataByItemID[item.id] = diskCuration
-                    syncStateByItemID[item.id] = .synced
-                    baseSnapshotByItemID[item.id] = snapshot
-                    syncStore.recordBaseSnapshot(snapshot, exif: existingExif ?? diskExif, for: item.id)
-                } else {
-                    let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
-                    metadataByItemID[item.id] = CurationMetadata()
-                    syncStateByItemID[item.id] = .synced
-                    baseSnapshotByItemID[item.id] = emptySnapshot
-                    syncStore.recordBaseSnapshot(emptySnapshot, exif: existingExif ?? diskExif, for: item.id)
-                }
+                recordSyncedSnapshot(curation: diskCuration, exif: existingExif ?? diskExif)
             }
         } else {
             if let diskExif {
                 onExifDiscovered?(item.id, diskExif)
             }
-
-            if let diskCuration {
-                let snapshot = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
-                metadataByItemID[item.id] = diskCuration
-                syncStateByItemID[item.id] = .synced
-                baseSnapshotByItemID[item.id] = snapshot
-                syncStore.recordBaseSnapshot(snapshot, exif: diskExif, for: item.id)
-            } else {
-                let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
-                metadataByItemID[item.id] = CurationMetadata()
-                syncStateByItemID[item.id] = .synced
-                baseSnapshotByItemID[item.id] = emptySnapshot
-                syncStore.recordBaseSnapshot(emptySnapshot, exif: existingExif, for: item.id)
-            }
+            recordSyncedSnapshot(curation: diskCuration, exif: diskExif ?? existingExif)
         }
     }
 
