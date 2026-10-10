@@ -342,4 +342,66 @@ struct DecoupledCellInvalidationTests {
         #expect(silhouette.width == 200.0)
         #expect(abs(silhouette.height - (200.0 / 1.5)) < 0.001)
     }
+
+    @Test("CullingLayoutCalculator calculates border tap zones and direction")
+    func borderTapZoneTests() {
+        // Border tap zone width
+        #expect(CullingLayoutCalculator.borderTapZoneWidth(for: 1000.0) == 64.0)
+        #expect(CullingLayoutCalculator.borderTapZoneWidth(for: 400.0) == 48.0)
+        #expect(CullingLayoutCalculator.borderTapZoneWidth(for: 0.0) == 0.0)
+        #expect(CullingLayoutCalculator.borderTapZoneWidth(for: -50.0) == 0.0)
+        #expect(CullingLayoutCalculator.borderTapZoneWidth(for: .nan) == 0.0)
+        #expect(CullingLayoutCalculator.borderTapZoneWidth(for: .infinity) == 0.0)
+
+        // Border tap direction detection
+        let containerSize = CGSize(width: 1000.0, height: 800.0)
+        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 30.0, y: 400.0), containerSize: containerSize) == .previous)
+        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 64.0, y: 400.0), containerSize: containerSize) == .previous)
+        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 65.0, y: 400.0), containerSize: containerSize) == nil)
+        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 500.0, y: 400.0), containerSize: containerSize) == nil)
+        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 935.0, y: 400.0), containerSize: containerSize) == nil)
+        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 936.0, y: 400.0), containerSize: containerSize) == .next)
+        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 990.0, y: 400.0), containerSize: containerSize) == .next)
+
+        // Invalid container sizes
+        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 10.0, y: 10.0), containerSize: .zero) == nil)
+        #expect(CullingLayoutCalculator.isBorderTapZone(location: CGPoint(x: 10.0, y: 10.0), containerSize: CGSize(width: -100.0, height: 100.0)) == nil)
+    }
+
+    @Test("CullingLayoutCalculator computes grid item silhouette size from column width")
+    func gridItemSilhouetteSizeFromColumnWidthTests() {
+        let columnWidth: CGFloat = 200.0
+        let stageHeight = CullingLayoutCalculator.gridStageHeight(for: columnWidth) // 150.0
+
+        let expectedSize = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: 1.5,
+            stageWidth: columnWidth,
+            stageHeight: stageHeight,
+            mediaKind: .photo
+        )
+
+        let computedSize = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: 1.5,
+            columnWidth: columnWidth,
+            mediaKind: .photo
+        )
+
+        #expect(computedSize == expectedSize)
+        #expect(computedSize.width == 200.0)
+        #expect(abs(computedSize.height - (200.0 / 1.5)) < 0.001)
+
+        // Video kind with fallback aspect ratio
+        let videoSize = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: .nan,
+            columnWidth: columnWidth,
+            mediaKind: .video
+        )
+        let expectedVideoSize = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: .nan,
+            stageWidth: columnWidth,
+            stageHeight: stageHeight,
+            mediaKind: .video
+        )
+        #expect(videoSize == expectedVideoSize)
+    }
 }

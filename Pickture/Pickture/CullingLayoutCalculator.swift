@@ -1,8 +1,32 @@
 import CoreGraphics
 import Foundation
 
+enum BorderTapDirection: Sendable, Equatable {
+    case previous
+    case next
+}
+
 enum CullingLayoutCalculator {
     static let defaultGridMetadataDeckHeight: CGFloat = 48.0
+
+    static func borderTapZoneWidth(for containerWidth: CGFloat) -> CGFloat {
+        guard !containerWidth.isNaN, !containerWidth.isInfinite, containerWidth > 0 else {
+            return 0.0
+        }
+        return min(containerWidth * 0.12, 64.0)
+    }
+
+    static func isBorderTapZone(location: CGPoint, containerSize: CGSize) -> BorderTapDirection? {
+        guard containerSize.width > 0 else { return nil }
+        let zoneWidth = borderTapZoneWidth(for: containerSize.width)
+        guard zoneWidth > 0 else { return nil }
+        if location.x <= zoneWidth {
+            return .previous
+        } else if location.x >= (containerSize.width - zoneWidth) {
+            return .next
+        }
+        return nil
+    }
 
     static func filmstripThumbnailSize(
         aspectRatio: CGFloat,
@@ -85,5 +109,19 @@ enum CullingLayoutCalculator {
             let width = height * safeRatio
             return CGSize(width: width, height: height)
         }
+    }
+
+    static func gridItemSilhouetteSize(
+        aspectRatio: CGFloat,
+        columnWidth: CGFloat,
+        mediaKind: MediaKind = .photo
+    ) -> CGSize {
+        let stageHeight = gridStageHeight(for: columnWidth)
+        return gridItemSilhouetteSize(
+            aspectRatio: aspectRatio,
+            stageWidth: columnWidth,
+            stageHeight: stageHeight,
+            mediaKind: mediaKind
+        )
     }
 }

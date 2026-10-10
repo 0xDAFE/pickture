@@ -184,7 +184,7 @@ final class CullingSession {
     }
 
     func borderTapZoneWidth(for containerWidth: CGFloat) -> CGFloat {
-        min(containerWidth * 0.12, 64.0)
+        CullingLayoutCalculator.borderTapZoneWidth(for: containerWidth)
     }
 
     func filmstripThumbnailSize(
@@ -236,7 +236,7 @@ final class CullingSession {
     /// Fixed height for the metadata deck (Row 1: filename, Row 2: interactive curation toolbar).
     /// Pinned height guarantees that across any row of the grid, filenames and toolbars align to an exact pixel-matched horizontal line.
     var gridMetadataDeckHeight: CGFloat {
-        48.0
+        CullingLayoutCalculator.defaultGridMetadataDeckHeight
     }
 
     /// Returns the uniform Image Stage height for a given column width in the adaptive grid.
@@ -265,32 +265,27 @@ final class CullingSession {
     /// Convenience method to compute the silhouette size for a MediaItem given the column width.
     func gridItemSilhouetteSize(for item: MediaItem, columnWidth: CGFloat) -> CGSize {
         let ratio = thumbnailAspectRatio(for: item)
-        let stageHeight = gridStageHeight(for: columnWidth)
-        return gridItemSilhouetteSize(
+        return CullingLayoutCalculator.gridItemSilhouetteSize(
             aspectRatio: ratio,
-            stageWidth: columnWidth,
-            stageHeight: stageHeight,
+            columnWidth: columnWidth,
             mediaKind: item.kind
         )
     }
 
-
-
-
-
     @discardableResult
     func handleBorderTap(at location: CGPoint, in containerSize: CGSize) -> Bool {
         guard isBorderTapNavigationEnabled else { return false }
-        guard containerSize.width > 0 else { return false }
-        let zoneWidth = borderTapZoneWidth(for: containerSize.width)
-        if location.x <= zoneWidth {
+        guard let direction = CullingLayoutCalculator.isBorderTapZone(location: location, containerSize: containerSize) else {
+            return false
+        }
+        switch direction {
+        case .previous:
             selectPreviousItem()
             return true
-        } else if location.x >= (containerSize.width - zoneWidth) {
+        case .next:
             selectNextItem()
             return true
         }
-        return false
     }
 
     func selectNextItem() {

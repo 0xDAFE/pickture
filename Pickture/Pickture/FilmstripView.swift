@@ -48,7 +48,7 @@ struct FilmstripView: View {
     private var mainCanvasArea: some View {
         if let currentItem = session.selectedItem {
             GeometryReader { geo in
-                let zoneWidth = session.borderTapZoneWidth(for: geo.size.width)
+                let zoneWidth = CullingLayoutCalculator.borderTapZoneWidth(for: geo.size.width)
 
                 ZStack {
                     Color.black.opacity(0.92)
