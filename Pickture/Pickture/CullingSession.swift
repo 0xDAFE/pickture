@@ -5,7 +5,7 @@ import OSLog
 
 @MainActor
 @Observable
-final class CullingSession {
+final class CullingSession: CullingInteractionTarget {
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.pickture", category: "sync")
     let storageRootURL: URL
     private let folderAccessService: FolderAccessService
@@ -13,6 +13,7 @@ final class CullingSession {
     var mediaCache: MediaCache { mediaPipeline.cache }
     let metadataSyncEngine: MetadataSyncEngine
     var metadataSyncStore: MetadataSyncStore { metadataSyncEngine.syncStore }
+    let interactionController: CullingInteractionController
     private(set) var currentFolderURL: URL?
     private(set) var items: [MediaItem] = [] {
         didSet {
@@ -104,27 +105,39 @@ final class CullingSession {
     var isBorderTapNavigationEnabled: Bool = true
     var viewMode: ViewMode = .grid
     var filmstripDockPosition: FilmstripDockPosition = .bottom
-    var shortcutProfileKind: ShortcutProfileKind = .lightroom
-    var customShortcutMappings: [String: SessionCommand] = [:]
     var isAutoAdvanceEnabled: Bool = false
     var isSwipeModeEnabled: Bool = false
-    var swipeRightAction: CurationAction = .setPickFlag(.picked)
-    var swipeLeftAction: CurationAction = .setPickFlag(.rejected)
-    private(set) var swipeHistory: [SwipeRecord] = []
+
+    var shortcutProfileKind: ShortcutProfileKind {
+        get { interactionController.shortcutProfileKind }
+        set { interactionController.shortcutProfileKind = newValue }
+    }
+
+    var customShortcutMappings: [String: SessionCommand] {
+        get { interactionController.customShortcutMappings }
+        set { interactionController.customShortcutMappings = newValue }
+    }
+
+    var swipeRightAction: CurationAction {
+        get { interactionController.swipeRightAction }
+        set { interactionController.swipeRightAction = newValue }
+    }
+
+    var swipeLeftAction: CurationAction {
+        get { interactionController.swipeLeftAction }
+        set { interactionController.swipeLeftAction = newValue }
+    }
+
+    var swipeHistory: [SwipeRecord] {
+        interactionController.swipeHistory
+    }
 
     var canUndoSwipe: Bool {
-        !swipeHistory.isEmpty
+        interactionController.canUndoSwipe
     }
 
     var activeShortcutProfile: ShortcutProfile {
-        switch shortcutProfileKind {
-        case .lightroom:
-            return .lightroom
-        case .captureOne:
-            return .captureOne
-        case .custom:
-            return .custom(overrides: customShortcutMappings)
-        }
+        interactionController.activeShortcutProfile
     }
 
     var selectedItem: MediaItem? {
@@ -148,19 +161,27 @@ final class CullingSession {
     }
 
     func setShortcutProfileKind(_ kind: ShortcutProfileKind) {
-        shortcutProfileKind = kind
+        interactionController.setShortcutProfileKind(kind)
     }
 
     func setCustomShortcut(key: String, command: SessionCommand) {
-        customShortcutMappings[key.lowercased()] = command
+        interactionController.setCustomShortcut(key: key, command: command)
     }
 
     func toggleAutoAdvance() {
         isAutoAdvanceEnabled.toggle()
     }
 
+    func setAutoAdvance(_ enabled: Bool) {
+        isAutoAdvanceEnabled = enabled
+    }
+
     func togglePreviewSource() {
         previewSource = (previewSource == .preferRaster) ? .preferRAW : .preferRaster
+    }
+
+    func setPreviewSource(_ source: PreviewSource) {
+        previewSource = source
     }
 
     func toggleBorderTapNavigation() {
@@ -176,11 +197,11 @@ final class CullingSession {
     }
 
     func setSwipeRightAction(_ action: CurationAction) {
-        swipeRightAction = action
+        interactionController.setSwipeRightAction(action)
     }
 
     func setSwipeLeftAction(_ action: CurationAction) {
-        swipeLeftAction = action
+        interactionController.setSwipeLeftAction(action)
     }
 
     func borderTapZoneWidth(for containerWidth: CGFloat) -> CGFloat {
@@ -328,75 +349,12 @@ final class CullingSession {
 
     @discardableResult
     func executeCommand(_ command: SessionCommand) -> Bool {
-        switch command {
-        case .curation(let action):
-            guard let item = selectedItem else { return false }
-            applyCurationAction(action, to: item)
-            return true
-
-        case .selectPrevious:
-            selectPreviousItem()
-            return true
-
-        case .selectNext:
-            selectNextItem()
-            return true
-
-        case .selectFirst:
-            selectFirstItem()
-            return true
-
-        case .selectLast:
-            selectLastItem()
-            return true
-
-        case .toggleViewMode:
-            toggleViewMode()
-            return true
-
-        case .setViewMode(let mode):
-            setViewMode(mode)
-            return true
-
-        case .togglePreviewSource:
-            togglePreviewSource()
-            return true
-
-        case .setPreviewSource(let source):
-            self.previewSource = source
-            return true
-
-        case .toggleAutoAdvance:
-            toggleAutoAdvance()
-            return true
-
-        case .setAutoAdvance(let enabled):
-            self.isAutoAdvanceEnabled = enabled
-            return true
-
-        case .toggleBorderTapNavigation:
-            toggleBorderTapNavigation()
-            return true
-
-        case .toggleSwipeMode:
-            toggleSwipeMode()
-            return true
-
-        case .setSwipeMode(let enabled):
-            setSwipeMode(enabled)
-            return true
-
-        case .undoLastSwipe:
-            return undoLastSwipe()
-        }
+        interactionController.executeCommand(command)
     }
 
     @discardableResult
     func handleShortcutKey(_ rawKey: String) -> Bool {
-        guard let command = activeShortcutProfile.command(for: rawKey) else {
-            return false
-        }
-        return executeCommand(command)
+        interactionController.handleShortcutKey(rawKey)
     }
 
     func applyCurationAction(_ action: CurationAction, to item: MediaItem, shouldAutoAdvance: Bool = true) {
@@ -421,33 +379,17 @@ final class CullingSession {
 
     @discardableResult
     func executeSwipe(_ direction: SwipeDirection) -> Bool {
-        guard let item = selectedItem else { return false }
-        return executeSwipe(direction, for: item)
+        interactionController.executeSwipe(direction)
     }
 
     @discardableResult
     func executeSwipe(_ direction: SwipeDirection, for item: MediaItem) -> Bool {
-        let action = (direction == .right) ? swipeRightAction : swipeLeftAction
-        let prev = curationMetadata(for: item)
-        applyCurationAction(action, to: item, shouldAutoAdvance: false)
-        let record = SwipeRecord(
-            itemID: item.id,
-            previousMetadata: prev,
-            appliedAction: action,
-            direction: direction
-        )
-        swipeHistory.append(record)
-        selectNextItem()
-        return true
+        interactionController.executeSwipe(direction, for: item)
     }
 
     @discardableResult
     func undoLastSwipe() -> Bool {
-        guard let last = swipeHistory.popLast() else { return false }
-        guard let item = items.first(where: { $0.id == last.itemID }) else { return false }
-        updateCurationMetadata(last.previousMetadata, for: item)
-        selectedItemID = last.itemID
-        return true
+        interactionController.undoLastSwipe()
     }
 
     var formattedCacheUsage: String {
@@ -478,8 +420,10 @@ final class CullingSession {
         self.mediaPipeline = MediaPipeline(cacheDirectoryURL: resolvedCacheDir)
         let syncStoreURL = resolvedStorageRoot.appendingPathComponent("MetadataSyncStore", isDirectory: true)
         self.metadataSyncEngine = MetadataSyncEngine(storeDirectoryURL: syncStoreURL)
+        self.interactionController = CullingInteractionController()
         self.recentFolders = self.folderAccessService.loadRecentFolders()
         self.setupMetadataSyncEngineBindings()
+        self.interactionController.target = self
     }
 
     private func setupMetadataSyncEngineBindings() {
@@ -798,8 +742,14 @@ final class CullingSession {
         return result
     }
 
+    func reset() {
+        interactionController.clearSwipeHistory()
+        cleanCloseSession()
+    }
+
     private func cleanCloseSession() {
         metadataSyncEngine.reset()
+        interactionController.clearSwipeHistory()
         backgroundExifTask?.cancel()
         backgroundExifTask = nil
         isExifPreloading = false
@@ -811,7 +761,6 @@ final class CullingSession {
         items.removeAll()
         selectedItemID = nil
         thumbnailAspectRatios.removeAll()
-        swipeHistory.removeAll()
         activeConflictItemID = nil
         isConflictSheetPresented = false
         lastErrorMessage = nil
