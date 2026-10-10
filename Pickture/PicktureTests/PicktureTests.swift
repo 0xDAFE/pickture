@@ -1004,6 +1004,177 @@ struct CullingSessionDiscoveryAndCacheTests {
         result.append(baseJPEG.suffix(from: insertOffset))
         return result
     }
+
+    @Test("RAW preview extraction respects container orientation 6 and 8 for embedded previews and preserves raster/landscape")
+    func rawPreviewOrientationEmbeddedPreviewRespectsContainerOrientation6And8() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let landscapeJPEG = try makeSampleLandscapeJPEGData(width: 120, height: 80)
+
+        // 1a. Orientation 6 (Rotated 90 CW in container): embedded unoriented JPEG must be oriented to portrait
+        let rawURL6 = root.appendingPathComponent("SYNTHETIC_ORI_6.ARW")
+        let rawData6 = makeSyntheticRAWWithEmbeddedJPEG(orientation: 6, embeddedJPEG: landscapeJPEG)
+        try rawData6.write(to: rawURL6)
+
+        let result6 = try #require(PreviewLoader.extractImageThumbnail(from: rawURL6, maxPixelSize: 360))
+        #expect(result6.strategy == .embeddedPreview)
+        let decoded6 = try #require(PreviewLoader.decodeCGImage(from: result6.jpegData))
+        #expect(decoded6.height > decoded6.width)
+        #expect(decoded6.aspectRatio < 1.0)
+
+        // 1b. Orientation 8 (Rotated 270 CW in container): embedded unoriented JPEG must be oriented to portrait
+        let rawURL8 = root.appendingPathComponent("SYNTHETIC_ORI_8.ARW")
+        let rawData8 = makeSyntheticRAWWithEmbeddedJPEG(orientation: 8, embeddedJPEG: landscapeJPEG)
+        try rawData8.write(to: rawURL8)
+
+        let result8 = try #require(PreviewLoader.extractImageThumbnail(from: rawURL8, maxPixelSize: 360))
+        #expect(result8.strategy == .embeddedPreview)
+        let decoded8 = try #require(PreviewLoader.decodeCGImage(from: result8.jpegData))
+        #expect(decoded8.height > decoded8.width)
+        #expect(decoded8.aspectRatio < 1.0)
+
+        // 2. Real RAW sample: if testfiles/raws/P9227357.ORF exists on disk and is readable, assert it decodes in portrait
+        let relativeORF = URL(fileURLWithPath: "testfiles/raws/P9227357.ORF")
+        let sourceRootORF = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("testfiles/raws/P9227357.ORF")
+        let orfCandidate = FileManager.default.fileExists(atPath: relativeORF.path) ? relativeORF :
+            (FileManager.default.fileExists(atPath: sourceRootORF.path) ? sourceRootORF : nil)
+        if let orfURL = orfCandidate,
+           let handle = try? FileHandle(forReadingFrom: orfURL) {
+            try? handle.close()
+            let orfResult = try #require(PreviewLoader.extractImageThumbnail(from: orfURL, maxPixelSize: 360))
+            #expect(orfResult.strategy == .embeddedPreview)
+            let decodedORF = try #require(PreviewLoader.decodeCGImage(from: orfResult.jpegData))
+            #expect(decodedORF.height > decodedORF.width)
+            #expect(decodedORF.aspectRatio < 1.0)
+        }
+
+        // 3a. Orientation 1 (Normal landscape): landscape RAW remains landscape
+        let rawURL1 = root.appendingPathComponent("SYNTHETIC_ORI_1.ARW")
+        let rawData1 = makeSyntheticRAWWithEmbeddedJPEG(orientation: 1, embeddedJPEG: landscapeJPEG)
+        try rawData1.write(to: rawURL1)
+
+        let result1 = try #require(PreviewLoader.extractImageThumbnail(from: rawURL1, maxPixelSize: 360))
+        #expect(result1.strategy == .embeddedPreview)
+        let decoded1 = try #require(PreviewLoader.decodeCGImage(from: result1.jpegData))
+        #expect(decoded1.width > decoded1.height)
+        #expect(decoded1.aspectRatio > 1.0)
+
+        // 3b. Standard raster JPG with Orientation 6 continues to extract portrait without regression
+        let rasterURL6 = root.appendingPathComponent("RASTER_ORI_6.JPG")
+        let rasterData6 = try makeSampleRasterJPEGDataWithOrientation(orientation: 6, width: 120, height: 80)
+        try rasterData6.write(to: rasterURL6)
+
+        let rasterResult = try #require(PreviewLoader.extractImageThumbnail(from: rasterURL6, maxPixelSize: 360))
+        let decodedRaster = try #require(PreviewLoader.decodeCGImage(from: rasterResult.jpegData))
+        #expect(decodedRaster.height > decodedRaster.width)
+        #expect(decodedRaster.aspectRatio < 1.0)
+    }
+
+    private func makeSampleLandscapeJPEGData(width: Int = 120, height: Int = 80) throws -> Data {
+        let pixels = [UInt8](repeating: 160, count: width * height * 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let cgImage = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 32,
+                  bytesPerRow: width * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let mutableData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            mutableData as CFMutableData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return mutableData as Data
+    }
+
+    private func makeSampleRasterJPEGDataWithOrientation(orientation: UInt32, width: Int = 120, height: Int = 80) throws -> Data {
+        let pixels = [UInt8](repeating: 160, count: width * height * 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let cgImage = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 32,
+                  bytesPerRow: width * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let mutableData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            mutableData as CFMutableData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let properties: [CFString: Any] = [
+            kCGImagePropertyOrientation: orientation
+        ]
+        CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return mutableData as Data
+    }
+
+    private func makeSyntheticRAWWithEmbeddedJPEG(orientation: UInt16, embeddedJPEG: Data) -> Data {
+        var data = Data()
+        func appendU16(_ v: UInt16) { var x = v.littleEndian; data.append(Data(bytes: &x, count: 2)) }
+        func appendU32(_ v: UInt32) { var x = v.littleEndian; data.append(Data(bytes: &x, count: 4)) }
+        func entry(tag: UInt16, type: UInt16, count: UInt32, valueOrOffset: UInt32) {
+            appendU16(tag); appendU16(type); appendU32(count); appendU32(valueOrOffset)
+        }
+
+        // Little-endian TIFF header ("II", 42, IFD0 offset 8)
+        data.append(contentsOf: [0x49, 0x49])
+        appendU16(42)
+        appendU32(8)
+
+        // IFD0: 4 entries
+        appendU16(4)
+        entry(tag: 256, type: 4, count: 1, valueOrOffset: 6000) // ImageWidth
+        entry(tag: 257, type: 4, count: 1, valueOrOffset: 4000) // ImageLength
+        entry(tag: 274, type: 3, count: 1, valueOrOffset: UInt32(orientation)) // Orientation
+        entry(tag: 50706, type: 1, count: 4, valueOrOffset: 0x00000401) // DNGVersion
+        appendU32(0) // Next IFD offset
+
+        while data.count < 256 {
+            data.append(0x00)
+        }
+        data.append(embeddedJPEG)
+        return data
+    }
 }
 
 private actor PeakCounter {
