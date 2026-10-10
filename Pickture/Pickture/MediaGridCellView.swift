@@ -18,6 +18,7 @@ struct MediaGridCellView: View, Equatable {
     var onCurationAction: ((CurationAction) -> Void)? = nil
     var loadThumbnail: (() async -> CGImage?)? = nil
     var onThumbnailLoaded: ((CGImage) -> Void)? = nil
+    var hydrateMetadata: (() async -> Void)? = nil
 
     @State private var thumbnailImage: CGImage?
     @State private var isLoadingThumbnail = false
@@ -25,7 +26,7 @@ struct MediaGridCellView: View, Equatable {
     @Environment(\.colorScheme) private var colorScheme
 
     private var taskKey: String {
-        "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)"
+        "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)-\(syncState.rawValue)"
     }
 
     private var displayedThumbnail: CGImage? {
@@ -103,6 +104,9 @@ struct MediaGridCellView: View, Equatable {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.displayFileName), \(item.mediaTypeBadge)\(item.isMediaPair ? ", RAW+JPG pair" : ""), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
         .task(id: taskKey) {
+            if syncState == .loading {
+                await hydrateMetadata?()
+            }
             guard let loadThumbnail else { return }
             isLoadingThumbnail = true
             defer { isLoadingThumbnail = false }

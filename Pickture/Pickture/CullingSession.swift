@@ -3,6 +3,90 @@ import Foundation
 import Observation
 import OSLog
 
+actor ThumbnailQueueActor {
+    static let shared = ThumbnailQueueActor(maxConcurrentWorkers: 4)
+
+    private let maxConcurrentWorkers: Int
+    private var activeWorkers: Int = 0
+
+    private struct PendingRequest {
+        let id: String
+        let operation: @Sendable () async -> Data?
+        let continuation: CheckedContinuation<Data?, Never>
+    }
+
+    private var pendingQueue: [PendingRequest] = []
+
+    private var activeTasks: [String: Task<Void, Never>] = [:]
+
+    var pendingCount: Int {
+        pendingQueue.count
+    }
+
+    init(maxConcurrentWorkers: Int = 4) {
+        self.maxConcurrentWorkers = maxConcurrentWorkers
+    }
+
+    func enqueue(
+        id: String,
+        operation: @escaping @Sendable () async -> Data?
+    ) async -> Data? {
+        guard !Task.isCancelled else { return nil }
+
+        cancel(id: id)
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let request = PendingRequest(
+                    id: id,
+                    operation: operation,
+                    continuation: continuation
+                )
+                // LIFO: newest visible cell is placed at the front of the queue
+                pendingQueue.insert(request, at: 0)
+                pump()
+            }
+        } onCancel: {
+            Task {
+                await self.cancel(id: id)
+            }
+        }
+    }
+
+    func cancel(id: String) {
+        if let idx = pendingQueue.firstIndex(where: { $0.id == id }) {
+            let removed = pendingQueue.remove(at: idx)
+            removed.continuation.resume(returning: nil)
+        }
+        if let task = activeTasks.removeValue(forKey: id) {
+            task.cancel()
+        }
+    }
+
+    private func pump() {
+        while activeWorkers < maxConcurrentWorkers && !pendingQueue.isEmpty {
+            let next = pendingQueue.removeFirst()
+            activeWorkers += 1
+            let itemID = next.id
+
+            let workerTask = Task {
+                defer {
+                    self.activeWorkers -= 1
+                    self.activeTasks.removeValue(forKey: itemID)
+                    self.pump()
+                }
+                if Task.isCancelled {
+                    next.continuation.resume(returning: nil)
+                    return
+                }
+                let result = await next.operation()
+                next.continuation.resume(returning: Task.isCancelled ? nil : result)
+            }
+            activeTasks[itemID] = workerTask
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class CullingSession {
@@ -36,10 +120,16 @@ final class CullingSession {
             subfolderMode == .recursive
         }
         set {
-            do {
-                try setSubfolderMode(newValue ? .recursive : .immediate)
-            } catch {
-                lastErrorMessage = "Failed to switch subfolder mode: \(error.localizedDescription)"
+            let targetMode: SubfolderMode = newValue ? .recursive : .immediate
+            guard subfolderMode != targetMode else { return }
+            subfolderMode = targetMode
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.rediscoverItemsForSubfolderModeChange()
+                } catch {
+                    self.lastErrorMessage = "Failed to switch subfolder mode: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -67,6 +157,14 @@ final class CullingSession {
     private var thumbnailAspectRatios: [String: CGFloat] = [:]
     private(set) var isFlushingPendingWrites: Bool = false
     private var activeFlushTask: Task<Void, Never>? = nil
+    private(set) var isDiscovering: Bool = false
+    private(set) var openFolderProgress: Double? = nil
+    var isLazySidecarHydrationEnabled: Bool = false
+    private(set) var isExifPreloading: Bool = false
+    private var backgroundExifTask: Task<Void, Never>? = nil
+    var flushDebounceNanoseconds: UInt64 = 500_000_000
+    private var debouncedFlushTask: Task<Void, Never>? = nil
+    private var backgroundHydrationTask: Task<Void, Never>? = nil
     var isAccessingFolder: Bool {
         folderAccessService.isAccessingFolder
     }
@@ -445,7 +543,7 @@ final class CullingSession {
         ByteCountFormatter.string(fromByteCount: cacheSizeLimitBytes, countStyle: .file)
     }
 
-    init(storageRootURL: URL? = nil, cacheDirectoryURL: URL? = nil) {
+    init(storageRootURL: URL? = nil, cacheDirectoryURL: URL? = nil, subfolderMode: SubfolderMode = .immediate) {
         let resolvedStorageRoot: URL
         let resolvedCacheDir: URL
         if let storageRootURL {
@@ -459,6 +557,7 @@ final class CullingSession {
                 ?? FileManager.default.temporaryDirectory
             resolvedCacheDir = (cacheDirectoryURL ?? cachesRoot.appendingPathComponent("PicktureMediaCache", isDirectory: true)).standardizedFileURL
         }
+        self.subfolderMode = subfolderMode
         self.storageRootURL = resolvedStorageRoot
         self.folderAccessService = FolderAccessService(storageRootURL: resolvedStorageRoot)
         self.mediaCache = MediaCache(cacheDirectoryURL: resolvedCacheDir)
@@ -507,6 +606,12 @@ final class CullingSession {
         thumbnailAspectRatios.removeAll()
         self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
         self.cacheGeneration &+= 1
+    }
+
+    /// Flushes the thumbnail cache index immediately to disk.
+    /// Called on session close, background transition, or application termination.
+    func flushMediaCacheIndex() {
+        mediaCache.flushIndexImmediately()
     }
 
     func setStarRating(_ rating: StarRating, for item: MediaItem) {
@@ -595,8 +700,13 @@ final class CullingSession {
         return resolved
     }
 
-    func preloadExifMetadata(for targetItems: [MediaItem]) async {
+    /// Preloads EXIF metadata in the background off the MainActor.
+    /// Runs via Task.detached at .utility priority so network-bound header reads over NAS/SMB
+    /// do not inherit @MainActor isolation or block UI event processing.
+    func startBackgroundExifPreloading(for targetItems: [MediaItem]) {
+        backgroundExifTask?.cancel()
         let itemsToLoad = targetItems.filter { item in
+            guard item.kind != .video else { return false }
             if headerSupplementedItemIDs.contains(item.id) { return false }
             let existing = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif ?? ExifMetadata()
             if existing.cameraModel != nil && existing.lensModel != nil && existing.dateTimeOriginal != nil && !existing.isoSpeedRatings.isEmpty && existing.focalLength != nil {
@@ -606,19 +716,30 @@ final class CullingSession {
             }
             return true
         }
-        guard !itemsToLoad.isEmpty else { return }
-
-        let extracted = await ExifHeaderExtractor.extractBatch(for: itemsToLoad)
-
-        for (itemID, headerExif) in extracted {
-            let existing = exifByItemID[itemID] ?? metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
-            let merged = existing.supplementing(with: headerExif)
-            headerSupplementedItemIDs.insert(itemID)
-            exifByItemID[itemID] = merged
-            metadataSyncStore.recordExif(merged, for: itemID)
+        guard !itemsToLoad.isEmpty else {
+            isExifPreloading = false
+            return
         }
-        if filterCriteria.isCameraModelActive || filterCriteria.isLensModelActive {
-            refreshDerivedCounts()
+
+        isExifPreloading = true
+        backgroundExifTask = Task.detached(priority: .utility) { [weak self] in
+            let extracted = await ExifHeaderExtractor.extractBatch(for: itemsToLoad)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self, !Task.isCancelled else { return }
+                self.isExifPreloading = false
+                self.backgroundExifTask = nil
+                for (itemID, headerExif) in extracted {
+                    let existing = self.exifByItemID[itemID] ?? self.metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
+                    let merged = existing.supplementing(with: headerExif)
+                    self.headerSupplementedItemIDs.insert(itemID)
+                    self.exifByItemID[itemID] = merged
+                    self.metadataSyncStore.recordExif(merged, for: itemID)
+                }
+                if self.filterCriteria.isCameraModelActive || self.filterCriteria.isLensModelActive {
+                    self.refreshDerivedCounts()
+                }
+            }
         }
     }
 
@@ -789,6 +910,8 @@ final class CullingSession {
     }
 
     func flushPendingWrites() async {
+        debouncedFlushTask?.cancel()
+        debouncedFlushTask = nil
         while !Task.isCancelled {
             if let existing = activeFlushTask {
                 await existing.value
@@ -863,6 +986,8 @@ final class CullingSession {
         force: Bool = false,
         timeoutNanoseconds: UInt64 = 2_500_000_000
     ) async -> CloseFolderResult {
+        debouncedFlushTask?.cancel()
+        debouncedFlushTask = nil
         guard currentFolderURL != nil else {
             cleanCloseSession()
             return .success
@@ -898,6 +1023,16 @@ final class CullingSession {
     }
 
     private func cleanCloseSession() {
+        debouncedFlushTask?.cancel()
+        debouncedFlushTask = nil
+        backgroundHydrationTask?.cancel()
+        backgroundHydrationTask = nil
+        backgroundExifTask?.cancel()
+        backgroundExifTask = nil
+        isExifPreloading = false
+        mediaCache.flushIndexImmediately()
+        isDiscovering = false
+        openFolderProgress = nil
         folderAccessService.stopAccessingCurrentFolder()
         currentFolderURL = nil
         items.removeAll()
@@ -1059,19 +1194,35 @@ final class CullingSession {
 
     private func scheduleFlushPendingWrites() {
         guard !isSyncSuspended else { return }
-        Task { [weak self] in
-            await self?.flushPendingWrites()
+        debouncedFlushTask?.cancel()
+        debouncedFlushTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.flushDebounceNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: self.flushDebounceNanoseconds)
+            }
+            guard !Task.isCancelled else { return }
+            self.debouncedFlushTask = nil
+            await self.flushPendingWrites()
         }
     }
 
+    /// Refreshes the active folder by re-discovering items.
+    /// Traversal runs in Task.detached at .userInitiated priority to prevent
+    /// synchronous file system calls from blocking @MainActor.
     func refreshFolder() async throws {
         guard let currentFolderURL else { return }
-        self.items = try discoverItems(in: currentFolderURL.standardizedFileURL, mode: subfolderMode)
+        let rootURL = currentFolderURL.standardizedFileURL
+        let mode = self.subfolderMode
+        let storeURL = self.storageRootURL
+        let discoveredItems = try await Task.detached(priority: .userInitiated) {
+            try Self.discoverItems(in: rootURL, mode: mode, storageRootURL: storeURL)
+        }.value
+        self.items = discoveredItems
         initializeMetadata(for: self.items)
         if !isSyncSuspended {
             await flushPendingWrites()
         }
-        await preloadExifMetadata(for: self.items)
+        startBackgroundExifPreloading(for: self.items)
     }
 
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
@@ -1080,16 +1231,19 @@ final class CullingSession {
             self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
             return cached
         }
+        guard !Task.isCancelled else { return nil }
         let source = previewSource
-        let extracted = await Task.detached(priority: .userInitiated) {
-            await PreviewLoader.extractThumbnail(for: item, previewSource: source, maxPixelSize: maxPixelSize)
-        }.value
-        guard let extracted else {
+        let data = await ThumbnailQueueActor.shared.enqueue(id: key) {
+            guard !Task.isCancelled else { return nil }
+            let extracted = await PreviewLoader.extractThumbnail(for: item, previewSource: source, maxPixelSize: maxPixelSize)
+            return extracted?.jpegData
+        }
+        guard let data, !Task.isCancelled else {
             return nil
         }
-        mediaCache.storeData(extracted.jpegData, forKey: key)
+        mediaCache.storeData(data, forKey: key)
         self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
-        return extracted.jpegData
+        return data
     }
 
     func previewCacheKey(for item: MediaItem, maxPixelSize: Int = 2048) -> String {
@@ -1112,11 +1266,10 @@ final class CullingSession {
             self.mediaCacheTotalBytes = mediaCache.totalCachedBytes
             return cached
         }
+        guard !Task.isCancelled else { return nil }
         let source = previewSource
-        let extracted = await Task.detached(priority: .userInitiated) {
-            await PreviewLoader.extractThumbnail(for: item, previewSource: source, maxPixelSize: maxPixelSize)
-        }.value
-        guard let extracted else {
+        let extracted = await PreviewLoader.extractThumbnail(for: item, previewSource: source, maxPixelSize: maxPixelSize)
+        guard let extracted, !Task.isCancelled else {
             return nil
         }
         mediaCache.storeData(extracted.jpegData, forKey: key)
@@ -1124,7 +1277,10 @@ final class CullingSession {
         return extracted.jpegData
     }
 
-    func openFolder(at url: URL) throws {
+    func openFolder(at url: URL, lazySidecars: Bool? = nil) throws {
+        if let lazySidecars {
+            self.isLazySidecarHydrationEnabled = lazySidecars
+        }
         do {
             let (resolvedURL, updatedRecents) = try folderAccessService.beginAccessingAndRecordFolder(at: url)
             var isDir: ObjCBool = false
@@ -1139,7 +1295,10 @@ final class CullingSession {
         }
     }
 
-    func reopenRecentFolder(_ recentFolder: RecentFolder) throws {
+    func reopenRecentFolder(_ recentFolder: RecentFolder, lazySidecars: Bool? = nil) throws {
+        if let lazySidecars {
+            self.isLazySidecarHydrationEnabled = lazySidecars
+        }
         do {
             let (resolvedURL, updatedRecents) = try folderAccessService.resolveAndAccess(recentFolder: recentFolder)
             var isDir: ObjCBool = false
@@ -1154,11 +1313,83 @@ final class CullingSession {
         }
     }
 
+    func reopenRecentFolderAsync(_ recentFolder: RecentFolder, lazySidecars: Bool = true) async throws {
+        let (resolvedURL, updatedRecents) = try folderAccessService.resolveAndAccess(recentFolder: recentFolder)
+        try await openResolvedFolderAsync(resolvedURL: resolvedURL, updatedRecents: updatedRecents, lazySidecars: lazySidecars)
+    }
+
+    func openFolderAsync(at url: URL, lazySidecars: Bool = true) async throws {
+        let (resolvedURL, updatedRecents) = try folderAccessService.beginAccessingAndRecordFolder(at: url)
+        try await openResolvedFolderAsync(resolvedURL: resolvedURL, updatedRecents: updatedRecents, lazySidecars: lazySidecars)
+    }
+
+    private func openResolvedFolderAsync(resolvedURL: URL, updatedRecents: [RecentFolder], lazySidecars: Bool) async throws {
+        if pendingWritesCount > 0 {
+            await flushPendingWrites()
+        }
+        self.isLazySidecarHydrationEnabled = lazySidecars
+        self.isDiscovering = true
+        self.openFolderProgress = 0.0
+        defer {
+            self.isDiscovering = false
+            self.openFolderProgress = nil
+        }
+
+        var accumulatedItems: [MediaItem] = []
+        var hasSetCurrentFolder = false
+
+        let stream = Self.streamDiscoveredItems(
+            from: resolvedURL,
+            mode: subfolderMode,
+            storageRootURL: storageRootURL
+        )
+
+        do {
+            for try await batch in stream {
+                if !hasSetCurrentFolder {
+                    self.recentFolders = updatedRecents
+                    self.currentFolderURL = resolvedURL
+                    hasSetCurrentFolder = true
+                }
+                if Task.isCancelled { break }
+                accumulatedItems.append(contentsOf: batch.items)
+                self.items = accumulatedItems.sorted(by: Self.mediaItemSortComparator)
+                self.initializeMetadata(for: batch.items)
+                self.openFolderProgress = batch.progress
+                await Task.yield()
+            }
+        } catch {
+            if !hasSetCurrentFolder {
+                folderAccessService.stopAccessingCurrentFolder()
+            }
+            self.lastErrorMessage = error.localizedDescription
+            throw error
+        }
+
+        if !hasSetCurrentFolder {
+            self.recentFolders = updatedRecents
+            self.currentFolderURL = resolvedURL
+        }
+
+        self.lastErrorMessage = nil
+        if !isSyncSuspended {
+            scheduleFlushPendingWrites()
+        }
+        startBackgroundExifPreloading(for: self.items)
+    }
+
     func removeRecentFolder(_ recentFolder: RecentFolder) {
         self.recentFolders = folderAccessService.removeRecentFolder(id: recentFolder.id)
     }
 
     private func applyOpenedFolder(resolvedURL: URL, updatedRecents: [RecentFolder]) throws {
+        if pendingWritesCount > 0 {
+            Task { [weak self] in
+                await self?.flushPendingWrites()
+            }
+        }
+        self.isDiscovering = true
+        defer { self.isDiscovering = false }
         do {
             let discoveredItems = try discoverItems(in: resolvedURL.standardizedFileURL, mode: subfolderMode)
             self.recentFolders = updatedRecents
@@ -1169,217 +1400,380 @@ final class CullingSession {
             if !isSyncSuspended {
                 scheduleFlushPendingWrites()
             }
-            Task { [weak self] in
-                guard let self else { return }
-                await self.preloadExifMetadata(for: self.items)
-            }
+            startBackgroundExifPreloading(for: self.items)
         } catch {
             folderAccessService.stopAccessingCurrentFolder()
             throw error
         }
     }
 
-    func setSubfolderMode(_ mode: SubfolderMode) throws {
+    /// Sets the subfolder mode and re-discovers items asynchronously off the MainActor.
+    /// If a folder is open, directory traversal runs in Task.detached to prevent
+    /// synchronous FileManager operations from blocking @MainActor.
+    func setSubfolderMode(_ mode: SubfolderMode) async throws {
         self.subfolderMode = mode
-        if let currentFolderURL {
-            self.items = try discoverItems(in: currentFolderURL.standardizedFileURL, mode: mode)
-            initializeMetadata(for: self.items)
-            if !isSyncSuspended {
-                scheduleFlushPendingWrites()
-            }
-            Task { [weak self] in
-                guard let self else { return }
-                await self.preloadExifMetadata(for: self.items)
-            }
+        try await rediscoverItemsForSubfolderModeChange()
+    }
+
+    private func rediscoverItemsForSubfolderModeChange() async throws {
+        guard let currentFolderURL else { return }
+        let rootURL = currentFolderURL.standardizedFileURL
+        let mode = self.subfolderMode
+        let storeURL = self.storageRootURL
+        self.isDiscovering = true
+        defer { self.isDiscovering = false }
+        let discoveredItems = try await Task.detached(priority: .userInitiated) {
+            try Self.discoverItems(in: rootURL, mode: mode, storageRootURL: storeURL)
+        }.value
+        guard self.subfolderMode == mode, self.currentFolderURL == currentFolderURL else { return }
+        self.items = discoveredItems
+        initializeMetadata(for: self.items)
+        if !isSyncSuspended {
+            scheduleFlushPendingWrites()
         }
+        startBackgroundExifPreloading(for: self.items)
     }
 
     private func initializeMetadata(for items: [MediaItem]) {
-        for item in items {
-            let persisted = metadataSyncStore.record(for: item.id)
-            let sidecarURL = SidecarCodec.resolveSidecarReadURL(for: item)
+        if isLazySidecarHydrationEnabled {
+            for item in items {
+                let persisted = metadataSyncStore.record(for: item.id)
 
-            var diskData: Data? = nil
-            var diskCuration: CurationMetadata? = nil
-            var diskExif: ExifMetadata? = nil
-            var diskDigest = ""
-            var diskModDate: Date? = nil
+                if let persisted {
+                    if let persistedExif = persisted.exif {
+                        exifByItemID[item.id] = persistedExif
+                    }
 
-            if let sidecarURL, let data = SidecarCodec.readData(from: sidecarURL) {
-                diskData = data
-                diskDigest = SidecarCodec.computeDigest(for: data)
-                diskModDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                if let parsed = try? SidecarCodec.parse(data: data) {
-                    diskCuration = parsed.curation
-                    diskExif = parsed.exif
+                    if persisted.syncState == .pendingWrite || persisted.syncState == .syncError {
+                        metadataByItemID[item.id] = persisted.metadata
+                        syncStateByItemID[item.id] = persisted.syncState
+                        baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                    } else if persisted.syncState == .conflicted, let conflict = persisted.conflict {
+                        metadataByItemID[item.id] = persisted.metadata
+                        syncStateByItemID[item.id] = .conflicted
+                        conflictsByItemID[item.id] = conflict
+                        baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                    } else {
+                        metadataByItemID[item.id] = persisted.metadata
+                        syncStateByItemID[item.id] = .synced
+                        baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                    }
+                } else {
+                    syncStateByItemID[item.id] = .loading
+                    metadataByItemID[item.id] = CurationMetadata()
+                    baseSnapshotByItemID[item.id] = nil
                 }
             }
+            refreshDerivedCounts()
+            startBackgroundSidecarHydration()
+        } else {
+            for item in items {
+                hydrateItemSynchronously(item)
+            }
+            refreshDerivedCounts()
+        }
+    }
 
-            if let persisted {
-                if let diskExif, !diskExif.isEmpty {
-                    if let persistedExif = persisted.exif {
-                        exifByItemID[item.id] = diskExif.supplementing(with: persistedExif)
-                    } else {
-                        exifByItemID[item.id] = diskExif
-                    }
-                } else if let persistedExif = persisted.exif {
-                    exifByItemID[item.id] = persistedExif
-                }
+    private func hydrateItemSynchronously(_ item: MediaItem) {
+        let persisted = metadataSyncStore.record(for: item.id)
+        let sidecarURL = SidecarCodec.resolveSidecarReadURL(for: item)
 
-                if persisted.syncState == .pendingWrite || persisted.syncState == .syncError {
-                    metadataByItemID[item.id] = persisted.metadata
-                    syncStateByItemID[item.id] = persisted.syncState
-                    baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+        var diskData: Data? = nil
+        var diskCuration: CurationMetadata? = nil
+        var diskExif: ExifMetadata? = nil
+        var diskDigest = ""
+        var diskModDate: Date? = nil
 
-                    // Check if external edit happened on disk while pending or in syncError
-                    // (e.g. share remounted with a new or modified external .xmp file)
-                    if let base = persisted.baseSnapshot {
-                        let remoteChanged = diskDigest != base.fileDigest
-                        let threeWay = XMPConflictEngine.evaluateThreeWay(
-                            itemID: item.id,
-                            base: base,
-                            local: persisted.metadata,
-                            remote: diskCuration,
-                            remoteDigestChanged: remoteChanged
-                        )
-                        switch threeWay {
-                        case .conflict(let conflict):
-                            syncStateByItemID[item.id] = .conflicted
-                            conflictsByItemID[item.id] = conflict
-                            metadataSyncStore.recordConflict(conflict, for: item.id)
-                        case .cleanMerge(let merged):
-                            metadataByItemID[item.id] = merged
-                            metadataSyncStore.stagePendingWrite(merged, baseSnapshot: base, for: item.id)
-                        case .noChange:
-                            break
-                        }
-                    } else if let diskCuration {
-                        // Remounted with a new sidecar created externally while local had uncommitted mutations
-                        let threeWay = XMPConflictEngine.evaluateThreeWay(
-                            itemID: item.id,
-                            base: nil,
-                            local: persisted.metadata,
-                            remote: diskCuration,
-                            remoteDigestChanged: true
-                        )
-                        switch threeWay {
-                        case .conflict(let conflict):
-                            syncStateByItemID[item.id] = .conflicted
-                            conflictsByItemID[item.id] = conflict
-                            metadataSyncStore.recordConflict(conflict, for: item.id)
-                        case .cleanMerge(let merged):
-                            metadataByItemID[item.id] = merged
-                            let newBase = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
-                            metadataSyncStore.stagePendingWrite(merged, baseSnapshot: newBase, for: item.id)
-                            baseSnapshotByItemID[item.id] = newBase
-                        case .noChange:
-                            break
-                        }
-                    }
-                } else if persisted.syncState == .conflicted, let conflict = persisted.conflict {
-                    metadataByItemID[item.id] = persisted.metadata
-                    syncStateByItemID[item.id] = .conflicted
-                    conflictsByItemID[item.id] = conflict
-                    baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+        if let sidecarURL, let data = SidecarCodec.readData(from: sidecarURL) {
+            diskData = data
+            diskDigest = SidecarCodec.computeDigest(for: data)
+            diskModDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let parsed = try? SidecarCodec.parse(data: data) {
+                diskCuration = parsed.curation
+                diskExif = parsed.exif
+            }
+        }
+
+        if let persisted {
+            if let diskExif, !diskExif.isEmpty {
+                if let persistedExif = persisted.exif {
+                    exifByItemID[item.id] = diskExif.supplementing(with: persistedExif)
                 } else {
-                    if let diskCuration {
-                        let snapshot = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
-                        metadataByItemID[item.id] = diskCuration
-                        syncStateByItemID[item.id] = .synced
-                        baseSnapshotByItemID[item.id] = snapshot
-                        metadataSyncStore.recordBaseSnapshot(snapshot, exif: exifByItemID[item.id] ?? diskExif, for: item.id)
-                    } else {
-                        // Sidecar was deleted externally on storage, and local had no uncommitted mutations
-                        let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
-                        metadataByItemID[item.id] = CurationMetadata()
-                        syncStateByItemID[item.id] = .synced
-                        baseSnapshotByItemID[item.id] = emptySnapshot
-                        metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: exifByItemID[item.id] ?? diskExif, for: item.id)
-                    }
-                }
-            } else {
-                if let diskExif {
                     exifByItemID[item.id] = diskExif
                 }
+            } else if let persistedExif = persisted.exif {
+                exifByItemID[item.id] = persistedExif
+            }
 
+            if persisted.syncState == .pendingWrite || persisted.syncState == .syncError {
+                metadataByItemID[item.id] = persisted.metadata
+                syncStateByItemID[item.id] = persisted.syncState
+                baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+
+                if let base = persisted.baseSnapshot {
+                    let remoteChanged = diskDigest != base.fileDigest
+                    let threeWay = XMPConflictEngine.evaluateThreeWay(
+                        itemID: item.id,
+                        base: base,
+                        local: persisted.metadata,
+                        remote: diskCuration,
+                        remoteDigestChanged: remoteChanged
+                    )
+                    switch threeWay {
+                    case .conflict(let conflict):
+                        syncStateByItemID[item.id] = .conflicted
+                        conflictsByItemID[item.id] = conflict
+                        metadataSyncStore.recordConflict(conflict, for: item.id)
+                    case .cleanMerge(let merged):
+                        metadataByItemID[item.id] = merged
+                        metadataSyncStore.stagePendingWrite(merged, baseSnapshot: base, for: item.id)
+                    case .noChange:
+                        break
+                    }
+                } else if let diskCuration {
+                    let threeWay = XMPConflictEngine.evaluateThreeWay(
+                        itemID: item.id,
+                        base: nil,
+                        local: persisted.metadata,
+                        remote: diskCuration,
+                        remoteDigestChanged: true
+                    )
+                    switch threeWay {
+                    case .conflict(let conflict):
+                        syncStateByItemID[item.id] = .conflicted
+                        conflictsByItemID[item.id] = conflict
+                        metadataSyncStore.recordConflict(conflict, for: item.id)
+                    case .cleanMerge(let merged):
+                        metadataByItemID[item.id] = merged
+                        let newBase = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
+                        metadataSyncStore.stagePendingWrite(merged, baseSnapshot: newBase, for: item.id)
+                        baseSnapshotByItemID[item.id] = newBase
+                    case .noChange:
+                        break
+                    }
+                }
+            } else if persisted.syncState == .conflicted, let conflict = persisted.conflict {
+                metadataByItemID[item.id] = persisted.metadata
+                syncStateByItemID[item.id] = .conflicted
+                conflictsByItemID[item.id] = conflict
+                baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+            } else {
                 if let diskCuration {
                     let snapshot = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
                     metadataByItemID[item.id] = diskCuration
                     syncStateByItemID[item.id] = .synced
                     baseSnapshotByItemID[item.id] = snapshot
-                    metadataSyncStore.recordBaseSnapshot(snapshot, exif: diskExif, for: item.id)
+                    metadataSyncStore.recordBaseSnapshot(snapshot, exif: exifByItemID[item.id] ?? diskExif, for: item.id)
                 } else {
                     let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
                     metadataByItemID[item.id] = CurationMetadata()
                     syncStateByItemID[item.id] = .synced
                     baseSnapshotByItemID[item.id] = emptySnapshot
-                    metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: exifByItemID[item.id], for: item.id)
+                    metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: exifByItemID[item.id] ?? diskExif, for: item.id)
                 }
             }
+        } else {
+            if let diskExif {
+                exifByItemID[item.id] = diskExif
+            }
+
+            if let diskCuration {
+                let snapshot = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
+                metadataByItemID[item.id] = diskCuration
+                syncStateByItemID[item.id] = .synced
+                baseSnapshotByItemID[item.id] = snapshot
+                metadataSyncStore.recordBaseSnapshot(snapshot, exif: diskExif, for: item.id)
+            } else {
+                let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+                metadataByItemID[item.id] = CurationMetadata()
+                syncStateByItemID[item.id] = .synced
+                baseSnapshotByItemID[item.id] = emptySnapshot
+                metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: exifByItemID[item.id], for: item.id)
+            }
         }
-        refreshDerivedCounts()
     }
 
-    func toggleSubfolderMode() throws {
+    private enum HydrationOutcome: Sendable {
+        case sidecar(curation: CurationMetadata, exif: ExifMetadata?, digest: String, modDate: Date?)
+        case none
+    }
+
+    nonisolated private static func readSidecarData(for item: MediaItem) -> HydrationOutcome {
+        let sidecarURL = item.sidecarURL ?? SidecarCodec.resolveSidecarReadURL(for: item)
+        guard let sidecarURL, let data = SidecarCodec.readData(from: sidecarURL) else {
+            return .none
+        }
+        let digest = SidecarCodec.computeDigest(for: data)
+        let modDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        if let parsed = try? SidecarCodec.parse(data: data) {
+            return .sidecar(curation: parsed.curation, exif: parsed.exif, digest: digest, modDate: modDate)
+        }
+        return .sidecar(curation: CurationMetadata(), exif: nil, digest: digest, modDate: modDate)
+    }
+
+    func hydrateMetadata(for item: MediaItem, refreshCounts: Bool = true) async {
+        guard syncStateByItemID[item.id] == .loading else { return }
+
+        let outcome = Self.readSidecarData(for: item)
+
+        guard !Task.isCancelled else { return }
+        guard syncStateByItemID[item.id] == .loading else { return }
+
+        switch outcome {
+        case .sidecar(let curation, let exif, let digest, let modDate):
+            let snapshot = BaseSnapshot(metadata: curation, fileDigest: digest, modificationDate: modDate)
+            metadataByItemID[item.id] = curation
+            syncStateByItemID[item.id] = .synced
+            baseSnapshotByItemID[item.id] = snapshot
+            if let exif {
+                exifByItemID[item.id] = exif
+            }
+            metadataSyncStore.recordBaseSnapshot(snapshot, exif: exifByItemID[item.id] ?? exif, for: item.id)
+
+        case .none:
+            let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+            metadataByItemID[item.id] = CurationMetadata()
+            syncStateByItemID[item.id] = .synced
+            baseSnapshotByItemID[item.id] = emptySnapshot
+            metadataSyncStore.recordBaseSnapshot(emptySnapshot, exif: exifByItemID[item.id], for: item.id)
+        }
+
+        if refreshCounts {
+            refreshDerivedCounts()
+        }
+    }
+
+    func startBackgroundSidecarHydration() {
+        backgroundHydrationTask?.cancel()
+        backgroundHydrationTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            let pendingItems: [MediaItem] = await MainActor.run {
+                self.items.filter { self.syncStateByItemID[$0.id] == .loading }
+            }
+            guard !pendingItems.isEmpty else { return }
+
+            for item in pendingItems {
+                if Task.isCancelled { break }
+                await self.hydrateMetadata(for: item, refreshCounts: false)
+                await Task.yield()
+            }
+            await MainActor.run {
+                self.refreshDerivedCounts()
+            }
+        }
+    }
+
+    func toggleSubfolderMode() async throws {
         let next: SubfolderMode = (subfolderMode == .immediate) ? .recursive : .immediate
-        try setSubfolderMode(next)
+        try await setSubfolderMode(next)
     }
 
-    private func discoverItems(in rootURL: URL, mode: SubfolderMode) throws -> [MediaItem] {
-        let fm = FileManager.default
-        let directories = try collectDirectories(from: rootURL, mode: mode, fileManager: fm)
+    func discoverItems(in rootURL: URL, mode: SubfolderMode) throws -> [MediaItem] {
+        try Self.discoverItems(in: rootURL, mode: mode, storageRootURL: storageRootURL)
+    }
+
+    nonisolated static func discoverItems(
+        inSingleDirectory directoryURL: URL,
+        rootURL: URL,
+        fileManager: FileManager = FileManager()
+    ) throws -> [MediaItem] {
+        let contents = try fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isHiddenKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        )
+
+        var mediaFiles: [MediaFile] = []
+        var sidecarsByLowerBase: [String: URL] = [:]
+
+        for fileURL in contents {
+            let values = try? fileURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if values?.isDirectory == true {
+                continue
+            }
+            let ext = fileURL.pathExtension.lowercased()
+            if ext == "xmp" {
+                let baseLower = fileURL.deletingPathExtension().lastPathComponent.lowercased()
+                sidecarsByLowerBase[baseLower] = fileURL.standardizedFileURL
+                let doubleBase = URL(fileURLWithPath: baseLower).deletingPathExtension().lastPathComponent
+                sidecarsByLowerBase[doubleBase] = fileURL.standardizedFileURL
+                continue
+            }
+            guard let formatKind = MediaFormatKind.classify(fileExtension: ext) else {
+                continue
+            }
+            mediaFiles.append(MediaFile(url: fileURL, formatKind: formatKind))
+        }
+
+        return Self.pairDirectoryMediaFiles(
+            mediaFiles,
+            sidecarsByLowerBase: sidecarsByLowerBase,
+            directoryURL: directoryURL,
+            rootURL: rootURL
+        )
+    }
+
+    nonisolated static func discoverItems(
+        in rootURL: URL,
+        mode: SubfolderMode,
+        storageRootURL: URL,
+        fileManager: FileManager = FileManager()
+    ) throws -> [MediaItem] {
+        let directories = try collectDirectories(
+            from: rootURL,
+            mode: mode,
+            storageRootURL: storageRootURL,
+            fileManager: fileManager
+        )
         var allItems: [MediaItem] = []
 
         for directoryURL in directories {
-            let contents = try fm.contentsOfDirectory(
-                at: directoryURL,
-                includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isHiddenKey],
-                options: [.skipsHiddenFiles, .skipsPackageDescendants]
-            )
-
-            var mediaFiles: [MediaFile] = []
-            var sidecarsByLowerBase: [String: URL] = [:]
-
-            for fileURL in contents {
-                let values = try? fileURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
-                if values?.isDirectory == true {
-                    continue
-                }
-                let ext = fileURL.pathExtension.lowercased()
-                if ext == "xmp" {
-                    let baseLower = fileURL.deletingPathExtension().lastPathComponent.lowercased()
-                    sidecarsByLowerBase[baseLower] = fileURL.standardizedFileURL
-                    continue
-                }
-                guard let formatKind = MediaFormatKind.classify(fileExtension: ext) else {
-                    continue
-                }
-                mediaFiles.append(MediaFile(url: fileURL, formatKind: formatKind))
-            }
-
-            let dirItems = Self.pairDirectoryMediaFiles(
-                mediaFiles,
-                sidecarsByLowerBase: sidecarsByLowerBase,
-                directoryURL: directoryURL,
-                rootURL: rootURL
+            let dirItems = try discoverItems(
+                inSingleDirectory: directoryURL,
+                rootURL: rootURL,
+                fileManager: fileManager
             )
             allItems.append(contentsOf: dirItems)
         }
 
-        return allItems.sorted { lhs, rhs in
-            let cmp = lhs.baseName.localizedStandardCompare(rhs.baseName)
-            if cmp != .orderedSame {
-                return cmp == .orderedAscending
-            }
-            let dirCmp = lhs.relativeDirectoryPath.localizedStandardCompare(rhs.relativeDirectoryPath)
-            if dirCmp != .orderedSame {
-                return dirCmp == .orderedAscending
-            }
-            return lhs.id < rhs.id
-        }
+        return allItems.sorted(by: Self.mediaItemSortComparator)
     }
 
-    private func collectDirectories(from rootURL: URL, mode: SubfolderMode, fileManager: FileManager) throws -> [URL] {
+    nonisolated static func mediaItemSortComparator(lhs: MediaItem, rhs: MediaItem) -> Bool {
+        let cmp = lhs.baseName.localizedStandardCompare(rhs.baseName)
+        if cmp != .orderedSame {
+            return cmp == .orderedAscending
+        }
+        let dirCmp = lhs.relativeDirectoryPath.localizedStandardCompare(rhs.relativeDirectoryPath)
+        if dirCmp != .orderedSame {
+            return dirCmp == .orderedAscending
+        }
+        return lhs.id < rhs.id
+    }
+
+    nonisolated static func isIgnoredNonMediaDirectory(name: String) -> Bool {
+        let lower = name.lowercased()
+        if lower.hasSuffix(".lrdata") || lower.hasSuffix(".lrcat") {
+            return true
+        }
+        if lower == "captureone" || lower.hasPrefix("captureone") {
+            return true
+        }
+        if lower == "@eadir" || lower.contains("@eadir") {
+            return true
+        }
+        if lower == ".trashes" || lower == ".spotlight-v100" || lower == ".fseventsd" || lower == ".temporaryitems" {
+            return true
+        }
+        return false
+    }
+
+    nonisolated static func collectDirectories(
+        from rootURL: URL,
+        mode: SubfolderMode,
+        storageRootURL: URL,
+        fileManager: FileManager = FileManager()
+    ) throws -> [URL] {
         let standardizedRoot = rootURL.standardizedFileURL
         guard mode == .recursive else {
             return [standardizedRoot]
@@ -1395,7 +1789,7 @@ final class CullingSession {
         ) {
             for case let url as URL in enumerator {
                 let standardized = url.standardizedFileURL
-                if standardized.path.hasPrefix(storagePathPrefix) {
+                if standardized.path.hasPrefix(storagePathPrefix) || Self.isIgnoredNonMediaDirectory(name: standardized.lastPathComponent) {
                     enumerator.skipDescendants()
                     continue
                 }
@@ -1407,6 +1801,59 @@ final class CullingSession {
         }
 
         return directories.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    nonisolated struct DiscoveredBatch: Sendable {
+        let items: [MediaItem]
+        let progress: Double
+    }
+
+    /// Streams discovered items asynchronously in directory batches.
+    /// Traversal runs in Task.detached at .userInitiated priority with an isolated FileManager
+    /// to eliminate Main Thread NAS beachballs and stream results progressively to the UI.
+    nonisolated static func streamDiscoveredItems(
+        from rootURL: URL,
+        mode: SubfolderMode,
+        storageRootURL: URL
+    ) -> AsyncThrowingStream<DiscoveredBatch, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task.detached(priority: .userInitiated) {
+                do {
+                    let fm = FileManager()
+                    let standardizedRoot = rootURL.standardizedFileURL
+                    var isDir: ObjCBool = false
+                    guard fm.fileExists(atPath: standardizedRoot.path, isDirectory: &isDir), isDir.boolValue else {
+                        continuation.finish(throwing: CocoaError(.fileReadNoSuchFile))
+                        return
+                    }
+
+                    let directories = try collectDirectories(
+                        from: standardizedRoot,
+                        mode: mode,
+                        storageRootURL: storageRootURL,
+                        fileManager: fm
+                    )
+                    let totalDirs = max(directories.count, 1)
+
+                    for (index, dirURL) in directories.enumerated() {
+                        if Task.isCancelled { break }
+                        let dirItems = try discoverItems(
+                            inSingleDirectory: dirURL,
+                            rootURL: standardizedRoot,
+                            fileManager: fm
+                        )
+                        let progress = Double(index + 1) / Double(totalDirs)
+                        continuation.yield(DiscoveredBatch(items: dirItems, progress: progress))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
     }
 
     nonisolated static func pairDirectoryMediaFiles(

@@ -320,6 +320,9 @@ struct FilmstripView: View {
             },
             onThumbnailLoaded: { [session, item] image in
                 session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
+            },
+            hydrateMetadata: { [session, item] in
+                await session.hydrateMetadata(for: item)
             }
         )
         .equatable()
@@ -693,6 +696,7 @@ struct FilmstripThumbnailCell: View, Equatable {
     var onSelect: (() -> Void)? = nil
     var loadThumbnail: (() async -> CGImage?)? = nil
     var onThumbnailLoaded: ((CGImage) -> Void)? = nil
+    var hydrateMetadata: (() async -> Void)? = nil
 
     @State private var thumbnail: CGImage?
 
@@ -869,6 +873,9 @@ struct FilmstripThumbnailCell: View, Equatable {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.baseName), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
         .task(id: "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)") {
+            if syncState == .loading {
+                await hydrateMetadata?()
+            }
             guard let loadThumbnail else { return }
             if let decoded = await loadThumbnail() {
                 if !Task.isCancelled {

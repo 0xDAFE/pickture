@@ -76,6 +76,23 @@ struct GridContentView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if session.isDiscovering {
+                Text("•")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ProgressView()
+                    .controlSize(.small)
+                if let progress = session.openFolderProgress {
+                    Text("Discovering… \(Int(progress * 100))%")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Discovering…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Spacer()
         }
         .padding(.horizontal, 16)
@@ -119,6 +136,9 @@ struct GridContentView: View {
                             },
                             onThumbnailLoaded: { [session, item] image in
                                 session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
+                            },
+                            hydrateMetadata: { [session, item] in
+                                await session.hydrateMetadata(for: item)
                             }
                         )
                         .equatable()
