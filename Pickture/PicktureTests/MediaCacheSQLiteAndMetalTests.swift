@@ -98,48 +98,6 @@ struct MediaCacheSQLiteAndMetalTests {
         #expect(index.stats().count == 2)
     }
 
-    @Test("SQLiteMediaCacheIndex migrates legacy cache-index.json cleanly")
-    func legacyJSONMigration() throws {
-        let root = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let jsonURL = root.appendingPathComponent("cache-index.json")
-        let legacyEntry = MediaCacheEntry(
-            key: "legacy_key",
-            fileName: "legacy.jpg",
-            byteSize: 2048,
-            lastAccessedAt: Date(),
-            accessSequence: 42
-        )
-        let legacyState = MediaCacheIndexState(
-            cacheSizeLimitBytes: 500_000_000,
-            nextSequence: 43,
-            entries: ["legacy_key": legacyEntry]
-        )
-        let data = try JSONEncoder().encode(legacyState)
-        try data.write(to: jsonURL)
-
-        #expect(FileManager.default.fileExists(atPath: jsonURL.path))
-
-        let dbURL = root.appendingPathComponent("cache-index.sqlite3")
-        let index = SQLiteMediaCacheIndex(databaseURL: dbURL)
-        index.migrateLegacyJSONIfNeeded(from: jsonURL, defaultLimitBytes: 100_000_000)
-
-        // Legacy JSON file should be removed after migration
-        #expect(!FileManager.default.fileExists(atPath: jsonURL.path))
-
-        // Migrated entry should exist in SQLite database
-        let migrated = try #require(index.entry(forKey: "legacy_key"))
-        #expect(migrated.fileName == "legacy.jpg")
-        #expect(migrated.byteSize == 2048)
-        #expect(migrated.accessSequence == 42)
-
-        let limit = index.getMetadata(key: "cache_size_limit_bytes")
-        #expect(limit == "500000000")
-        let seq = index.getMetadata(key: "next_sequence")
-        #expect(seq == "43")
-    }
-
     // MARK: - MediaCache Scaling & Quota Eviction
 
     @Test("MediaCache enforces byte quota with indexed LRU eviction across multiple stores")

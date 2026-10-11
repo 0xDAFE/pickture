@@ -4,7 +4,7 @@ import SQLite3
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 /// Fast, thread-safe SQLite-backed database indexing MediaCache entries and LRU sequences.
-/// Replaces monolithic cache-index.json to support 50,000+ entries without memory or I/O spikes.
+/// Supports 50,000+ entries without memory or I/O spikes.
 ///
 /// - Note: Concurrency Safety Invariant: Marked `@unchecked Sendable` because the underlying SQLite connection
 ///   is opened with `SQLITE_OPEN_FULLMUTEX` (serialized multi-thread mode). SQLite transparently serializes
@@ -240,25 +240,5 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
     func checkpointWAL() {
         guard let db else { return }
         sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, nil, nil)
-    }
-
-    // MARK: - Legacy Migration
-
-    func migrateLegacyJSONIfNeeded(from jsonURL: URL, defaultLimitBytes: Int64) {
-        guard FileManager.default.fileExists(atPath: jsonURL.path) else { return }
-        guard let data = try? Data(contentsOf: jsonURL),
-              let legacy = try? JSONDecoder().decode(MediaCacheIndexState.self, from: data) else {
-            return
-        }
-
-        execute("BEGIN TRANSACTION;")
-        for entry in legacy.entries.values {
-            insertOrReplace(entry: entry)
-        }
-        setMetadata(key: "cache_size_limit_bytes", value: String(legacy.cacheSizeLimitBytes))
-        setMetadata(key: "next_sequence", value: String(legacy.nextSequence))
-        execute("COMMIT;")
-
-        try? FileManager.default.removeItem(at: jsonURL)
     }
 }

@@ -9,12 +9,6 @@ nonisolated struct MediaCacheEntry: Codable, Hashable, Sendable {
     var accessSequence: UInt64
 }
 
-nonisolated struct MediaCacheIndexState: Codable, Sendable {
-    var cacheSizeLimitBytes: Int64
-    var nextSequence: UInt64
-    var entries: [String: MediaCacheEntry]
-}
-
 @MainActor
 final class MediaCache {
     nonisolated static let minUserQuotaBytes: Int64 = 250 * 1_024 * 1_024       // 250 MB
@@ -53,10 +47,6 @@ final class MediaCache {
 
         let dbIndex = SQLiteMediaCacheIndex(databaseURL: dbURL)
         self.db = dbIndex
-
-        // Migrate legacy cache-index.json if it exists
-        let legacyJSONURL = standardized.appendingPathComponent("cache-index.json")
-        dbIndex.migrateLegacyJSONIfNeeded(from: legacyJSONURL, defaultLimitBytes: initialLimitBytes)
 
         let stats = dbIndex.stats()
         self.entryCount = stats.count
