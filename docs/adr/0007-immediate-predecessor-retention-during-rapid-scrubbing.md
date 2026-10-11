@@ -1,0 +1,3 @@
+# Immediate Predecessor Retention During Rapid Scrubbing
+
+When rapid sequential navigation occurs (such as fast arrow-key flipping or filmstrip scrubbing), speculative prefetch tasks for skipped items ($i - 2, i - 3, \dots$) are immediately cancelled to prevent network queue congestion. However, to support the common culling workflow of stepping back one frame to compare adjacent burst captures, the decode task for the immediate predecessor ($i - 1$) is retained at secondary priority alongside the newly focused frame ($i$). This bounds concurrent active network I/O to two requests while enabling zero-latency single-step backtracking.
