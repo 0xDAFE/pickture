@@ -440,28 +440,7 @@ nonisolated enum PreviewLoader {
     }
 
     private static func downsampleIfNeeded(cgImage: CGImage, maxPixelSize: Int) -> CGImage {
-        let maxDim = max(cgImage.width, cgImage.height)
-        guard maxDim > maxPixelSize, maxPixelSize > 0 else {
-            return cgImage
-        }
-        let scale = Double(maxPixelSize) / Double(maxDim)
-        let targetWidth = max(1, Int((Double(cgImage.width) * scale).rounded()))
-        let targetHeight = max(1, Int((Double(cgImage.height) * scale).rounded()))
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let context = CGContext(
-            data: nil,
-            width: targetWidth,
-            height: targetHeight,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return cgImage
-        }
-        context.interpolationQuality = .medium
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
-        return context.makeImage() ?? cgImage
+        MetalDownsampler.downsample(cgImage: cgImage, maxPixelSize: maxPixelSize)
     }
 
     static func extractVideoThumbnail(from url: URL, maxPixelSize: Int = 360) async -> PreviewExtractionResult? {

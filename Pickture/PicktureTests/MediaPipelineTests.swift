@@ -317,7 +317,7 @@ struct MediaPipelineTests {
         #expect(!pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
 
         pipeline.flushIndexImmediately()
-        let indexFile = cacheDir.appendingPathComponent("cache-index.json")
+        let indexFile = pipeline.cache.indexFileURL
         #expect(FileManager.default.fileExists(atPath: indexFile.path))
     }
 
@@ -385,7 +385,9 @@ struct MediaPipelineTests {
 
         pipeline.cancelThumbnail(for: item, previewSource: .preferRaster)
 
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        while await queue.pendingCount > 0 {
+            await Task.yield()
+        }
 
         await blockerRelease.signal()
         _ = await blockerTask.value
