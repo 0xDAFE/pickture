@@ -429,6 +429,8 @@ struct FilmstripImageCanvasView: View {
     let session: CullingSession
 
     @State private var previewImage: CGImage?
+    @State private var fullRawImage: CGImage?
+    @State private var isLoadingFullRaw = false
     @State private var zoomScale: CGFloat = 1.0
     @State private var pinchScale: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
@@ -441,10 +443,13 @@ struct FilmstripImageCanvasView: View {
     }
 
     private var displayedImage: CGImage? {
-        previewImage
+        fullRawImage
+            ?? previewImage
+            ?? session.cachedFullRAWImage(for: item)
             ?? session.cachedPreviewImage(for: item, maxPixelSize: 2048)
             ?? session.cachedThumbnailImage(for: item, maxPixelSize: 360)
     }
+
 
     var body: some View {
         GeometryReader { geo in
@@ -494,7 +499,46 @@ struct FilmstripImageCanvasView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     }
                 }
+
+                // On-demand Full RAW demosaic action for critical focus inspection (ADR-0005)
+                if item.hasRAWFile && fullRawImage == nil && session.cachedFullRAWImage(for: item) == nil {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Button {
+                                Task {
+                                    isLoadingFullRaw = true
+                                    defer { isLoadingFullRaw = false }
+                                    if let raw = await session.loadFullRAW(for: item) {
+                                        if !Task.isCancelled {
+                                            fullRawImage = raw
+                                        }
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    if isLoadingFullRaw {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .tint(.white)
+                                    } else {
+                                        Image(systemName: "camera.aperture")
+                                    }
+                                    Text(isLoadingFullRaw ? "Demosaicing RAW…" : "Load Full RAW")
+                                        .font(.caption.weight(.medium))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(.ultraThinMaterial, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(16)
+                        }
+                        Spacer()
+                    }
+                }
             }
+
             .contentShape(Rectangle())
             // Double-tap zoom gesture (toggles between 1.0 and 2.0)
             .gesture(
@@ -575,11 +619,7 @@ struct FilmstripImageCanvasView: View {
             .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
                 isLoading = true
                 defer { isLoading = false }
-                guard let data = await session.loadPreviewImageData(for: item, maxPixelSize: 2048) else {
-                    previewImage = nil
-                    return
-                }
-                let decoded = await PreviewLoader.decodeCGImageAsync(from: data)
+                let decoded = await session.loadPreviewImage(for: item, maxPixelSize: 2048)
                 if !Task.isCancelled {
                     previewImage = decoded
                 }

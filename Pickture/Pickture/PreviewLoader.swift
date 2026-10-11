@@ -11,8 +11,15 @@ nonisolated enum PreviewExtractionStrategy: String, Sendable {
 }
 
 nonisolated struct PreviewExtractionResult: Sendable {
+    let image: CGImage?
     let jpegData: Data
     let strategy: PreviewExtractionStrategy
+
+    init(image: CGImage? = nil, jpegData: Data, strategy: PreviewExtractionStrategy) {
+        self.image = image
+        self.jpegData = jpegData
+        self.strategy = strategy
+    }
 }
 
 actor HeavyDecodeLimiter {
@@ -104,7 +111,8 @@ nonisolated enum PreviewLoader {
     ) -> PreviewExtractionResult? {
         if isRaw {
             if let headerJPEG = extractEmbeddedJPEGFromHeaderPrefix(containerSource: source, at: url, maxPixelSize: maxPixelSize) {
-                return PreviewExtractionResult(jpegData: headerJPEG, strategy: .embeddedPreview)
+                let decoded = decodeCGImage(from: headerJPEG)
+                return PreviewExtractionResult(image: decoded, jpegData: headerJPEG, strategy: .embeddedPreview)
             }
         }
         guard let source, CGImageSourceGetCount(source) > 0 else { return nil }
@@ -118,7 +126,7 @@ nonisolated enum PreviewLoader {
         if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, sizedEmbeddedOptions as CFDictionary) {
             let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
             if let jpegData = encodeToJPEG(cgImage: scaled) {
-                return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
+                return PreviewExtractionResult(image: scaled, jpegData: jpegData, strategy: .embeddedPreview)
             }
         }
 
@@ -130,7 +138,7 @@ nonisolated enum PreviewLoader {
         if let embeddedCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, unsizedEmbeddedOptions as CFDictionary) {
             let scaled = downsampleIfNeeded(cgImage: embeddedCGImage, maxPixelSize: maxPixelSize)
             if let jpegData = encodeToJPEG(cgImage: scaled) {
-                return PreviewExtractionResult(jpegData: jpegData, strategy: .embeddedPreview)
+                return PreviewExtractionResult(image: scaled, jpegData: jpegData, strategy: .embeddedPreview)
             }
         }
 
@@ -152,7 +160,8 @@ nonisolated enum PreviewLoader {
             }
         } else if isRaw {
             if let tiffFallbackJPEG = extractTIFFHintFullDecode(from: url, maxPixelSize: maxPixelSize) {
-                return PreviewExtractionResult(jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
+                let decoded = decodeCGImage(from: tiffFallbackJPEG)
+                return PreviewExtractionResult(image: decoded, jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
             }
         }
 
@@ -162,6 +171,15 @@ nonisolated enum PreviewLoader {
     static func extractImageThumbnailAsync(from url: URL, maxPixelSize: Int = 360) async -> PreviewExtractionResult? {
         guard !Task.isCancelled else { return nil }
         let isRaw = MediaFormatKind.classify(fileExtension: url.pathExtension) == .raw
+        if isRaw {
+            if let rawExtraction = await RAWPreviewExtractor.extractEmbeddedPreview(from: url, maxPixelSize: maxPixelSize) {
+                return PreviewExtractionResult(
+                    image: rawExtraction.cgImage,
+                    jpegData: rawExtraction.jpegData,
+                    strategy: .embeddedPreview
+                )
+            }
+        }
         let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
         let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary)
 
@@ -180,7 +198,8 @@ nonisolated enum PreviewLoader {
             return await HeavyDecodeLimiter.shared.withPermit {
                 guard !Task.isCancelled else { return nil }
                 if let tiffFallbackJPEG = extractTIFFHintFullDecode(from: url, maxPixelSize: maxPixelSize) {
-                    return PreviewExtractionResult(jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
+                    let decoded = decodeCGImage(from: tiffFallbackJPEG)
+                    return PreviewExtractionResult(image: decoded, jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
                 }
                 return nil
             }
@@ -203,7 +222,7 @@ nonisolated enum PreviewLoader {
         ]
         if let fallbackCGImage = CGImageSourceCreateThumbnailAtIndex(source, 0, fallbackOptions as CFDictionary),
            let jpegData = encodeToJPEG(cgImage: fallbackCGImage) {
-            return PreviewExtractionResult(jpegData: jpegData, strategy: .fullDecodeFallback)
+            return PreviewExtractionResult(image: fallbackCGImage, jpegData: jpegData, strategy: .fullDecodeFallback)
         }
 
         if let fullCGImage = CGImageSourceCreateImageAtIndex(source, 0, nil) {
@@ -214,16 +233,19 @@ nonisolated enum PreviewLoader {
                 containerOrientation: containerOrientation,
                 maxPixelSize: maxPixelSize
             ) {
-                return PreviewExtractionResult(jpegData: jpegData, strategy: .fullDecodeFallback)
+                let decoded = decodeCGImage(from: jpegData)
+                return PreviewExtractionResult(image: decoded, jpegData: jpegData, strategy: .fullDecodeFallback)
             }
         }
 
         if isRaw, let tiffFallbackJPEG = extractTIFFHintFullDecode(from: url, maxPixelSize: maxPixelSize) {
-            return PreviewExtractionResult(jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
+            let decoded = decodeCGImage(from: tiffFallbackJPEG)
+            return PreviewExtractionResult(image: decoded, jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
         }
 
         return nil
     }
+
 
     private static func extractTIFFHintFullDecode(from url: URL, maxPixelSize: Int) -> Data? {
         let tiffHintOptions: [CFString: Any] = [
@@ -444,7 +466,7 @@ nonisolated enum PreviewLoader {
                 guard let jpegData = encodeToJPEG(cgImage: cgImage) else {
                     return nil
                 }
-                return PreviewExtractionResult(jpegData: jpegData, strategy: .videoFrameGenerator)
+                return PreviewExtractionResult(image: cgImage, jpegData: jpegData, strategy: .videoFrameGenerator)
             } catch {
                 return nil
             }
@@ -624,7 +646,51 @@ nonisolated enum PreviewLoader {
         }
         return mutableData as Data
     }
+
+    static func extractFullRAW(from url: URL) -> (image: CGImage, data: Data)? {
+        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary),
+              CGImageSourceGetCount(source) > 0 else {
+            return nil
+        }
+        guard let fullCGImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        let containerOrientation = extractContainerOrientation(from: source, url: url)
+        let oriented: CGImage
+        if let containerOrientation, containerOrientation != .up {
+            oriented = applyOrientation(cgImage: fullCGImage, orientation: containerOrientation)
+        } else {
+            oriented = fullCGImage
+        }
+        guard let encoded = encodeToHEIC(cgImage: oriented) else {
+            return nil
+        }
+        return (image: oriented, data: encoded.data)
+    }
+
+    static func encodeToHEIC(cgImage: CGImage, quality: Double = 0.88) -> (data: Data, format: String)? {
+        let cfData = NSMutableData()
+        if let destination = CGImageDestinationCreateWithData(cfData, UTType.heic.identifier as CFString, 1, nil) {
+            let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
+            CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+            if CGImageDestinationFinalize(destination) {
+                return (data: cfData as Data, format: "heic")
+            }
+        }
+        // Fallback to JPEG
+        cfData.length = 0
+        if let destination = CGImageDestinationCreateWithData(cfData, UTType.jpeg.identifier as CFString, 1, nil) {
+            let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
+            CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+            if CGImageDestinationFinalize(destination) {
+                return (data: cfData as Data, format: "jpeg")
+            }
+        }
+        return nil
+    }
 }
+
 
 extension CGImage {
     var aspectRatio: CGFloat {

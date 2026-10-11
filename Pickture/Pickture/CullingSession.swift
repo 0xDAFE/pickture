@@ -821,6 +821,10 @@ final class CullingSession: CullingInteractionTarget {
         startBackgroundExifPreloading(for: self.items)
     }
 
+    func loadThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) async -> CGImage? {
+        await mediaPipeline.loadThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    }
+
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
         await mediaPipeline.loadThumbnailData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
@@ -833,9 +837,22 @@ final class CullingSession: CullingInteractionTarget {
         mediaPipeline.cachedPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
+    func cachedFullRAWImage(for item: MediaItem) -> CGImage? {
+        mediaPipeline.cachedFullRAWImage(for: item)
+    }
+
+    func loadPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) async -> CGImage? {
+        await mediaPipeline.loadPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    }
+
     func loadPreviewImageData(for item: MediaItem, maxPixelSize: Int = 2048) async -> Data? {
         await mediaPipeline.loadPreviewImageData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
+
+    func loadFullRAW(for item: MediaItem) async -> CGImage? {
+        await mediaPipeline.loadFullRAW(for: item)
+    }
+
 
     func cancelThumbnail(for item: MediaItem, maxPixelSize: Int = 360) {
         mediaPipeline.cancelThumbnail(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)

@@ -126,7 +126,12 @@ nonisolated struct MediaItem: Identifiable, Hashable, Codable, Sendable {
             return pair.rawFile
         }
     }
+
+    var hasRAWFile: Bool {
+        mediaPair?.rawFile != nil || primaryFile.formatKind == .raw
+    }
 }
+
 
 nonisolated enum SubfolderMode: String, Codable, CaseIterable, Hashable, Sendable {
     case immediate
