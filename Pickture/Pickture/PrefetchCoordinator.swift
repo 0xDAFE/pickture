@@ -59,6 +59,7 @@ actor PrefetchCoordinator {
     var isIdleWarmingEnabled: Bool = true
     let idleDelayNanoseconds: UInt64
     private(set) var isIdleWarmingActive: Bool = false
+    private(set) var idleWarmingExecutionCount: Int = 0
 
     init(
         baselineWorkerCount: Int = 2,
@@ -350,6 +351,7 @@ actor PrefetchCoordinator {
         guard !Task.isCancelled else { return }
 
         isIdleWarmingActive = true
+        idleWarmingExecutionCount += 1
         defer { isIdleWarmingActive = false }
 
         let depth = effectivePrefetchDepth
@@ -400,6 +402,12 @@ actor PrefetchCoordinator {
         while !activePrefetchTasks.isEmpty || !pendingTargetItems.isEmpty || isIdleWarmingActive {
             await Task.yield()
             try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
+    func waitForIdleWarming() async {
+        if let task = idleTimerTask {
+            _ = await task.value
         }
     }
 }

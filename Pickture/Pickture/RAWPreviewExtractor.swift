@@ -83,8 +83,9 @@ public enum RAWPreviewExtractor {
             // Check SOI: 0xFF 0xD8
             guard jpegData[0] == 0xFF, jpegData[1] == 0xD8 else { return nil }
 
-            if let cgImage = decodeJPEG(data: jpegData, maxPixelSize: maxPixelSize) {
-                return RAWPreviewExtraction(cgImage: cgImage, jpegData: jpegData)
+            let containerOrientation = PreviewLoader.extractContainerOrientation(from: nil, prefixData: headerData, url: url)
+            if let result = decodeJPEG(data: jpegData, maxPixelSize: maxPixelSize, fallbackOrientation: containerOrientation) {
+                return RAWPreviewExtraction(cgImage: result.cgImage, jpegData: result.jpegData)
             }
         } catch {
             return nil
@@ -120,8 +121,17 @@ public enum RAWPreviewExtractor {
                     if let jpegData = try handle.read(upToCount: jpegLength),
                        jpegData.count > 4,
                        jpegData[0] == 0xFF, jpegData[1] == 0xD8 {
-                        if let cgImage = decodeJPEG(data: jpegData, maxPixelSize: maxPixelSize) {
-                            return RAWPreviewExtraction(cgImage: cgImage, jpegData: jpegData)
+                        var containerOrientation: CGImagePropertyOrientation? = nil
+                        let cmt1Pattern = Data("CMT1".utf8)
+                        if let cmt1Index = chunk.range(of: cmt1Pattern)?.upperBound, cmt1Index + 12 <= chunk.count {
+                            let tiffSlice = chunk.subdata(in: cmt1Index..<min(chunk.count, cmt1Index + 4096))
+                            containerOrientation = PreviewLoader.extractTIFFOrientation(from: tiffSlice)
+                        }
+                        if containerOrientation == nil {
+                            containerOrientation = PreviewLoader.extractContainerOrientation(from: nil, url: url)
+                        }
+                        if let result = decodeJPEG(data: jpegData, maxPixelSize: maxPixelSize, fallbackOrientation: containerOrientation) {
+                            return RAWPreviewExtraction(cgImage: result.cgImage, jpegData: result.jpegData)
                         }
                     }
                 } catch { }
@@ -316,8 +326,8 @@ public enum RAWPreviewExtractor {
                 guard let data = try handle.read(upToCount: Int(cand.length)), data.count >= 4 else { continue }
                 guard data[0] == 0xFF && data[1] == 0xD8 else { continue }
 
-                if let cgImage = decodeJPEG(data: data, maxPixelSize: maxPixelSize, fallbackOrientation: containerOrientation) {
-                    return RAWPreviewExtraction(cgImage: cgImage, jpegData: data)
+                if let result = decodeJPEG(data: data, maxPixelSize: maxPixelSize, fallbackOrientation: containerOrientation) {
+                    return RAWPreviewExtraction(cgImage: result.cgImage, jpegData: result.jpegData)
                 }
             } catch {
                 continue
@@ -333,7 +343,7 @@ public enum RAWPreviewExtractor {
         data: Data,
         maxPixelSize: Int,
         fallbackOrientation: CGImagePropertyOrientation? = nil
-    ) -> CGImage? {
+    ) -> (cgImage: CGImage, jpegData: Data)? {
         let options: [CFString: Any] = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -356,60 +366,22 @@ public enum RAWPreviewExtractor {
             hasOwnOrientation = true
         }
 
+        let finalImage: CGImage
         if !hasOwnOrientation, let fallbackOrientation, fallbackOrientation != .up {
-            return applyOrientation(cgImage: thumbnail, orientation: fallbackOrientation)
-        }
-        return thumbnail
-    }
-
-    private static func applyOrientation(cgImage: CGImage, orientation: CGImagePropertyOrientation) -> CGImage {
-        let width = cgImage.width
-        let height = cgImage.height
-        let isRotated = orientation == .left || orientation == .right || orientation == .leftMirrored || orientation == .rightMirrored
-        let targetWidth = isRotated ? height : width
-        let targetHeight = isRotated ? width : height
-
-        let colorSpace = cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
-        guard let context = CGContext(
-            data: nil,
-            width: targetWidth,
-            height: targetHeight,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return cgImage
+            finalImage = PreviewLoader.applyOrientation(cgImage: thumbnail, orientation: fallbackOrientation)
+        } else {
+            finalImage = thumbnail
         }
 
-        switch orientation {
-        case .up:
-            break
-        case .upMirrored:
-            context.translateBy(x: CGFloat(targetWidth), y: 0)
-            context.scaleBy(x: -1, y: 1)
-        case .down:
-            context.translateBy(x: CGFloat(targetWidth), y: CGFloat(targetHeight))
-            context.rotate(by: .pi)
-        case .downMirrored:
-            context.translateBy(x: 0, y: CGFloat(targetHeight))
-            context.scaleBy(x: 1, y: -1)
-        case .leftMirrored:
-            context.rotate(by: .pi / 2)
-            context.scaleBy(x: 1, y: -1)
-        case .right:
-            context.translateBy(x: CGFloat(targetWidth), y: 0)
-            context.rotate(by: .pi / 2)
-        case .rightMirrored:
-            context.translateBy(x: CGFloat(targetWidth), y: CGFloat(targetHeight))
-            context.rotate(by: .pi / 2)
-            context.scaleBy(x: 1, y: -1)
-        case .left:
-            context.translateBy(x: 0, y: CGFloat(targetHeight))
-            context.rotate(by: -.pi / 2)
+        let outJPEGData: Data
+        if !hasOwnOrientation, let fallbackOrientation, fallbackOrientation != .up {
+            outJPEGData = PreviewLoader.encodeToJPEG(cgImage: finalImage) ?? data
+        } else if maxPixelSize <= 1024 && data.count > 100_000 {
+            outJPEGData = PreviewLoader.encodeToJPEG(cgImage: finalImage) ?? data
+        } else {
+            outJPEGData = data
         }
 
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return context.makeImage() ?? cgImage
+        return (cgImage: finalImage, jpegData: outJPEGData)
     }
 }

@@ -290,7 +290,7 @@ struct PrefetchCoordinatorTests {
             baselineWorkerCount: 2,
             maxWorkerCount: 4,
             configuredLookaheadDepth: 3,
-            idleDelayNanoseconds: 20_000_000, // 20ms for fast test execution
+            idleDelayNanoseconds: 20_000_000,
             cacheCapacityProvider: { 50 },
             isItemCached: { _, _ in false },
             previewFetcher: { item, _ in
@@ -300,16 +300,10 @@ struct PrefetchCoordinatorTests {
 
         // Select item 0
         await coordinator.navigate(selectedID: items[0].id, visibleItems: items, previewSource: .preferRaster)
-        await coordinator.waitForPendingTasks()
-        prefetchedIDs.removeAll()
-
-        // Wait for idle warming to fire (delay is 20ms) and complete
-        for _ in 0..<20 {
-            try await Task.sleep(nanoseconds: 10_000_000)
-            if !prefetchedIDs.elements.isEmpty { break }
-        }
+        await coordinator.waitForIdleWarming()
 
         let fetched = prefetchedIDs.elements
+        #expect(await coordinator.idleWarmingExecutionCount >= 1)
         #expect(!fetched.isEmpty)
         #expect(fetched.contains("item_1") || fetched.contains("item_2"))
 
@@ -337,14 +331,10 @@ struct PrefetchCoordinatorTests {
 
         // Select item 0
         await coordinator.navigate(selectedID: items[0].id, visibleItems: items, previewSource: .preferRaster)
-        await coordinator.waitForPendingTasks()
-        prefetchedIDs.removeAll()
-
-        // Wait 60ms
-        try await Task.sleep(nanoseconds: 60_000_000)
+        await coordinator.waitForIdleWarming()
 
         // Idle warming must NOT have run
-        #expect(prefetchedIDs.elements.isEmpty)
+        #expect(await coordinator.idleWarmingExecutionCount == 0)
         #expect(await coordinator.isIdleWarmingActive == false)
 
         await coordinator.cancelAll()

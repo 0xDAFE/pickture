@@ -612,6 +612,22 @@ nonisolated enum PreviewLoader {
                 return val
             }
         }
+        if let url {
+            let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+            if let imgSource = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary),
+               CGImageSourceGetCount(imgSource) > 0,
+               let props = CGImageSourceCopyPropertiesAtIndex(imgSource, 0, nil) as? [CFString: Any] {
+                if let num = props[kCGImagePropertyOrientation] as? NSNumber,
+                   let ori = CGImagePropertyOrientation(rawValue: num.uint32Value) {
+                    return ori
+                }
+                if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any],
+                   let num = tiff[kCGImagePropertyTIFFOrientation] as? NSNumber,
+                   let ori = CGImagePropertyOrientation(rawValue: num.uint32Value) {
+                    return ori
+                }
+            }
+        }
         return nil
     }
 
@@ -619,7 +635,7 @@ nonisolated enum PreviewLoader {
         decodeCGImage(from: data)
     }
 
-    private static func encodeToJPEG(cgImage: CGImage, quality: Double = 0.82) -> Data? {
+    static func encodeToJPEG(cgImage: CGImage, quality: Double = 0.82) -> Data? {
         let mutableData = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
             mutableData as CFMutableData,

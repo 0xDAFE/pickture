@@ -315,8 +315,7 @@ struct FilmstripView: View {
                 session.selectedItemID = item.id
             },
             loadThumbnail: { [session, item] in
-                guard let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) else { return nil }
-                return await PreviewLoader.decodeCGImageAsync(from: data)
+                await session.loadThumbnailImage(for: item, maxPixelSize: 360)
             },
             onThumbnailLoaded: { [session, item] image in
                 session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
