@@ -103,6 +103,17 @@ struct PicktureToolbarContent: ToolbarContent {
                 )
             }
 
+            if session.storageVolumeProfile == .networkShare {
+                Button {
+                    session.toggleHighSpeedLANOverride()
+                } label: {
+                    Label(
+                        session.isHighSpeedLANOverrideEnabled ? "High-Speed LAN: On" : "LAN Throttled: Off",
+                        systemImage: session.isHighSpeedLANOverrideEnabled ? "bolt.horizontal.fill" : "network"
+                    )
+                }
+            }
+
             Button {
                 session.toggleAutoAdvance()
             } label: {
@@ -169,6 +180,19 @@ struct PicktureToolbarContent: ToolbarContent {
             )
         }
         .help("Toggle PreviewSource (PreferRaster ↔ PreferRAW) (J)")
+
+        if session.storageVolumeProfile == .networkShare {
+            Button {
+                session.toggleHighSpeedLANOverride()
+            } label: {
+                Label(
+                    session.isHighSpeedLANOverrideEnabled ? "High-Speed LAN" : "LAN Throttled",
+                    systemImage: session.isHighSpeedLANOverrideEnabled ? "bolt.horizontal.fill" : "network"
+                )
+                .foregroundStyle(session.isHighSpeedLANOverrideEnabled ? Color.accentColor : Color.secondary)
+            }
+            .help(session.isHighSpeedLANOverrideEnabled ? "High-Speed LAN Mode active (4 concurrent workers)" : "Network share throttled (2 concurrent workers). Click to enable High-Speed LAN mode.")
+        }
 
         Button {
             session.toggleAutoAdvance()

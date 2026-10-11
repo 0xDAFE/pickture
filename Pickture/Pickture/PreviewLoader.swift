@@ -25,7 +25,7 @@ nonisolated struct PreviewExtractionResult: Sendable {
 actor HeavyDecodeLimiter {
     static let shared = HeavyDecodeLimiter(maxConcurrent: 2)
 
-    private let maxConcurrent: Int
+    private(set) var maxConcurrent: Int
     private var activeCount: Int = 0
     private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Never>)] = []
 
@@ -33,8 +33,21 @@ actor HeavyDecodeLimiter {
         self.maxConcurrent = maxConcurrent
     }
 
+    func setMaxConcurrent(_ newLimit: Int) {
+        self.maxConcurrent = max(1, newLimit)
+        while activeCount < maxConcurrent && !waiters.isEmpty {
+            activeCount += 1
+            let next = waiters.removeFirst()
+            next.continuation.resume()
+        }
+    }
+
     var currentActiveCount: Int {
         activeCount
+    }
+
+    var currentPermits: Int {
+        maxConcurrent
     }
 
     func withPermit<T: Sendable>(_ operation: @Sendable () async throws -> T) async rethrows -> T {

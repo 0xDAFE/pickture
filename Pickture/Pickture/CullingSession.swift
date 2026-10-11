@@ -93,6 +93,16 @@ final class CullingSession: CullingInteractionTarget {
     private(set) var openFolderProgress: Double? = nil
     var isLazySidecarHydrationEnabled: Bool = false
     private(set) var isExifPreloading: Bool = false
+    private(set) var indexedExifCount: Int = 0
+    private(set) var totalExifTargetCount: Int = 0
+    private(set) var isCullingNavigating: Bool = false
+    private var navigationIdleTask: Task<Void, Never>? = nil
+    private(set) var storageVolumeProfile: StorageVolumeProfile = .internalSSD
+    var isHighSpeedLANOverrideEnabled: Bool = false {
+        didSet {
+            applyActiveVolumeProfile()
+        }
+    }
     private var backgroundExifTask: Task<Void, Never>? = nil
     var flushDebounceNanoseconds: UInt64 {
         get { metadataSyncEngine.flushDebounceNanoseconds }
@@ -467,12 +477,44 @@ final class CullingSession: CullingInteractionTarget {
         let currentVisible = visibleItems
         let currentSource = previewSource
         let coordinator = prefetchCoordinator
+
+        // Flag active culling navigation to pause background EXIF extraction
+        isCullingNavigating = true
+        navigationIdleTask?.cancel()
+        navigationIdleTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            self?.isCullingNavigating = false
+        }
+
         Task {
             await coordinator.navigate(
                 selectedID: id,
                 visibleItems: currentVisible,
                 previewSource: currentSource
             )
+        }
+    }
+
+    func toggleHighSpeedLANOverride() {
+        isHighSpeedLANOverrideEnabled.toggle()
+    }
+
+    func setHighSpeedLANOverride(_ enabled: Bool) {
+        isHighSpeedLANOverrideEnabled = enabled
+    }
+
+    func setStorageVolumeProfile(_ profile: StorageVolumeProfile) {
+        self.storageVolumeProfile = profile
+        applyActiveVolumeProfile()
+    }
+
+    private func applyActiveVolumeProfile() {
+        let profile = storageVolumeProfile
+        let highSpeed = isHighSpeedLANOverrideEnabled
+        Task {
+            await mediaPipeline.applyStorageVolumeProfile(profile, isHighSpeedLAN: highSpeed)
+            await prefetchCoordinator.applyStorageVolumeProfile(profile, isHighSpeedLAN: highSpeed)
         }
     }
 
@@ -605,12 +647,35 @@ final class CullingSession: CullingInteractionTarget {
         }
         guard !itemsToLoad.isEmpty else {
             isExifPreloading = false
+            indexedExifCount = 0
+            totalExifTargetCount = 0
             return
         }
 
         isExifPreloading = true
+        totalExifTargetCount = itemsToLoad.count
+        indexedExifCount = 0
+
         backgroundExifTask = Task.detached(priority: .utility) { [weak self] in
-            let extracted = await ExifHeaderExtractor.extractBatch(for: itemsToLoad)
+            let extracted = await ExifHeaderExtractor.extractBatch(
+                for: itemsToLoad,
+                isPaused: { [weak self] in
+                    await MainActor.run { [weak self] in
+                        self?.isCullingNavigating ?? false
+                    }
+                },
+                onProgress: { [weak self] count, itemID, exif in
+                    await MainActor.run { [weak self] in
+                        guard let self, !Task.isCancelled else { return }
+                        self.indexedExifCount = count
+                        let existing = self.exifByItemID[itemID] ?? self.metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
+                        let merged = existing.supplementing(with: exif)
+                        self.headerSupplementedItemIDs.insert(itemID)
+                        self.exifByItemID[itemID] = merged
+                        self.metadataSyncStore.recordExif(merged, for: itemID)
+                    }
+                }
+            )
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 guard let self, !Task.isCancelled else { return }
@@ -800,8 +865,13 @@ final class CullingSession: CullingInteractionTarget {
         metadataSyncEngine.reset()
         interactionController.clearSwipeHistory()
         backgroundExifTask?.cancel()
-        backgroundExifTask = nil
         isExifPreloading = false
+        indexedExifCount = 0
+        totalExifTargetCount = 0
+        isCullingNavigating = false
+        navigationIdleTask?.cancel()
+        navigationIdleTask = nil
+        DirectoryListingCache.shared.clear()
         mediaPipeline.flushIndexImmediately()
         isDiscovering = false
         openFolderProgress = nil
@@ -966,6 +1036,9 @@ final class CullingSession: CullingInteractionTarget {
         var accumulatedItems: [MediaItem] = []
         var hasSetCurrentFolder = false
 
+        self.storageVolumeProfile = StorageVolumeDetector.detectProfile(for: resolvedURL)
+        applyActiveVolumeProfile()
+
         let stream = MediaDiscovery.streamDiscoveredItems(
             from: resolvedURL,
             mode: subfolderMode,
@@ -1019,6 +1092,8 @@ final class CullingSession: CullingInteractionTarget {
         self.isDiscovering = true
         defer { self.isDiscovering = false }
         do {
+            self.storageVolumeProfile = StorageVolumeDetector.detectProfile(for: resolvedURL)
+            applyActiveVolumeProfile()
             let discoveredItems = try discoverItems(in: resolvedURL.standardizedFileURL, mode: subfolderMode)
             self.recentFolders = updatedRecents
             self.currentFolderURL = resolvedURL

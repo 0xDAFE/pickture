@@ -47,6 +47,7 @@ nonisolated enum MediaDiscovery {
             includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isHiddenKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         )
+        DirectoryListingCache.shared.setContents(contents, for: directoryURL)
 
         var mediaFiles: [MediaFile] = []
         var sidecarsByLowerBase: [String: URL] = [:]

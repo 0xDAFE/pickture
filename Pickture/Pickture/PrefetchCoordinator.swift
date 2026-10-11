@@ -36,8 +36,8 @@ actor PrefetchCoordinator {
     private(set) var lastDirection: Direction = .stationary
 
     // Parallelism settings
-    let baselineWorkerCount: Int
-    let maxWorkerCount: Int
+    private(set) var baselineWorkerCount: Int
+    private(set) var maxWorkerCount: Int
     private(set) var currentWorkerCount: Int
     private(set) var consecutiveSequentialSteps: Int = 0
     private var lastNavigationInstant: ContinuousClock.Instant?
@@ -45,6 +45,9 @@ actor PrefetchCoordinator {
     // Depth settings
     var configuredLookaheadDepth: Int
     var cacheCapacityProvider: @Sendable () -> Int
+
+    var currentMinWorkers: Int { baselineWorkerCount }
+    var currentLookaheadDepth: Int { configuredLookaheadDepth }
 
     // Active prefetch tasks: [ItemID: Task<Void, Never>]
     private var activePrefetchTasks: [String: Task<Void, Never>] = [:]
@@ -84,6 +87,20 @@ actor PrefetchCoordinator {
         let capacity = cacheCapacityProvider()
         let maxAllowed = max(1, capacity / 2)
         return min(configuredLookaheadDepth, maxAllowed)
+    }
+
+    func applyStorageVolumeProfile(_ profile: StorageVolumeProfile, isHighSpeedLAN: Bool = false) {
+        if profile == .networkShare && isHighSpeedLAN {
+            self.baselineWorkerCount = 2
+            self.maxWorkerCount = 4
+            self.configuredLookaheadDepth = 6
+        } else {
+            let workers = profile.defaultPrefetchWorkers
+            self.baselineWorkerCount = workers.baseline
+            self.maxWorkerCount = workers.max
+            self.configuredLookaheadDepth = profile.defaultLookaheadDepth
+        }
+        self.currentWorkerCount = min(maxWorkerCount, max(baselineWorkerCount, currentWorkerCount))
     }
 
     var activeTaskCount: Int {

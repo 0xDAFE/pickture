@@ -30,6 +30,10 @@ actor ThumbnailQueueActor {
         pump()
     }
 
+    var currentMaxWorkers: Int {
+        maxConcurrentWorkers
+    }
+
     func enqueue<T: Sendable>(
         id: String,
         operation: @escaping @Sendable () async -> T?
@@ -103,6 +107,8 @@ final class MediaPipeline {
     let cache: MediaCache
     @ObservationIgnored
     let thumbnailQueue: ThumbnailQueueActor
+    @ObservationIgnored
+    let heavyDecodeLimiter: HeavyDecodeLimiter
 
     private(set) var totalCachedBytes: Int64 = 0
     private(set) var cacheSizeLimitBytes: Int64 = MediaCache.defaultQuotaBytes
@@ -110,11 +116,13 @@ final class MediaPipeline {
     init(
         cacheDirectoryURL: URL,
         initialLimitBytes: Int64 = MediaCache.defaultQuotaBytes,
-        maxConcurrentThumbnailWorkers: Int = 4
+        maxConcurrentThumbnailWorkers: Int = 4,
+        heavyDecodeLimiter: HeavyDecodeLimiter = HeavyDecodeLimiter.shared
     ) {
         let cache = MediaCache(cacheDirectoryURL: cacheDirectoryURL, initialLimitBytes: initialLimitBytes)
         self.cache = cache
         self.thumbnailQueue = ThumbnailQueueActor(maxConcurrentWorkers: maxConcurrentThumbnailWorkers)
+        self.heavyDecodeLimiter = heavyDecodeLimiter
         self.totalCachedBytes = cache.totalCachedBytes
         self.cacheSizeLimitBytes = cache.cacheSizeLimitBytes
     }
@@ -135,6 +143,13 @@ final class MediaPipeline {
             max(MediaCache.minUserQuotaBytes, limitBytes)
         )
         setCacheSizeLimitBytes(clamped)
+    }
+
+    func applyStorageVolumeProfile(_ profile: StorageVolumeProfile, isHighSpeedLAN: Bool = false) async {
+        let thumbWorkers = profile.effectiveThumbnailWorkers(isHighSpeedLAN: isHighSpeedLAN)
+        let heavyPermits = profile.effectiveHeavyDecodes(isHighSpeedLAN: isHighSpeedLAN)
+        await thumbnailQueue.setMaxConcurrentWorkers(thumbWorkers)
+        await heavyDecodeLimiter.setMaxConcurrent(heavyPermits)
     }
 
     func clearCache() {
@@ -282,7 +297,7 @@ final class MediaPipeline {
             return decoded
         }
         guard !Task.isCancelled else { return nil }
-        let extracted = await HeavyDecodeLimiter.shared.withPermit { () -> PreviewExtractionResult? in
+        let extracted = await self.heavyDecodeLimiter.withPermit { () -> PreviewExtractionResult? in
             guard !Task.isCancelled else { return nil }
             return await PreviewLoader.extractThumbnail(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
         }
@@ -310,7 +325,7 @@ final class MediaPipeline {
             return cached
         }
         guard !Task.isCancelled else { return nil }
-        let extracted = await HeavyDecodeLimiter.shared.withPermit { () -> PreviewExtractionResult? in
+        let extracted = await self.heavyDecodeLimiter.withPermit { () -> PreviewExtractionResult? in
             guard !Task.isCancelled else { return nil }
             return await PreviewLoader.extractThumbnail(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
         }
@@ -337,7 +352,7 @@ final class MediaPipeline {
         }
         guard !Task.isCancelled else { return nil }
         let rawFile = item.mediaPair?.rawFile ?? item.primaryFile
-        let result = await HeavyDecodeLimiter.shared.withPermit { () -> (image: CGImage, data: Data)? in
+        let result = await self.heavyDecodeLimiter.withPermit { () -> (image: CGImage, data: Data)? in
             guard !Task.isCancelled else { return nil }
             return PreviewLoader.extractFullRAW(from: rawFile.url)
         }

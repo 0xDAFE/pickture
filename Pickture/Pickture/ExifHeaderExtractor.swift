@@ -30,13 +30,25 @@ enum ExifHeaderExtractor {
         }
     }
 
-    /// Asynchronously extracts ExifMetadata in batch off the caller's actor context.
-    nonisolated static func extractBatch(for items: [MediaItem]) async -> [(String, ExifMetadata)] {
+    /// Asynchronously extracts ExifMetadata in batch off the caller's actor context,
+    /// supporting pause/resume checks during active culling navigation and streaming progress.
+    nonisolated static func extractBatch(
+        for items: [MediaItem],
+        isPaused: @escaping @Sendable () async -> Bool = { false },
+        onProgress: (@Sendable (Int, String, ExifMetadata) async -> Void)? = nil
+    ) async -> [(String, ExifMetadata)] {
         var results: [(String, ExifMetadata)] = []
+        var processed = 0
         for item in items {
+            if Task.isCancelled { break }
+            while await isPaused() && !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
             if Task.isCancelled { break }
             let exif = extractHeaderExif(for: item)
             results.append((item.id, exif))
+            processed += 1
+            await onProgress?(processed, item.id, exif)
         }
         return results
     }
