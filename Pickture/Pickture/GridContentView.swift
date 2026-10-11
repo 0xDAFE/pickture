@@ -115,7 +115,7 @@ struct GridContentView: View {
                             cacheGeneration: session.cacheGeneration,
                             cachedThumbnail: session.cachedThumbnailImage(for: item, maxPixelSize: 360),
                             aspectRatio: session.thumbnailAspectRatio(for: item),
-                            metadataDeckHeight: session.gridMetadataDeckHeight,
+                            metadataDeckHeight: CullingLayoutCalculator.defaultGridMetadataDeckHeight,
                             onSelect: {
                                 session.selectedItemID = item.id
                             },

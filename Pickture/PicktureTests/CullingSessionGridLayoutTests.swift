@@ -21,26 +21,33 @@ struct CullingSessionGridLayoutTests {
 
         // Pinned metadata deck height is 48pt across all grid rows
         #expect(session.gridMetadataDeckHeight == 48.0)
+        #expect(CullingLayoutCalculator.defaultGridMetadataDeckHeight == 48.0)
 
         // 185pt minimum column width -> 139pt stage height
         let minStageHeight = session.gridStageHeight(for: 185.0)
         #expect(minStageHeight == 139.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: 185.0) == 139.0)
 
         // 200pt typical column width -> 150pt stage height
         let midStageHeight = session.gridStageHeight(for: 200.0)
         #expect(midStageHeight == 150.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: 200.0) == 150.0)
 
         // 240pt column width -> 180pt stage height
         let wideStageHeight = session.gridStageHeight(for: 240.0)
         #expect(wideStageHeight == 180.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: 240.0) == 180.0)
 
         // 260pt maximum column width -> 195pt stage height
         let maxStageHeight = session.gridStageHeight(for: 260.0)
         #expect(maxStageHeight == 195.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: 260.0) == 195.0)
 
         // Ensure proper stage height across standard range without layout explosion
         for width in stride(from: 185.0, through: 260.0, by: 15.0) {
             let height = session.gridStageHeight(for: width)
+            let calcHeight = CullingLayoutCalculator.gridStageHeight(for: width)
+            #expect(height == calcHeight)
             #expect(height >= 135.0 && height <= 200.0)
             let totalHeight = height + session.gridMetadataDeckHeight
             #expect(totalHeight >= 180.0 && totalHeight <= 250.0)
@@ -51,6 +58,10 @@ struct CullingSessionGridLayoutTests {
         #expect(session.gridStageHeight(for: -50.0) == 140.0)
         #expect(session.gridStageHeight(for: .nan) == 140.0)
         #expect(session.gridStageHeight(for: .infinity) == 140.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: 0.0) == 140.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: -50.0) == 140.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: .nan) == 140.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: .infinity) == 140.0)
     }
 
     // MARK: - Slice 2: Dynamic Aspect Ratio Silhouette Preservation (16:9, 3:2, 2:3, 1:1, 9:16)
@@ -163,6 +174,101 @@ struct CullingSessionGridLayoutTests {
             mediaKind: .video
         )
         #expect(abs((videoFallback.width / videoFallback.height) - 1.777) < 0.001)
+    }
+
+    @Test("CullingLayoutCalculator directly verifies Ticket 4 AC 5 dimension and silhouette contracts across 16:9, 3:2, 2:3, 1:1, 9:16 and fallbacks")
+    func cullingLayoutCalculatorDirectDimensionAndSilhouetteCalculations() {
+        let stageWidth: CGFloat = 200.0
+        let stageHeight = CullingLayoutCalculator.gridStageHeight(for: stageWidth) // 150.0
+
+        // 1. Standard widths (185pt - 260pt)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: 185.0) == 139.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: 200.0) == 150.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: 240.0) == 180.0)
+        #expect(CullingLayoutCalculator.gridStageHeight(for: 260.0) == 195.0)
+
+        // 2. 16:9 widescreen video (~1.7778)
+        let videoSize = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: 16.0 / 9.0,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: .video
+        )
+        #expect(videoSize.width == 200.0)
+        #expect(videoSize.height == 112.5)
+
+        // 3. 3:2 standard DSLR RAW
+        let photo32 = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: 1.5,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: .photo
+        )
+        #expect(photo32.width == 200.0)
+        #expect(abs(photo32.height - (200.0 / 1.5)) < 0.0001)
+
+        // 4. 2:3 portrait photo (~0.6667)
+        let portrait23 = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: 2.0 / 3.0,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: .photo
+        )
+        #expect(portrait23.height == 150.0)
+        #expect(portrait23.width == 100.0)
+
+        // 5. 1:1 square photo
+        let square11 = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: 1.0,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: .photo
+        )
+        #expect(square11.width == 150.0)
+        #expect(square11.height == 150.0)
+
+        // 6. 9:16 vertical reel
+        let reel916 = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: 9.0 / 16.0,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: .video
+        )
+        #expect(reel916.height == 150.0)
+        #expect(abs(reel916.width - (150.0 * 9.0 / 16.0)) < 0.0001)
+
+        // 7. Safe boundary fallbacks (0, negative, NaN, infinity)
+        let zeroFallback = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: 0.0,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: .photo
+        )
+        #expect(abs((zeroFallback.width / zeroFallback.height) - 1.5) < 0.0001)
+
+        let negativeFallback = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: -2.0,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: .photo
+        )
+        #expect(abs((negativeFallback.width / negativeFallback.height) - 1.5) < 0.0001)
+
+        let nanFallback = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: .nan,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: .video
+        )
+        #expect(abs((nanFallback.width / nanFallback.height) - 1.777) < 0.001)
+
+        let infFallback = CullingLayoutCalculator.gridItemSilhouetteSize(
+            aspectRatio: .infinity,
+            stageWidth: stageWidth,
+            stageHeight: stageHeight,
+            mediaKind: .photo
+        )
+        #expect(abs((infFallback.width / infFallback.height) - 1.5) < 0.0001)
     }
 
     // MARK: - Slice 3: Grid Interaction, ViewMode Transitions & Conflict Triggers
