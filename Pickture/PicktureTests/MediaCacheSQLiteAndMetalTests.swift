@@ -189,4 +189,14 @@ struct MediaCacheSQLiteAndMetalTests {
         #expect(result.width == 400)
         #expect(result.height == 300)
     }
+
+    @Test("MetalDownsampler downsamples using bicubic Catmull-Rom spline filter")
+    func metalDownsamplerBicubic() {
+        let original = createTestCGImage(width: 4000, height: 3000)
+        let downsampled = MetalDownsampler.downsample(cgImage: original, maxPixelSize: 1000, algorithm: .bicubic())
+
+        #expect(max(downsampled.width, downsampled.height) == 1000)
+        #expect(downsampled.width == 1000)
+        #expect(downsampled.height == 750)
+    }
 }

@@ -131,6 +131,9 @@ public struct StorageVolumeDetector {
 
 /// Thread-safe in-memory cache for session-duration directory file listings (ADR-0009).
 /// Avoids repetitive contentsOfDirectory round-trips over network shares during sidecar resolution.
+///
+/// - Note: Concurrency Safety Invariant: Marked `@unchecked Sendable` because all mutations, lookups,
+///   and clear operations on `listings` are protected by an internal `NSLock`.
 public final class DirectoryListingCache: @unchecked Sendable {
     public static let shared = DirectoryListingCache()
 

@@ -544,6 +544,10 @@ final class CullingSession: CullingInteractionTarget {
         mediaPipeline.isThumbnailCached(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
+    func inMemoryThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) -> CGImage? {
+        mediaPipeline.inMemoryThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    }
+
     func cachedThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) -> CGImage? {
         mediaPipeline.cachedThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
@@ -948,6 +952,14 @@ final class CullingSession: CullingInteractionTarget {
 
     func previewCacheKey(for item: MediaItem, maxPixelSize: Int = 2048) -> String {
         mediaPipeline.previewCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    }
+
+    func inMemoryPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {
+        mediaPipeline.inMemoryPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    }
+
+    func inMemoryFullRAWImage(for item: MediaItem) -> CGImage? {
+        mediaPipeline.inMemoryFullRAWImage(for: item)
     }
 
     func cachedPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {

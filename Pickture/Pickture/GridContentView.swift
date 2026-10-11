@@ -113,7 +113,7 @@ struct GridContentView: View {
                             isRecursiveMode: session.subfolderMode == .recursive,
                             previewSource: session.previewSource,
                             cacheGeneration: session.cacheGeneration,
-                            cachedThumbnail: session.cachedThumbnailImage(for: item, maxPixelSize: 360),
+                            cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
                             aspectRatio: session.thumbnailAspectRatio(for: item),
                             metadataDeckHeight: CullingLayoutCalculator.defaultGridMetadataDeckHeight,
                             onSelect: {

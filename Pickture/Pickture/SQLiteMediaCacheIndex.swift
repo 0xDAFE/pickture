@@ -5,6 +5,10 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 
 /// Fast, thread-safe SQLite-backed database indexing MediaCache entries and LRU sequences.
 /// Replaces monolithic cache-index.json to support 50,000+ entries without memory or I/O spikes.
+///
+/// - Note: Concurrency Safety Invariant: Marked `@unchecked Sendable` because the underlying SQLite connection
+///   is opened with `SQLITE_OPEN_FULLMUTEX` (serialized multi-thread mode). SQLite transparently serializes
+///   all statements, queries, pragmas, and WAL checkpoints using its internal connection-level recursive mutexes.
 final class SQLiteMediaCacheIndex: @unchecked Sendable {
     private var db: OpaquePointer?
     let databaseURL: URL

@@ -182,6 +182,21 @@ final class MediaPipeline {
         return cache.contains(key: key)
     }
 
+    func inMemoryThumbnailImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) -> CGImage? {
+        let key = thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        return DecodedImageCache.shared.image(forKey: key)
+    }
+
+    func inMemoryPreviewImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 2048) -> CGImage? {
+        let key = previewCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        return DecodedImageCache.shared.image(forKey: key)
+    }
+
+    func inMemoryFullRAWImage(for item: MediaItem) -> CGImage? {
+        let key = fullRAWCacheKey(for: item)
+        return DecodedImageCache.shared.image(forKey: key)
+    }
+
     func cachedThumbnailImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) -> CGImage? {
         let key = thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
         if let inMemory = DecodedImageCache.shared.image(forKey: key) {
@@ -255,10 +270,9 @@ final class MediaPipeline {
         }
         let diskCache = self.cache
         let dataToStore = extracted.jpegData
-        Task.detached(priority: .utility) { [diskCache, key, dataToStore] in
-            await MainActor.run {
-                diskCache.storeData(dataToStore, forKey: key)
-            }
+        // Asynchronously persist to disk cache at utility priority without blocking immediate in-memory display
+        Task(priority: .utility) { [diskCache, key, dataToStore] in
+            diskCache.storeData(dataToStore, forKey: key)
         }
         syncCacheMetrics()
         return finalImage
@@ -310,10 +324,9 @@ final class MediaPipeline {
         }
         let diskCache = self.cache
         let dataToStore = extracted.jpegData
-        Task.detached(priority: .utility) { [diskCache, key, dataToStore] in
-            await MainActor.run {
-                diskCache.storeData(dataToStore, forKey: key)
-            }
+        // Asynchronously persist to disk cache at utility priority without blocking immediate in-memory display
+        Task(priority: .utility) { [diskCache, key, dataToStore] in
+            diskCache.storeData(dataToStore, forKey: key)
         }
         syncCacheMetrics()
         return finalImage
@@ -360,10 +373,9 @@ final class MediaPipeline {
         DecodedImageCache.shared.setImage(result.image, forKey: key)
         let diskCache = self.cache
         let dataToStore = result.data
-        Task.detached(priority: .utility) { [diskCache, key, dataToStore] in
-            await MainActor.run {
-                diskCache.storeData(dataToStore, forKey: key)
-            }
+        // Asynchronously persist to disk cache at utility priority without blocking immediate in-memory display
+        Task(priority: .utility) { [diskCache, key, dataToStore] in
+            diskCache.storeData(dataToStore, forKey: key)
         }
         syncCacheMetrics()
         return result.image

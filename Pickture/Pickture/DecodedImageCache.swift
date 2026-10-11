@@ -14,6 +14,10 @@ private final class CGImageBox: NSObject {
 /// Eviction is governed by `NSCache` based on uncompressed byte cost (`bytesPerRow * height`),
 /// keeping memory consumption bounded within the device RAM budget while enabling instantaneous
 /// back-and-forth filmstrip navigation and grid rendering with zero disk I/O.
+///
+/// - Note: Concurrency Safety Invariant: Marked `@unchecked Sendable` because the underlying storage
+///   is `NSCache<NSString, CGImageBox>`, which is internally synchronized and thread-safe for concurrent
+///   read and write operations across arbitrary background and cooperative threads.
 public final class DecodedImageCache: @unchecked Sendable {
     public static let shared = DecodedImageCache()
 

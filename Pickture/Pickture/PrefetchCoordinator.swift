@@ -150,6 +150,14 @@ actor PrefetchCoordinator {
             } else if delta == -1 {
                 direction = .backward
                 isSequential = true
+            } else if delta > 1 && delta <= 3 {
+                // Small leap in forward direction (e.g. rapid key repeat or skipping a reject)
+                direction = .forward
+                isSequential = false
+            } else if delta < -1 && delta >= -3 {
+                // Small leap in backward direction
+                direction = .backward
+                isSequential = false
             } else {
                 direction = .jump
                 isSequential = false
@@ -184,9 +192,28 @@ actor PrefetchCoordinator {
         }
         immediatePredecessorID = predecessorID
 
-        // Cancel tasks that are neither the current frame nor the immediate predecessor
+        // 5. Plan prefetch target candidate indices
+        let targetIndices = candidateIndices(
+            currentIndex: currentIndex,
+            direction: direction,
+            totalCount: visibleItems.count
+        )
+
+        // Retain tasks for:
+        // - Selected frame
+        // - Immediate predecessor (ADR-0007)
+        // - Lookahead candidates in the active direction (avoids cancel/requeue churn during scrub)
+        var retainedIDs: Set<String> = [selectedID]
+        if let predecessorID {
+            retainedIDs.insert(predecessorID)
+        }
+        for idx in targetIndices {
+            retainedIDs.insert(visibleItems[idx].id)
+        }
+
+        // Cancel tasks that are outside our retained working set
         for (itemID, task) in activePrefetchTasks {
-            if itemID != selectedID && itemID != predecessorID {
+            if !retainedIDs.contains(itemID) {
                 task.cancel()
                 activePrefetchTasks.removeValue(forKey: itemID)
             }
@@ -196,21 +223,22 @@ actor PrefetchCoordinator {
         lastSelectedID = selectedID
         lastDirection = direction
 
-        // 5. Plan prefetch targets based on direction and depth limit
-        let targetItems = planTargets(
-            currentIndex: currentIndex,
-            direction: direction,
-            visibleItems: visibleItems,
-            previewSource: previewSource
-        )
+        // 6. Filter target items for those not yet cached and not already running in flight
+        let targetItems = targetIndices.compactMap { idx -> MediaItem? in
+            let item = visibleItems[idx]
+            if isItemCached(item, previewSource) || activePrefetchTasks[item.id] != nil {
+                return nil
+            }
+            return item
+        }
 
-        // 6. Schedule prefetch tasks bounded by currentWorkerCount
+        // 7. Schedule prefetch tasks bounded by currentWorkerCount
         schedulePrefetch(
             for: targetItems,
             previewSource: previewSource
         )
 
-        // 7. Schedule idle timer
+        // 8. Schedule idle timer
         scheduleIdleWarming(
             visibleItems: visibleItems,
             currentIndex: currentIndex,
@@ -218,14 +246,13 @@ actor PrefetchCoordinator {
         )
     }
 
-    private func planTargets(
+    private func candidateIndices(
         currentIndex: Int,
         direction: Direction,
-        visibleItems: [MediaItem],
-        previewSource: PreviewSource
-    ) -> [MediaItem] {
+        totalCount: Int
+    ) -> [Int] {
         let depth = effectivePrefetchDepth
-        guard depth > 0, !visibleItems.isEmpty else { return [] }
+        guard depth > 0, totalCount > 0 else { return [] }
 
         var targetIndices: [Int] = []
 
@@ -233,7 +260,7 @@ actor PrefetchCoordinator {
         case .forward:
             for offset in 1...depth {
                 let idx = currentIndex + offset
-                if idx < visibleItems.count {
+                if idx < totalCount {
                     targetIndices.append(idx)
                 }
             }
@@ -248,7 +275,7 @@ actor PrefetchCoordinator {
             let half = max(1, depth / 2)
             for offset in 1...half {
                 let forwardIdx = currentIndex + offset
-                if forwardIdx < visibleItems.count {
+                if forwardIdx < totalCount {
                     targetIndices.append(forwardIdx)
                 }
                 let backwardIdx = currentIndex - offset
@@ -258,13 +285,7 @@ actor PrefetchCoordinator {
             }
         }
 
-        return targetIndices.compactMap { idx in
-            let item = visibleItems[idx]
-            if isItemCached(item, previewSource) || activePrefetchTasks[item.id] != nil {
-                return nil
-            }
-            return item
-        }
+        return targetIndices
     }
 
     private func schedulePrefetch(

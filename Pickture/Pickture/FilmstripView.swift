@@ -309,7 +309,7 @@ struct FilmstripView: View {
             dockPosition: position,
             previewSource: session.previewSource,
             cacheGeneration: session.cacheGeneration,
-            cachedThumbnail: session.cachedThumbnailImage(for: item, maxPixelSize: 360),
+            cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
             aspectRatio: session.thumbnailAspectRatio(for: item),
             onSelect: {
                 session.selectedItemID = item.id
@@ -445,9 +445,9 @@ struct FilmstripImageCanvasView: View {
     private var displayedImage: CGImage? {
         fullRawImage
             ?? previewImage
-            ?? session.cachedFullRAWImage(for: item)
-            ?? session.cachedPreviewImage(for: item, maxPixelSize: 2048)
-            ?? session.cachedThumbnailImage(for: item, maxPixelSize: 360)
+            ?? session.inMemoryFullRAWImage(for: item)
+            ?? session.inMemoryPreviewImage(for: item, maxPixelSize: 2048)
+            ?? session.inMemoryThumbnailImage(for: item, maxPixelSize: 360)
     }
 
 
@@ -501,7 +501,7 @@ struct FilmstripImageCanvasView: View {
                 }
 
                 // On-demand Full RAW demosaic action for critical focus inspection (ADR-0005)
-                if item.hasRAWFile && fullRawImage == nil && session.cachedFullRAWImage(for: item) == nil {
+                if item.hasRAWFile && fullRawImage == nil && session.inMemoryFullRAWImage(for: item) == nil {
                     VStack {
                         HStack {
                             Spacer()
@@ -617,8 +617,8 @@ struct FilmstripImageCanvasView: View {
                     }
             )
             .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
-                if let cached = session.cachedPreviewImage(for: item, maxPixelSize: 2048) {
-                    previewImage = cached
+                if let inMemory = session.inMemoryPreviewImage(for: item, maxPixelSize: 2048) {
+                    previewImage = inMemory
                     return
                 }
                 isLoading = true
