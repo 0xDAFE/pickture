@@ -617,6 +617,10 @@ struct FilmstripImageCanvasView: View {
                     }
             )
             .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
+                if let cached = session.cachedPreviewImage(for: item, maxPixelSize: 2048) {
+                    previewImage = cached
+                    return
+                }
                 isLoading = true
                 defer { isLoading = false }
                 let decoded = await session.loadPreviewImage(for: item, maxPixelSize: 2048)

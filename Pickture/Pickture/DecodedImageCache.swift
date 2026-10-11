@@ -24,8 +24,14 @@ public final class DecodedImageCache: @unchecked Sendable {
         set { cache.totalCostLimit = newValue }
     }
 
-    public init(totalCostLimitBytes: Int = 512 * 1024 * 1024) {
+    public var countLimit: Int {
+        get { cache.countLimit }
+        set { cache.countLimit = newValue }
+    }
+
+    public init(totalCostLimitBytes: Int = 512 * 1024 * 1024, countLimit: Int = 50) {
         cache.totalCostLimit = totalCostLimitBytes
+        cache.countLimit = countLimit
         cache.name = "com.pickture.DecodedImageCache"
     }
 

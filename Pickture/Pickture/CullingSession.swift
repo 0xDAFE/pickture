@@ -14,10 +14,12 @@ final class CullingSession: CullingInteractionTarget {
     let metadataSyncEngine: MetadataSyncEngine
     var metadataSyncStore: MetadataSyncStore { metadataSyncEngine.syncStore }
     let interactionController: CullingInteractionController
+    let prefetchCoordinator: PrefetchCoordinator
     private(set) var currentFolderURL: URL?
     private(set) var items: [MediaItem] = [] {
         didSet {
             refreshDerivedCounts()
+            triggerPrefetch()
         }
     }
     private(set) var recentFolders: [RecentFolder] = []
@@ -62,14 +64,24 @@ final class CullingSession: CullingInteractionTarget {
     private(set) var conflictedItemsCount: Int = 0
     private(set) var pendingWritesCount: Int = 0
 
-    var selectedItemID: String?
+    var selectedItemID: String? {
+        didSet {
+            guard selectedItemID != oldValue else { return }
+            triggerPrefetch()
+        }
+    }
     var lastErrorMessage: String?
     var filterCriteria: FilterCriteria = FilterCriteria() {
         didSet {
             refreshDerivedCounts()
+            triggerPrefetch()
         }
     }
-    var sortOption: SortOption = SortOption(field: .fileName, order: .ascending)
+    var sortOption: SortOption = SortOption(field: .fileName, order: .ascending) {
+        didSet {
+            triggerPrefetch()
+        }
+    }
     var isSearchFieldFocused: Bool = false
     private var exifByItemID: [String: ExifMetadata] = [:]
     private var headerSupplementedItemIDs: Set<String> = []
@@ -178,10 +190,12 @@ final class CullingSession: CullingInteractionTarget {
 
     func togglePreviewSource() {
         previewSource = (previewSource == .preferRaster) ? .preferRAW : .preferRaster
+        triggerPrefetch()
     }
 
     func setPreviewSource(_ source: PreviewSource) {
         previewSource = source
+        triggerPrefetch()
     }
 
     func toggleBorderTapNavigation() {
@@ -425,12 +439,41 @@ final class CullingSession: CullingInteractionTarget {
         self.storageRootURL = resolvedStorageRoot
         self.folderAccessService = FolderAccessService(storageRootURL: resolvedStorageRoot)
         self.mediaPipeline = MediaPipeline(cacheDirectoryURL: resolvedCacheDir)
+        let pipeline = self.mediaPipeline
+        self.prefetchCoordinator = PrefetchCoordinator(
+            cacheCapacityProvider: {
+                DecodedImageCache.shared.countLimit
+            },
+            isItemCached: { [weak pipeline] item, source in
+                guard let pipeline else { return false }
+                let key = pipeline.previewCacheKey(for: item, previewSource: source, maxPixelSize: 2048)
+                return DecodedImageCache.shared.image(forKey: key) != nil
+            },
+            previewFetcher: { [weak pipeline] item, source in
+                guard let pipeline else { return }
+                _ = await pipeline.loadPreviewImage(for: item, previewSource: source, maxPixelSize: 2048)
+            }
+        )
         let syncStoreURL = resolvedStorageRoot.appendingPathComponent("MetadataSyncStore", isDirectory: true)
         self.metadataSyncEngine = MetadataSyncEngine(storeDirectoryURL: syncStoreURL)
         self.interactionController = CullingInteractionController()
         self.recentFolders = self.folderAccessService.loadRecentFolders()
         self.setupMetadataSyncEngineBindings()
         self.interactionController.target = self
+    }
+
+    private func triggerPrefetch() {
+        guard let id = selectedItemID else { return }
+        let currentVisible = visibleItems
+        let currentSource = previewSource
+        let coordinator = prefetchCoordinator
+        Task {
+            await coordinator.navigate(
+                selectedID: id,
+                visibleItems: currentVisible,
+                previewSource: currentSource
+            )
+        }
     }
 
     private func setupMetadataSyncEngineBindings() {
@@ -750,6 +793,10 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     private func cleanCloseSession() {
+        let coordinator = prefetchCoordinator
+        Task {
+            await coordinator.cancelAll()
+        }
         metadataSyncEngine.reset()
         interactionController.clearSwipeHistory()
         backgroundExifTask?.cancel()
