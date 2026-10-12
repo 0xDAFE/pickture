@@ -348,22 +348,8 @@ struct FilmstripRepresentationControls: View {
     let item: MediaItem
     let session: CullingSession
 
-    enum RepresentationState: Equatable, Sendable {
-        case raster
-        case rawPreview
-        case fullRAW
-    }
-
-    var state: RepresentationState {
-        if item.isMediaPair {
-            if session.previewSource == .preferRaster {
-                return .raster
-            } else {
-                return session.isFullRAWLoaded(for: item) ? .fullRAW : .rawPreview
-            }
-        } else {
-            return session.isFullRAWLoaded(for: item) ? .fullRAW : .rawPreview
-        }
+    var state: PreviewRepresentation {
+        session.previewRepresentation(for: item)
     }
 
     var body: some View {
@@ -388,28 +374,34 @@ struct FilmstripRepresentationControls: View {
                 labelContent
             }
             .buttonStyle(.plain)
-            .help(helpText)
+            .help(state.helpText(isMediaPair: true))
         } else {
             labelContent
-                .help(helpText)
+                .help(state.helpText(isMediaPair: false))
         }
     }
 
     @ViewBuilder
     private var pillContent: some View {
         HStack(spacing: 4) {
-            Image(systemName: iconName)
-            Text(titleText)
+            Image(systemName: state.iconName)
+                .accessibilityHidden(true)
+            Text(state.titleText)
                 .font(.caption.weight(.bold))
         }
+        .accessibilityElement(children: .combine)
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(backgroundColor, in: Capsule())
+        .background(state.backgroundColor, in: Capsule())
         .foregroundStyle(.white)
     }
+}
 
-    private var iconName: String {
-        switch state {
+// MARK: - PreviewRepresentation Presentation
+
+extension PreviewRepresentation {
+    var iconName: String {
+        switch self {
         case .raster, .rawPreview:
             return "photo.stack"
         case .fullRAW:
@@ -417,8 +409,8 @@ struct FilmstripRepresentationControls: View {
         }
     }
 
-    private var titleText: String {
-        switch state {
+    var titleText: String {
+        switch self {
         case .raster:
             return "Raster (JPG)"
         case .rawPreview:
@@ -428,8 +420,8 @@ struct FilmstripRepresentationControls: View {
         }
     }
 
-    private var backgroundColor: Color {
-        switch state {
+    var backgroundColor: Color {
+        switch self {
         case .raster:
             return .blue
         case .rawPreview:
@@ -439,16 +431,16 @@ struct FilmstripRepresentationControls: View {
         }
     }
 
-    private var helpText: String {
-        switch state {
+    func helpText(isMediaPair: Bool) -> String {
+        switch self {
         case .raster:
-            return "Showing companion raster file. Toggle between Raster and RAW (J)"
+            return "Showing paired raster file. Toggle between Raster and RAW (J)"
         case .rawPreview:
-            return item.isMediaPair
+            return isMediaPair
                 ? "Showing embedded RAW preview. Toggle between Raster and RAW (J)"
                 : "Showing embedded RAW preview"
         case .fullRAW:
-            return item.isMediaPair
+            return isMediaPair
                 ? "Showing 100% demosaiced sensor RAW. Toggle between Raster and RAW (J)"
                 : "Showing 100% demosaiced sensor RAW"
         }

@@ -147,6 +147,12 @@ nonisolated enum PreviewSource: String, Codable, CaseIterable, Hashable, Sendabl
     case preferRAW
 }
 
+nonisolated enum PreviewRepresentation: String, Codable, CaseIterable, Hashable, Sendable {
+    case raster
+    case rawPreview
+    case fullRAW
+}
+
 nonisolated struct RecentFolder: Identifiable, Hashable, Codable, Sendable {
     let id: String
     let name: String

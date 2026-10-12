@@ -681,36 +681,44 @@ struct CullingSessionFilmstripAndShortcutTests {
 
         // 1. MediaPair in .preferRaster -> .raster
         #expect(session.previewSource == .preferRaster)
+        #expect(session.previewRepresentation(for: pairItem) == .raster)
         let pairControlsRaster = FilmstripRepresentationControls(item: pairItem, session: session)
         #expect(pairControlsRaster.state == .raster)
 
         // 2. MediaPair in .preferRAW without full RAW -> .rawPreview
         session.setPreviewSource(.preferRAW)
+        #expect(session.previewRepresentation(for: pairItem) == .rawPreview)
         let pairControlsRAWPreview = FilmstripRepresentationControls(item: pairItem, session: session)
         #expect(pairControlsRAWPreview.state == .rawPreview)
 
         // 3. MediaPair in .preferRAW with full RAW demosaiced -> .fullRAW
         _ = await session.loadFullRAW(for: pairItem)
+        #expect(session.previewRepresentation(for: pairItem) == .fullRAW)
         let pairControlsFullRAW = FilmstripRepresentationControls(item: pairItem, session: session)
         #expect(pairControlsFullRAW.state == .fullRAW)
 
         // 4. MediaPair toggled back to .preferRaster retains raster state even with full RAW cached in memory
         session.setPreviewSource(.preferRaster)
+        #expect(session.previewRepresentation(for: pairItem) == .raster)
         let pairControlsBackToRaster = FilmstripRepresentationControls(item: pairItem, session: session)
         #expect(pairControlsBackToRaster.state == .raster)
 
         // 5. Standalone RAW without full RAW -> .rawPreview
+        #expect(session.previewRepresentation(for: standaloneItem) == .rawPreview)
         let standaloneControlsPreview = FilmstripRepresentationControls(item: standaloneItem, session: session)
         #expect(standaloneControlsPreview.state == .rawPreview)
 
         // 6. Standalone RAW with full RAW demosaiced -> .fullRAW
         _ = await session.loadFullRAW(for: standaloneItem)
+        #expect(session.previewRepresentation(for: standaloneItem) == .fullRAW)
         let standaloneControlsFullRAW = FilmstripRepresentationControls(item: standaloneItem, session: session)
         #expect(standaloneControlsFullRAW.state == .fullRAW)
 
         // 7. Cache eviction resets both items back to .rawPreview (when in RAW mode)
         session.clearMediaCache()
         session.setPreviewSource(.preferRAW)
+        #expect(session.previewRepresentation(for: pairItem) == .rawPreview)
+        #expect(session.previewRepresentation(for: standaloneItem) == .rawPreview)
         let pairEvicted = FilmstripRepresentationControls(item: pairItem, session: session)
         #expect(pairEvicted.state == .rawPreview)
 

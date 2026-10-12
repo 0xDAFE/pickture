@@ -989,6 +989,13 @@ final class CullingSession: CullingInteractionTarget {
         inMemoryFullRAWImage(for: item) != nil
     }
 
+    func previewRepresentation(for item: MediaItem) -> PreviewRepresentation {
+        if item.isMediaPair && previewSource == .preferRaster {
+            return .raster
+        }
+        return isFullRAWLoaded(for: item) ? .fullRAW : .rawPreview
+    }
+
     func loadFullRAW(for item: MediaItem) async -> CGImage? {
         if let existing = inMemoryFullRAWImage(for: item) {
             return existing
