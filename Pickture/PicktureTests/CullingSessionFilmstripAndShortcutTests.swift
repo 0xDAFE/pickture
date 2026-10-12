@@ -655,4 +655,66 @@ struct CullingSessionFilmstripAndShortcutTests {
         session.clearMediaCache()
         #expect(!session.isFullRAWLoaded(for: item))
     }
+
+    @Test("FilmstripRepresentationControls resolves states accurately across MediaPairs, standalone RAWs, toggles, demosaicing, and cache evictions")
+    func filmstripRepresentationControlsStateTransitions() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("DSC0002.JPG")
+        let rawURL = root.appendingPathComponent("DSC0002.ARW")
+        let standaloneRawURL = root.appendingPathComponent("DSC0003.ARW")
+
+        try createTestJPEG(at: jpgURL, width: 320, height: 240, r: 50, g: 100, b: 150)
+        let rawHeaderPrefix = try Data(contentsOf: jpgURL)
+        var rawData = rawHeaderPrefix
+        rawData.append(Data(repeating: 0xBB, count: 2048))
+        try rawData.write(to: rawURL)
+        try rawData.write(to: standaloneRawURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+
+        let pairItem = try #require(session.items.first { $0.isMediaPair })
+        let standaloneItem = try #require(session.items.first { !$0.isMediaPair && $0.hasRAWFile })
+
+        // 1. MediaPair in .preferRaster -> .raster
+        #expect(session.previewSource == .preferRaster)
+        let pairControlsRaster = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairControlsRaster.state == .raster)
+
+        // 2. MediaPair in .preferRAW without full RAW -> .rawPreview
+        session.setPreviewSource(.preferRAW)
+        let pairControlsRAWPreview = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairControlsRAWPreview.state == .rawPreview)
+
+        // 3. MediaPair in .preferRAW with full RAW demosaiced -> .fullRAW
+        _ = await session.loadFullRAW(for: pairItem)
+        let pairControlsFullRAW = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairControlsFullRAW.state == .fullRAW)
+
+        // 4. MediaPair toggled back to .preferRaster retains raster state even with full RAW cached in memory
+        session.setPreviewSource(.preferRaster)
+        let pairControlsBackToRaster = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairControlsBackToRaster.state == .raster)
+
+        // 5. Standalone RAW without full RAW -> .rawPreview
+        let standaloneControlsPreview = FilmstripRepresentationControls(item: standaloneItem, session: session)
+        #expect(standaloneControlsPreview.state == .rawPreview)
+
+        // 6. Standalone RAW with full RAW demosaiced -> .fullRAW
+        _ = await session.loadFullRAW(for: standaloneItem)
+        let standaloneControlsFullRAW = FilmstripRepresentationControls(item: standaloneItem, session: session)
+        #expect(standaloneControlsFullRAW.state == .fullRAW)
+
+        // 7. Cache eviction resets both items back to .rawPreview (when in RAW mode)
+        session.clearMediaCache()
+        session.setPreviewSource(.preferRAW)
+        let pairEvicted = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairEvicted.state == .rawPreview)
+
+        let standaloneEvicted = FilmstripRepresentationControls(item: standaloneItem, session: session)
+        #expect(standaloneEvicted.state == .rawPreview)
+    }
 }

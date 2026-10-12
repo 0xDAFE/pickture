@@ -120,28 +120,8 @@ struct FilmstripView: View {
 
                             Spacer()
 
-                            HStack(spacing: 8) {
-                                if currentItem.isMediaPair {
-                                    Button {
-                                        session.togglePreviewSource()
-                                    } label: {
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "photo.stack")
-                                            Text(session.previewSource == .preferRaster ? "Raster (JPG)" : "RAW Preview")
-                                                .font(.caption.weight(.bold))
-                                        }
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 5)
-                                        .background(session.previewSource == .preferRAW ? Color.orange : Color.blue, in: Capsule())
-                                        .foregroundStyle(.white)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("Toggle PreviewSource between PreferRaster and PreferRAW (J)")
-                                }
-
-                                if currentItem.hasRAWFile && (session.previewSource == .preferRAW || !currentItem.isMediaPair) {
-                                    FullRAWActionButton(item: currentItem, session: session)
-                                }
+                            if currentItem.isMediaPair || currentItem.hasRAWFile {
+                                FilmstripRepresentationControls(item: currentItem, session: session)
                             }
                         }
                         .padding(12)
@@ -359,6 +339,119 @@ struct FilmstripView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color.orange.opacity(0.15))
+    }
+}
+
+// MARK: - Filmstrip Representation Controls
+
+struct FilmstripRepresentationControls: View {
+    let item: MediaItem
+    let session: CullingSession
+
+    enum RepresentationState: Equatable, Sendable {
+        case raster
+        case rawPreview
+        case fullRAW
+    }
+
+    var state: RepresentationState {
+        if item.isMediaPair {
+            if session.previewSource == .preferRaster {
+                return .raster
+            } else {
+                return session.isFullRAWLoaded(for: item) ? .fullRAW : .rawPreview
+            }
+        } else {
+            return session.isFullRAWLoaded(for: item) ? .fullRAW : .rawPreview
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            representationPill
+
+            if item.hasRAWFile && (session.previewSource == .preferRAW || !item.isMediaPair) {
+                FullRAWActionButton(item: item, session: session)
+            }
+        }
+        .animation(.snappy, value: state)
+    }
+
+    @ViewBuilder
+    private var representationPill: some View {
+        let labelContent = pillContent
+
+        if item.isMediaPair {
+            Button {
+                session.togglePreviewSource()
+            } label: {
+                labelContent
+            }
+            .buttonStyle(.plain)
+            .help(helpText)
+        } else {
+            labelContent
+                .help(helpText)
+        }
+    }
+
+    @ViewBuilder
+    private var pillContent: some View {
+        HStack(spacing: 4) {
+            Image(systemName: iconName)
+            Text(titleText)
+                .font(.caption.weight(.bold))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(backgroundColor, in: Capsule())
+        .foregroundStyle(.white)
+    }
+
+    private var iconName: String {
+        switch state {
+        case .raster, .rawPreview:
+            return "photo.stack"
+        case .fullRAW:
+            return "camera.aperture"
+        }
+    }
+
+    private var titleText: String {
+        switch state {
+        case .raster:
+            return "Raster (JPG)"
+        case .rawPreview:
+            return "RAW Preview"
+        case .fullRAW:
+            return "Full RAW"
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch state {
+        case .raster:
+            return .blue
+        case .rawPreview:
+            return .orange
+        case .fullRAW:
+            return .purple
+        }
+    }
+
+    private var helpText: String {
+        switch state {
+        case .raster:
+            return "Showing companion raster file. Toggle between Raster and RAW (J)"
+        case .rawPreview:
+            return item.isMediaPair
+                ? "Showing embedded RAW preview. Toggle between Raster and RAW (J)"
+                : "Showing embedded RAW preview"
+        case .fullRAW:
+            return item.isMediaPair
+                ? "Showing 100% demosaiced sensor RAW. Toggle between Raster and RAW (J)"
+                : "Showing 100% demosaiced sensor RAW"
+        }
     }
 }
 
