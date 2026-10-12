@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import Observation
 import Testing
 import UniformTypeIdentifiers
 @testable import Pickture
@@ -609,5 +610,173 @@ struct CullingSessionFilmstripAndShortcutTests {
 
         let settingsScene = SettingsSheetView(session: session, showsDismissButton: false)
         #expect(settingsScene.showsDismissButton == false)
+    }
+
+    @Test("Full RAW on-demand loading updates session state without mutating previewSource, and reflects memory cache state accurately")
+    func fullRAWLoadingSessionStateAndCacheLifecycle() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("DSC0002.JPG")
+        let rawURL = root.appendingPathComponent("DSC0002.ARW")
+
+        try createTestJPEG(at: jpgURL, width: 320, height: 240, r: 50, g: 100, b: 150)
+        let rawHeaderPrefix = try Data(contentsOf: jpgURL)
+        var rawData = rawHeaderPrefix
+        rawData.append(Data(repeating: 0xBB, count: 2048))
+        try rawData.write(to: rawURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+
+        let item = try #require(session.items.first)
+        #expect(item.hasRAWFile)
+        #expect(item.isMediaPair)
+
+        // Initially not loaded and in preferRaster
+        #expect(!session.isFullRAWLoaded(for: item))
+        #expect(!session.isLoadingFullRAW(for: item))
+        #expect(session.previewSource == .preferRaster)
+
+        // Load full RAW
+        let fullImage = await session.loadFullRAW(for: item)
+        #expect(fullImage != nil)
+        #expect(session.isFullRAWLoaded(for: item))
+        #expect(session.loadedFullRAWItemIDs.contains(item.id))
+        #expect(!session.isLoadingFullRAW(for: item))
+        // Calling loadFullRAW does NOT alter the user's global session representation preference
+        #expect(session.previewSource == .preferRaster)
+
+        // Repeated load returns cached image immediately
+        let cachedImage = await session.loadFullRAW(for: item)
+        #expect(cachedImage != nil)
+        #expect(session.isFullRAWLoaded(for: item))
+        #expect(session.loadedFullRAWItemIDs.contains(item.id))
+
+        // clearMediaCache evicts cache, so isFullRAWLoaded becomes false and permits reload
+        session.clearMediaCache()
+        #expect(!session.isFullRAWLoaded(for: item))
+        #expect(!session.loadedFullRAWItemIDs.contains(item.id))
+    }
+
+    @Test("FilmstripRepresentationControls resolves states accurately across MediaPairs, standalone RAWs, toggles, demosaicing, and cache evictions")
+    func filmstripRepresentationControlsStateTransitions() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("DSC0002.JPG")
+        let rawURL = root.appendingPathComponent("DSC0002.ARW")
+        let standaloneRawURL = root.appendingPathComponent("DSC0003.ARW")
+
+        try createTestJPEG(at: jpgURL, width: 320, height: 240, r: 50, g: 100, b: 150)
+        let rawHeaderPrefix = try Data(contentsOf: jpgURL)
+        var rawData = rawHeaderPrefix
+        rawData.append(Data(repeating: 0xBB, count: 2048))
+        try rawData.write(to: rawURL)
+        try rawData.write(to: standaloneRawURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+
+        let pairItem = try #require(session.items.first { $0.isMediaPair })
+        let standaloneItem = try #require(session.items.first { !$0.isMediaPair && $0.hasRAWFile })
+
+        // 1. MediaPair in .preferRaster -> .raster
+        #expect(session.previewSource == .preferRaster)
+        #expect(session.previewRepresentation(for: pairItem) == .raster)
+        let pairControlsRaster = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairControlsRaster.state == .raster)
+
+        // 2. MediaPair in .preferRAW without full RAW -> .rawPreview
+        session.setPreviewSource(.preferRAW)
+        #expect(session.previewRepresentation(for: pairItem) == .rawPreview)
+        let pairControlsRAWPreview = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairControlsRAWPreview.state == .rawPreview)
+
+        // 3. MediaPair in .preferRAW with full RAW demosaiced -> .fullRAW
+        _ = await session.loadFullRAW(for: pairItem)
+        #expect(session.previewRepresentation(for: pairItem) == .fullRAW)
+        let pairControlsFullRAW = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairControlsFullRAW.state == .fullRAW)
+
+        // 4. MediaPair toggled back to .preferRaster retains raster state even with full RAW cached in memory
+        session.setPreviewSource(.preferRaster)
+        #expect(session.previewRepresentation(for: pairItem) == .raster)
+        let pairControlsBackToRaster = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairControlsBackToRaster.state == .raster)
+
+        // 5. Standalone RAW without full RAW -> .rawPreview
+        #expect(session.previewRepresentation(for: standaloneItem) == .rawPreview)
+        let standaloneControlsPreview = FilmstripRepresentationControls(item: standaloneItem, session: session)
+        #expect(standaloneControlsPreview.state == .rawPreview)
+
+        // 6. Standalone RAW with full RAW demosaiced -> .fullRAW
+        _ = await session.loadFullRAW(for: standaloneItem)
+        #expect(session.previewRepresentation(for: standaloneItem) == .fullRAW)
+        let standaloneControlsFullRAW = FilmstripRepresentationControls(item: standaloneItem, session: session)
+        #expect(standaloneControlsFullRAW.state == .fullRAW)
+
+        // 7. Cache eviction resets both items back to .rawPreview (when in RAW mode)
+        session.clearMediaCache()
+        session.setPreviewSource(.preferRAW)
+        #expect(session.previewRepresentation(for: pairItem) == .rawPreview)
+        #expect(session.previewRepresentation(for: standaloneItem) == .rawPreview)
+        let pairEvicted = FilmstripRepresentationControls(item: pairItem, session: session)
+        #expect(pairEvicted.state == .rawPreview)
+
+        let standaloneEvicted = FilmstripRepresentationControls(item: standaloneItem, session: session)
+        #expect(standaloneEvicted.state == .rawPreview)
+    }
+
+    @Test("Loading full RAW triggers Observation tracking on previewRepresentation so UI reactively updates to .fullRAW")
+    func loadingFullRAWTriggersObservationTracking() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("DSC0002.JPG")
+        let rawURL = root.appendingPathComponent("DSC0002.ARW")
+
+        try createTestJPEG(at: jpgURL, width: 320, height: 240, r: 50, g: 100, b: 150)
+        let rawHeaderPrefix = try Data(contentsOf: jpgURL)
+        var rawData = rawHeaderPrefix
+        rawData.append(Data(repeating: 0xBB, count: 2048))
+        try rawData.write(to: rawURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+        session.setPreviewSource(.preferRAW)
+
+        let item = try #require(session.items.first)
+
+        var observationFired = false
+        withObservationTracking {
+            _ = session.previewRepresentation(for: item)
+        } onChange: {
+            observationFired = true
+        }
+
+        #expect(!observationFired)
+        #expect(session.previewRepresentation(for: item) == .rawPreview)
+
+        _ = await session.loadFullRAW(for: item)
+
+        #expect(observationFired == true)
+        #expect(session.previewRepresentation(for: item) == .fullRAW)
+
+        var evictionObservationFired = false
+        withObservationTracking {
+            _ = session.previewRepresentation(for: item)
+        } onChange: {
+            evictionObservationFired = true
+        }
+
+        #expect(!evictionObservationFired)
+        session.clearMediaCache()
+
+        #expect(evictionObservationFired == true)
+        #expect(session.previewRepresentation(for: item) == .rawPreview)
     }
 }

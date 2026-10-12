@@ -113,7 +113,7 @@ struct GridContentView: View {
                             isRecursiveMode: session.subfolderMode == .recursive,
                             previewSource: session.previewSource,
                             cacheGeneration: session.cacheGeneration,
-                            cachedThumbnail: session.cachedThumbnailImage(for: item, maxPixelSize: 360),
+                            cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
                             aspectRatio: session.thumbnailAspectRatio(for: item),
                             metadataDeckHeight: CullingLayoutCalculator.defaultGridMetadataDeckHeight,
                             onSelect: {
@@ -131,8 +131,7 @@ struct GridContentView: View {
                                 session.applyCurationAction(action, to: item)
                             },
                             loadThumbnail: { [session, item] in
-                                guard let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) else { return nil }
-                                return await PreviewLoader.decodeCGImageAsync(from: data)
+                                await session.loadThumbnailImage(for: item, maxPixelSize: 360)
                             },
                             onThumbnailLoaded: { [session, item] image in
                                 session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)

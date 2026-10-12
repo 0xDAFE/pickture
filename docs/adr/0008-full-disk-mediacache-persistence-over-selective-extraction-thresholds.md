@@ -1,0 +1,3 @@
+# Full Local Disk MediaCache Persistence Over Selective Extraction Thresholds
+
+Although FastRawViewer avoids local disk caching for "fast" extractions to minimize SSD wear, Pickture persists all decoded thumbnails and full-size previews to its local SQLite-backed `MediaCache` via an asynchronous background worker. Because Pickture is a mobile and desktop application frequently used on high-latency Wi-Fi and removable storage, local disk persistence ensures that previously browsed media can be viewed offline without requiring network re-transfers on subsequent app launches or when disconnected from the storage source.

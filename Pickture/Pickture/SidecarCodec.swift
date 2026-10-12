@@ -18,12 +18,21 @@ nonisolated enum SidecarCodec {
             return basenameURL
         }
 
+        // Retrieve directory contents from in-memory cache or query disk once (ADR-0009)
+        let contents: [URL]
+        if let cached = DirectoryListingCache.shared.contents(for: dir) {
+            contents = cached
+        } else if let diskContents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            contents = diskContents
+            DirectoryListingCache.shared.setContents(diskContents, for: dir)
+        } else {
+            contents = []
+        }
+
         // Also check case-insensitive match for <basename>.xmp in the directory
-        if let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-            let targetBase = "\(item.baseName).xmp".lowercased()
-            if let matched = contents.first(where: { $0.lastPathComponent.lowercased() == targetBase }) {
-                return matched.standardizedFileURL
-            }
+        let targetBase = "\(item.baseName).xmp".lowercased()
+        if let matched = contents.first(where: { $0.lastPathComponent.lowercased() == targetBase }) {
+            return matched.standardizedFileURL
         }
 
         // 2. Check <filename>.<ext>.xmp (Darktable sidecar convention)
@@ -35,11 +44,9 @@ nonisolated enum SidecarCodec {
             }
         }
 
-        if let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-            let candidateNames = Set(files.map { "\($0.fileName).xmp".lowercased() })
-            if let matched = contents.first(where: { candidateNames.contains($0.lastPathComponent.lowercased()) }) {
-                return matched.standardizedFileURL
-            }
+        let candidateNames = Set(files.map { "\($0.fileName).xmp".lowercased() })
+        if let matched = contents.first(where: { candidateNames.contains($0.lastPathComponent.lowercased()) }) {
+            return matched.standardizedFileURL
         }
 
         return nil

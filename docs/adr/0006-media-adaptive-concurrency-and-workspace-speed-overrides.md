@@ -1,0 +1,3 @@
+# Media-Adaptive Concurrency Control and Workspace Speed Overrides
+
+Pickture automatically inspects storage volume attributes (`volumeIsInternalKey`, `volumeIsLocalKey`) to dynamically adapt concurrency limits across decoder queues. Network shares (SMB/NFS) default to conservative worker limits (1–2 concurrent decodes) to prevent packet queue congestion and storage controller latency spikes. To support power users on multi-gigabit LANs or high-speed NVMe NAS arrays, Pickture surfaces a volume performance indicator in the workspace toolbar that allows users to toggle an active network workspace to High-Speed LAN mode (4–6 concurrent workers) without modifying global settings.

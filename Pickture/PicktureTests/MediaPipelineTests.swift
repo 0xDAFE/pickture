@@ -317,7 +317,7 @@ struct MediaPipelineTests {
         #expect(!pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
 
         pipeline.flushIndexImmediately()
-        let indexFile = cacheDir.appendingPathComponent("cache-index.json")
+        let indexFile = pipeline.cache.indexFileURL
         #expect(FileManager.default.fileExists(atPath: indexFile.path))
     }
 
@@ -385,11 +385,65 @@ struct MediaPipelineTests {
 
         pipeline.cancelThumbnail(for: item, previewSource: .preferRaster)
 
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        while await queue.pendingCount > 0 {
+            await Task.yield()
+        }
 
         await blockerRelease.signal()
         _ = await blockerTask.value
         let result = await loadTask.value
         #expect(result == nil)
     }
+
+    @Test("Direct display pipeline loads CGImage, caches in DecodedImageCache, and hits RAM on repeat")
+    func directDisplayAndInMemoryCaching() async throws {
+        let tempDir = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        DecodedImageCache.shared.clear()
+
+        let pipeline = MediaPipeline(cacheDirectoryURL: tempDir.appendingPathComponent("cache"))
+        let imageURL = tempDir.appendingPathComponent("direct_photo.jpg")
+        try writeSampleRasterImage(to: imageURL, width: 300, height: 200)
+        let item = makeStandaloneMediaItem(fileURL: imageURL)
+
+        // Initial load: returns CGImage directly
+        let image = try #require(await pipeline.loadThumbnailImage(for: item, previewSource: .preferRaster, maxPixelSize: 360))
+        #expect(image.width > 0)
+
+        // Verify it is immediately present in DecodedImageCache
+        let key = pipeline.thumbnailCacheKey(for: item, previewSource: .preferRaster, maxPixelSize: 360)
+        let memoryHit = DecodedImageCache.shared.image(forKey: key)
+        #expect(memoryHit != nil)
+        #expect(memoryHit?.width == image.width)
+
+        // Repeated cachedThumbnailImage returns from memory
+        let cached = pipeline.cachedThumbnailImage(for: item, previewSource: .preferRaster, maxPixelSize: 360)
+        #expect(cached != nil)
+
+        // Preview direct display
+        let previewImage = try #require(await pipeline.loadPreviewImage(for: item, previewSource: .preferRaster, maxPixelSize: 2048))
+        #expect(previewImage.width > 0)
+        let previewKey = pipeline.previewCacheKey(for: item, previewSource: .preferRaster, maxPixelSize: 2048)
+        #expect(DecodedImageCache.shared.image(forKey: previewKey) != nil)
+    }
+
+    @Test("On-demand full RAW demosaic loads image and persists HEIC cache entry")
+    func onDemandFullRAWPersistence() async throws {
+        let tempDir = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        DecodedImageCache.shared.clear()
+
+        let pipeline = MediaPipeline(cacheDirectoryURL: tempDir.appendingPathComponent("cache"))
+        let imageURL = tempDir.appendingPathComponent("raw_photo.jpg")
+        try writeSampleRasterImage(to: imageURL, width: 400, height: 300)
+        let item = makeStandaloneMediaItem(fileURL: imageURL)
+
+        let fullImage = try #require(await pipeline.loadFullRAW(for: item))
+        let fullRawKey = pipeline.fullRAWCacheKey(for: item)
+        #expect(DecodedImageCache.shared.image(forKey: fullRawKey) != nil)
+        #expect(pipeline.cachedFullRAWImage(for: item) != nil)
+    }
 }
+

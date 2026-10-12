@@ -1,0 +1,3 @@
+# HEIC Format and Compression for Cached Full RAW Demosaic Previews
+
+When a user explicitly triggers an on-demand full RAW demosaic over remote storage, Pickture persists the resulting full-resolution preview in the local disk `MediaCache` using the HEIC format (`UTType.heic`) at compression quality 0.88 (with automatic JPEG fallback). HEIC halves on-disk cache consumption (~5–7 MB vs ~10–14 MB for 45–60 MP sensors) compared to standard JPEG while preserving 10-bit wide-gamut color and critical micro-contrast focus details, ensuring subsequent 100% zoom inspections load instantaneously from disk without re-transferring RAW files over the network.

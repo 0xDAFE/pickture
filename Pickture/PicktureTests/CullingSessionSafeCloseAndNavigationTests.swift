@@ -61,7 +61,7 @@ struct CullingSessionSafeCloseAndNavigationTests {
         #expect(!FileManager.default.fileExists(atPath: sidecarURL.path))
 
         // Call closeFolder without force: should flush within timeout and cleanly close
-        let result = await session.closeFolder(force: false)
+        let result = await session.closeFolder(force: false, timeoutNanoseconds: 10_000_000_000)
         #expect(result == .success)
         #expect(session.currentFolderURL == nil)
         #expect(session.items.isEmpty)

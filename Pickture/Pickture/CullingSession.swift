@@ -14,10 +14,12 @@ final class CullingSession: CullingInteractionTarget {
     let metadataSyncEngine: MetadataSyncEngine
     var metadataSyncStore: MetadataSyncStore { metadataSyncEngine.syncStore }
     let interactionController: CullingInteractionController
+    let prefetchCoordinator: PrefetchCoordinator
     private(set) var currentFolderURL: URL?
     private(set) var items: [MediaItem] = [] {
         didSet {
             refreshDerivedCounts()
+            triggerPrefetch()
         }
     }
     private(set) var recentFolders: [RecentFolder] = []
@@ -28,6 +30,8 @@ final class CullingSession: CullingInteractionTarget {
         mediaPipeline.cacheSizeLimitBytes
     }
     private(set) var cacheGeneration: Int = 0
+    private(set) var loadingFullRAWItemIDs: Set<String> = []
+    private(set) var loadedFullRAWItemIDs: Set<String> = []
 
     var cacheSizeLimitMegabytes: Double {
         get {
@@ -62,14 +66,24 @@ final class CullingSession: CullingInteractionTarget {
     private(set) var conflictedItemsCount: Int = 0
     private(set) var pendingWritesCount: Int = 0
 
-    var selectedItemID: String?
+    var selectedItemID: String? {
+        didSet {
+            guard selectedItemID != oldValue else { return }
+            triggerPrefetch()
+        }
+    }
     var lastErrorMessage: String?
     var filterCriteria: FilterCriteria = FilterCriteria() {
         didSet {
             refreshDerivedCounts()
+            triggerPrefetch()
         }
     }
-    var sortOption: SortOption = SortOption(field: .fileName, order: .ascending)
+    var sortOption: SortOption = SortOption(field: .fileName, order: .ascending) {
+        didSet {
+            triggerPrefetch()
+        }
+    }
     var isSearchFieldFocused: Bool = false
     private var exifByItemID: [String: ExifMetadata] = [:]
     private var headerSupplementedItemIDs: Set<String> = []
@@ -81,6 +95,16 @@ final class CullingSession: CullingInteractionTarget {
     private(set) var openFolderProgress: Double? = nil
     var isLazySidecarHydrationEnabled: Bool = false
     private(set) var isExifPreloading: Bool = false
+    private(set) var indexedExifCount: Int = 0
+    private(set) var totalExifTargetCount: Int = 0
+    private(set) var isCullingNavigating: Bool = false
+    private var navigationIdleTask: Task<Void, Never>? = nil
+    private(set) var storageVolumeProfile: StorageVolumeProfile = .internalSSD
+    var isHighSpeedLANOverrideEnabled: Bool = false {
+        didSet {
+            applyActiveVolumeProfile()
+        }
+    }
     private var backgroundExifTask: Task<Void, Never>? = nil
     var flushDebounceNanoseconds: UInt64 {
         get { metadataSyncEngine.flushDebounceNanoseconds }
@@ -178,10 +202,12 @@ final class CullingSession: CullingInteractionTarget {
 
     func togglePreviewSource() {
         previewSource = (previewSource == .preferRaster) ? .preferRAW : .preferRaster
+        triggerPrefetch()
     }
 
     func setPreviewSource(_ source: PreviewSource) {
         previewSource = source
+        triggerPrefetch()
     }
 
     func toggleBorderTapNavigation() {
@@ -425,12 +451,73 @@ final class CullingSession: CullingInteractionTarget {
         self.storageRootURL = resolvedStorageRoot
         self.folderAccessService = FolderAccessService(storageRootURL: resolvedStorageRoot)
         self.mediaPipeline = MediaPipeline(cacheDirectoryURL: resolvedCacheDir)
+        let pipeline = self.mediaPipeline
+        self.prefetchCoordinator = PrefetchCoordinator(
+            cacheCapacityProvider: {
+                DecodedImageCache.shared.countLimit
+            },
+            isItemCached: { [weak pipeline] item, source in
+                guard let pipeline else { return false }
+                let key = pipeline.previewCacheKey(for: item, previewSource: source, maxPixelSize: 2048)
+                return DecodedImageCache.shared.image(forKey: key) != nil
+            },
+            previewFetcher: { [weak pipeline] item, source in
+                guard let pipeline else { return }
+                _ = await pipeline.loadPreviewImage(for: item, previewSource: source, maxPixelSize: 2048)
+            }
+        )
         let syncStoreURL = resolvedStorageRoot.appendingPathComponent("MetadataSyncStore", isDirectory: true)
         self.metadataSyncEngine = MetadataSyncEngine(storeDirectoryURL: syncStoreURL)
         self.interactionController = CullingInteractionController()
         self.recentFolders = self.folderAccessService.loadRecentFolders()
         self.setupMetadataSyncEngineBindings()
         self.interactionController.target = self
+    }
+
+    private func triggerPrefetch() {
+        guard let id = selectedItemID else { return }
+        let currentVisible = visibleItems
+        let currentSource = previewSource
+        let coordinator = prefetchCoordinator
+
+        // Flag active culling navigation to pause background EXIF extraction
+        isCullingNavigating = true
+        navigationIdleTask?.cancel()
+        navigationIdleTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            self?.isCullingNavigating = false
+        }
+
+        Task {
+            await coordinator.navigate(
+                selectedID: id,
+                visibleItems: currentVisible,
+                previewSource: currentSource
+            )
+        }
+    }
+
+    func toggleHighSpeedLANOverride() {
+        isHighSpeedLANOverrideEnabled.toggle()
+    }
+
+    func setHighSpeedLANOverride(_ enabled: Bool) {
+        isHighSpeedLANOverrideEnabled = enabled
+    }
+
+    func setStorageVolumeProfile(_ profile: StorageVolumeProfile) {
+        self.storageVolumeProfile = profile
+        applyActiveVolumeProfile()
+    }
+
+    private func applyActiveVolumeProfile() {
+        let profile = storageVolumeProfile
+        let highSpeed = isHighSpeedLANOverrideEnabled
+        Task {
+            await mediaPipeline.applyStorageVolumeProfile(profile, isHighSpeedLAN: highSpeed)
+            await prefetchCoordinator.applyStorageVolumeProfile(profile, isHighSpeedLAN: highSpeed)
+        }
     }
 
     private func setupMetadataSyncEngineBindings() {
@@ -459,6 +546,10 @@ final class CullingSession: CullingInteractionTarget {
         mediaPipeline.isThumbnailCached(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
+    func inMemoryThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) -> CGImage? {
+        mediaPipeline.inMemoryThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    }
+
     func cachedThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) -> CGImage? {
         mediaPipeline.cachedThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
@@ -474,6 +565,8 @@ final class CullingSession: CullingInteractionTarget {
     func clearMediaCache() {
         mediaPipeline.clearCache()
         thumbnailAspectRatios.removeAll()
+        loadedFullRAWItemIDs.removeAll()
+        loadingFullRAWItemIDs.removeAll()
         self.cacheGeneration &+= 1
     }
 
@@ -562,12 +655,35 @@ final class CullingSession: CullingInteractionTarget {
         }
         guard !itemsToLoad.isEmpty else {
             isExifPreloading = false
+            indexedExifCount = 0
+            totalExifTargetCount = 0
             return
         }
 
         isExifPreloading = true
+        totalExifTargetCount = itemsToLoad.count
+        indexedExifCount = 0
+
         backgroundExifTask = Task.detached(priority: .utility) { [weak self] in
-            let extracted = await ExifHeaderExtractor.extractBatch(for: itemsToLoad)
+            let extracted = await ExifHeaderExtractor.extractBatch(
+                for: itemsToLoad,
+                isPaused: { [weak self] in
+                    await MainActor.run { [weak self] in
+                        self?.isCullingNavigating ?? false
+                    }
+                },
+                onProgress: { [weak self] count, itemID, exif in
+                    await MainActor.run { [weak self] in
+                        guard let self, !Task.isCancelled else { return }
+                        self.indexedExifCount = count
+                        let existing = self.exifByItemID[itemID] ?? self.metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
+                        let merged = existing.supplementing(with: exif)
+                        self.headerSupplementedItemIDs.insert(itemID)
+                        self.exifByItemID[itemID] = merged
+                        self.metadataSyncStore.recordExif(merged, for: itemID)
+                    }
+                }
+            )
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 guard let self, !Task.isCancelled else { return }
@@ -750,11 +866,20 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     private func cleanCloseSession() {
+        let coordinator = prefetchCoordinator
+        Task {
+            await coordinator.cancelAll()
+        }
         metadataSyncEngine.reset()
         interactionController.clearSwipeHistory()
         backgroundExifTask?.cancel()
-        backgroundExifTask = nil
         isExifPreloading = false
+        indexedExifCount = 0
+        totalExifTargetCount = 0
+        isCullingNavigating = false
+        navigationIdleTask?.cancel()
+        navigationIdleTask = nil
+        DirectoryListingCache.shared.clear()
         mediaPipeline.flushIndexImmediately()
         isDiscovering = false
         openFolderProgress = nil
@@ -766,6 +891,8 @@ final class CullingSession: CullingInteractionTarget {
         activeConflictItemID = nil
         isConflictSheetPresented = false
         lastErrorMessage = nil
+        loadedFullRAWItemIDs.removeAll()
+        loadingFullRAWItemIDs.removeAll()
         exifByItemID.removeAll()
         headerSupplementedItemIDs.removeAll()
         filterCriteria.reset()
@@ -821,6 +948,10 @@ final class CullingSession: CullingInteractionTarget {
         startBackgroundExifPreloading(for: self.items)
     }
 
+    func loadThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) async -> CGImage? {
+        await mediaPipeline.loadThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    }
+
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
         await mediaPipeline.loadThumbnailData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
@@ -829,13 +960,61 @@ final class CullingSession: CullingInteractionTarget {
         mediaPipeline.previewCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
+    func inMemoryPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {
+        mediaPipeline.inMemoryPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    }
+
+    func inMemoryFullRAWImage(for item: MediaItem) -> CGImage? {
+        mediaPipeline.inMemoryFullRAWImage(for: item)
+    }
+
     func cachedPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {
         mediaPipeline.cachedPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    }
+
+    func cachedFullRAWImage(for item: MediaItem) -> CGImage? {
+        mediaPipeline.cachedFullRAWImage(for: item)
+    }
+
+    func loadPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) async -> CGImage? {
+        await mediaPipeline.loadPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func loadPreviewImageData(for item: MediaItem, maxPixelSize: Int = 2048) async -> Data? {
         await mediaPipeline.loadPreviewImageData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
+
+    func isLoadingFullRAW(for item: MediaItem) -> Bool {
+        loadingFullRAWItemIDs.contains(item.id)
+    }
+
+    func isFullRAWLoaded(for item: MediaItem) -> Bool {
+        loadedFullRAWItemIDs.contains(item.id) || inMemoryFullRAWImage(for: item) != nil
+    }
+
+    func previewRepresentation(for item: MediaItem) -> PreviewRepresentation {
+        if item.isMediaPair && previewSource == .preferRaster {
+            return .raster
+        }
+        return isFullRAWLoaded(for: item) ? .fullRAW : .rawPreview
+    }
+
+    func loadFullRAW(for item: MediaItem) async -> CGImage? {
+        if let existing = inMemoryFullRAWImage(for: item) {
+            loadedFullRAWItemIDs.insert(item.id)
+            return existing
+        }
+        loadingFullRAWItemIDs.insert(item.id)
+        defer {
+            loadingFullRAWItemIDs.remove(item.id)
+        }
+        let image = await mediaPipeline.loadFullRAW(for: item)
+        if image != nil {
+            loadedFullRAWItemIDs.insert(item.id)
+        }
+        return image
+    }
+
 
     func cancelThumbnail(for item: MediaItem, maxPixelSize: Int = 360) {
         mediaPipeline.cancelThumbnail(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
@@ -902,6 +1081,9 @@ final class CullingSession: CullingInteractionTarget {
         var accumulatedItems: [MediaItem] = []
         var hasSetCurrentFolder = false
 
+        self.storageVolumeProfile = StorageVolumeDetector.detectProfile(for: resolvedURL)
+        applyActiveVolumeProfile()
+
         let stream = MediaDiscovery.streamDiscoveredItems(
             from: resolvedURL,
             mode: subfolderMode,
@@ -955,6 +1137,8 @@ final class CullingSession: CullingInteractionTarget {
         self.isDiscovering = true
         defer { self.isDiscovering = false }
         do {
+            self.storageVolumeProfile = StorageVolumeDetector.detectProfile(for: resolvedURL)
+            applyActiveVolumeProfile()
             let discoveredItems = try discoverItems(in: resolvedURL.standardizedFileURL, mode: subfolderMode)
             self.recentFolders = updatedRecents
             self.currentFolderURL = resolvedURL

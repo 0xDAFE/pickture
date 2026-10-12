@@ -120,22 +120,8 @@ struct FilmstripView: View {
 
                             Spacer()
 
-                            if currentItem.isMediaPair {
-                                Button {
-                                    session.togglePreviewSource()
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "photo.stack")
-                                        Text(session.previewSource == .preferRaster ? "Raster (JPG)" : "RAW Preview")
-                                            .font(.caption.weight(.bold))
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(session.previewSource == .preferRAW ? Color.orange : Color.blue, in: Capsule())
-                                    .foregroundStyle(.white)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Toggle PreviewSource between PreferRaster and PreferRAW (J)")
+                            if currentItem.isMediaPair || currentItem.hasRAWFile {
+                                FilmstripRepresentationControls(item: currentItem, session: session)
                             }
                         }
                         .padding(12)
@@ -309,14 +295,13 @@ struct FilmstripView: View {
             dockPosition: position,
             previewSource: session.previewSource,
             cacheGeneration: session.cacheGeneration,
-            cachedThumbnail: session.cachedThumbnailImage(for: item, maxPixelSize: 360),
+            cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
             aspectRatio: session.thumbnailAspectRatio(for: item),
             onSelect: {
                 session.selectedItemID = item.id
             },
             loadThumbnail: { [session, item] in
-                guard let data = await session.loadThumbnailData(for: item, maxPixelSize: 360) else { return nil }
-                return await PreviewLoader.decodeCGImageAsync(from: data)
+                await session.loadThumbnailImage(for: item, maxPixelSize: 360)
             },
             onThumbnailLoaded: { [session, item] image in
                 session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
@@ -357,7 +342,160 @@ struct FilmstripView: View {
     }
 }
 
-// MARK: - Filmstrip Image Canvas View
+// MARK: - Filmstrip Representation Controls
+
+struct FilmstripRepresentationControls: View {
+    let item: MediaItem
+    let session: CullingSession
+
+    var state: PreviewRepresentation {
+        session.previewRepresentation(for: item)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            representationPill
+
+            if item.hasRAWFile && (session.previewSource == .preferRAW || !item.isMediaPair) {
+                FullRAWActionButton(item: item, session: session)
+            }
+        }
+        .animation(.snappy, value: state)
+    }
+
+    @ViewBuilder
+    private var representationPill: some View {
+        let labelContent = pillContent
+
+        if item.isMediaPair {
+            Button {
+                session.togglePreviewSource()
+            } label: {
+                labelContent
+            }
+            .buttonStyle(.plain)
+            .help(state.helpText(isMediaPair: true))
+        } else {
+            labelContent
+                .help(state.helpText(isMediaPair: false))
+        }
+    }
+
+    @ViewBuilder
+    private var pillContent: some View {
+        HStack(spacing: 4) {
+            Image(systemName: state.iconName)
+                .accessibilityHidden(true)
+            Text(state.titleText)
+                .font(.caption.weight(.bold))
+        }
+        .accessibilityElement(children: .combine)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(state.backgroundColor, in: Capsule())
+        .foregroundStyle(.white)
+    }
+}
+
+// MARK: - PreviewRepresentation Presentation
+
+extension PreviewRepresentation {
+    var iconName: String {
+        switch self {
+        case .raster, .rawPreview:
+            return "photo.stack"
+        case .fullRAW:
+            return "camera.aperture"
+        }
+    }
+
+    var titleText: String {
+        switch self {
+        case .raster:
+            return "Raster (JPG)"
+        case .rawPreview:
+            return "RAW Preview"
+        case .fullRAW:
+            return "Full RAW"
+        }
+    }
+
+    var backgroundColor: Color {
+        switch self {
+        case .raster:
+            return .blue
+        case .rawPreview:
+            return .orange
+        case .fullRAW:
+            return .purple
+        }
+    }
+
+    func helpText(isMediaPair: Bool) -> String {
+        switch self {
+        case .raster:
+            return "Showing paired raster file. Toggle between Raster and RAW (J)"
+        case .rawPreview:
+            return isMediaPair
+                ? "Showing embedded RAW preview. Toggle between Raster and RAW (J)"
+                : "Showing embedded RAW preview"
+        case .fullRAW:
+            return isMediaPair
+                ? "Showing 100% demosaiced sensor RAW. Toggle between Raster and RAW (J)"
+                : "Showing 100% demosaiced sensor RAW"
+        }
+    }
+}
+
+// MARK: - Full RAW Action Button
+
+struct FullRAWActionButton: View {
+    let item: MediaItem
+    let session: CullingSession
+
+    @State private var loadTask: Task<Void, Never>?
+
+    var body: some View {
+        if !session.isFullRAWLoaded(for: item) {
+            if session.isLoadingFullRAW(for: item) {
+                HStack(spacing: 5) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                    Text("Demosaicing RAW…")
+                        .font(.caption.weight(.medium))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+                .foregroundStyle(.white)
+            } else {
+                Button {
+                    loadTask?.cancel()
+                    loadTask = Task {
+                        _ = await session.loadFullRAW(for: item)
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "camera.aperture")
+                        Text("Load Full RAW")
+                            .font(.caption.weight(.medium))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .help("Demosaic full RAW for critical focus inspection (ADR-0005)")
+                .onDisappear {
+                    loadTask?.cancel()
+                    loadTask = nil
+                }
+            }
+        }
+    }
+}
 
 // MARK: - Swipe Action Badge View
 
@@ -441,10 +579,16 @@ struct FilmstripImageCanvasView: View {
     }
 
     private var displayedImage: CGImage? {
-        previewImage
-            ?? session.cachedPreviewImage(for: item, maxPixelSize: 2048)
-            ?? session.cachedThumbnailImage(for: item, maxPixelSize: 360)
+        if (session.previewSource == .preferRAW || !item.isMediaPair),
+           session.isFullRAWLoaded(for: item),
+           let fullRaw = session.inMemoryFullRAWImage(for: item) {
+            return fullRaw
+        }
+        return previewImage
+            ?? session.inMemoryPreviewImage(for: item, maxPixelSize: 2048)
+            ?? session.inMemoryThumbnailImage(for: item, maxPixelSize: 360)
     }
+
 
     var body: some View {
         GeometryReader { geo in
@@ -495,6 +639,7 @@ struct FilmstripImageCanvasView: View {
                     }
                 }
             }
+
             .contentShape(Rectangle())
             // Double-tap zoom gesture (toggles between 1.0 and 2.0)
             .gesture(
@@ -573,13 +718,13 @@ struct FilmstripImageCanvasView: View {
                     }
             )
             .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
-                isLoading = true
-                defer { isLoading = false }
-                guard let data = await session.loadPreviewImageData(for: item, maxPixelSize: 2048) else {
-                    previewImage = nil
+                if let inMemory = session.inMemoryPreviewImage(for: item, maxPixelSize: 2048) {
+                    previewImage = inMemory
                     return
                 }
-                let decoded = await PreviewLoader.decodeCGImageAsync(from: data)
+                isLoading = true
+                defer { isLoading = false }
+                let decoded = await session.loadPreviewImage(for: item, maxPixelSize: 2048)
                 if !Task.isCancelled {
                     previewImage = decoded
                 }

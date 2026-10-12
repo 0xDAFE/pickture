@@ -18,6 +18,10 @@ struct FilterCriteriaBarView: View {
 
                 Spacer(minLength: 4)
 
+                if session.isExifPreloading && session.totalExifTargetCount > 0 {
+                    metadataIndexingIndicator
+                }
+
                 sortMenu
             }
             .padding(.horizontal, 16)
@@ -778,6 +782,25 @@ struct FilterCriteriaBarView: View {
             Capsule()
                 .fill(Color.accentColor.opacity(0.12))
         )
+    }
+
+    // MARK: - Metadata Indexing Indicator
+
+    private var metadataIndexingIndicator: some View {
+        HStack(spacing: 4) {
+            ProgressView()
+                .controlSize(.mini)
+            Text("Indexing metadata: \(session.indexedExifCount)/\(session.totalExifTargetCount)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            Capsule()
+                .fill(Color.secondary.opacity(0.08))
+        )
+        .help("Extracting EXIF metadata in background")
     }
 
     // MARK: - Sort Menu

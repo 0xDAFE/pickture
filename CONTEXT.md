@@ -30,6 +30,10 @@ _Avoid_: Flat view, Deep scan, Recursive library
 The active culling and inspection environment bound to an open folder and its associated `MediaItem`s, presenting either the Grid or Filmstrip view alongside synchronization controls.
 _Avoid_: Document, Project, Canvas, Window, Gallery
 
+**StorageVolumeProfile**:
+The hardware-adaptive performance classification (`InternalSSD`, `RemovableMedia`, or `NetworkShare`) assigned to a `Workspace`'s storage mount, determining worker thread concurrency and speculative prefetch depth.
+_Avoid_: Drive type, Speed class, Connection mode
+
 ### Culling & Metadata
 
 **CurationMetadata**:
@@ -91,6 +95,10 @@ _Avoid_: Backup, Previous version, Original metadata
 **MetadataConflict**:
 A state where a `MediaItem` has unsynchronized local edits (`PendingWrite`) while its on-disk `Sidecar` has simultaneously been modified externally since the `BaseSnapshot`, requiring user resolution between local and remote values.
 _Avoid_: Sync error, Collision, Merge failure
+
+**DecodedImageCache**:
+The volatile in-memory cache of decoded uncompressed pixel buffers (`CGImage`) held in RAM for instant, zero-I/O navigation and comparison, bounded by device memory limits and purged on memory pressure.
+_Avoid_: Memory buffer, Pixel store, RAM disk
 
 **MediaCache**:
 The evictable local disk cache of rendered thumbnails and decoded preview images bounded by a user-configurable byte quota (LRU) that can be cleared at any time without affecting unsynchronized metadata.

@@ -845,7 +845,7 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(cache.contains(key: key1) == true)
         #expect(cache.contains(key: key2) == true)
 
-        let indexURL = cacheDir.appendingPathComponent("cache-index.json")
+        let indexURL = cache.indexFileURL
         let diskIndexDataBefore = try Data(contentsOf: indexURL)
 
         // Read key1: moves key1 to most recently used, leaving key2 as least recently used
