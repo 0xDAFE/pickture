@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import Observation
 import Testing
 import UniformTypeIdentifiers
 @testable import Pickture
@@ -724,5 +725,42 @@ struct CullingSessionFilmstripAndShortcutTests {
 
         let standaloneEvicted = FilmstripRepresentationControls(item: standaloneItem, session: session)
         #expect(standaloneEvicted.state == .rawPreview)
+    }
+
+    @Test("Loading full RAW triggers Observation tracking on previewRepresentation so UI reactively updates to .fullRAW")
+    func loadingFullRAWTriggersObservationTracking() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("DSC0002.JPG")
+        let rawURL = root.appendingPathComponent("DSC0002.ARW")
+
+        try createTestJPEG(at: jpgURL, width: 320, height: 240, r: 50, g: 100, b: 150)
+        let rawHeaderPrefix = try Data(contentsOf: jpgURL)
+        var rawData = rawHeaderPrefix
+        rawData.append(Data(repeating: 0xBB, count: 2048))
+        try rawData.write(to: rawURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+        session.setPreviewSource(.preferRAW)
+
+        let item = try #require(session.items.first)
+
+        var observationFired = false
+        withObservationTracking {
+            _ = session.previewRepresentation(for: item)
+        } onChange: {
+            observationFired = true
+        }
+
+        #expect(!observationFired)
+        #expect(session.previewRepresentation(for: item) == .rawPreview)
+
+        _ = await session.loadFullRAW(for: item)
+
+        #expect(observationFired == true)
+        #expect(session.previewRepresentation(for: item) == .fullRAW)
     }
 }

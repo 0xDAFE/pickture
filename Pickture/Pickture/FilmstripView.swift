@@ -349,7 +349,8 @@ struct FilmstripRepresentationControls: View {
     let session: CullingSession
 
     var state: PreviewRepresentation {
-        session.previewRepresentation(for: item)
+        _ = session.cacheGeneration
+        return session.previewRepresentation(for: item)
     }
 
     var body: some View {
@@ -456,6 +457,7 @@ struct FullRAWActionButton: View {
     @State private var loadTask: Task<Void, Never>?
 
     var body: some View {
+        let _ = session.cacheGeneration
         if !session.isFullRAWLoaded(for: item) {
             if session.isLoadingFullRAW(for: item) {
                 HStack(spacing: 5) {

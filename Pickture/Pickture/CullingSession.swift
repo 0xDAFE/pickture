@@ -962,7 +962,8 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     func inMemoryFullRAWImage(for item: MediaItem) -> CGImage? {
-        mediaPipeline.inMemoryFullRAWImage(for: item)
+        _ = cacheGeneration
+        return mediaPipeline.inMemoryFullRAWImage(for: item)
     }
 
     func cachedPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {
@@ -986,10 +987,12 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     func isFullRAWLoaded(for item: MediaItem) -> Bool {
-        inMemoryFullRAWImage(for: item) != nil
+        _ = cacheGeneration
+        return inMemoryFullRAWImage(for: item) != nil
     }
 
     func previewRepresentation(for item: MediaItem) -> PreviewRepresentation {
+        _ = cacheGeneration
         if item.isMediaPair && previewSource == .preferRaster {
             return .raster
         }
