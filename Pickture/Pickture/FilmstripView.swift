@@ -120,22 +120,28 @@ struct FilmstripView: View {
 
                             Spacer()
 
-                            if currentItem.isMediaPair {
-                                Button {
-                                    session.togglePreviewSource()
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "photo.stack")
-                                        Text(session.previewSource == .preferRaster ? "Raster (JPG)" : "RAW Preview")
-                                            .font(.caption.weight(.bold))
+                            HStack(spacing: 8) {
+                                if currentItem.isMediaPair {
+                                    Button {
+                                        session.togglePreviewSource()
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "photo.stack")
+                                            Text(session.previewSource == .preferRaster ? "Raster (JPG)" : "RAW Preview")
+                                                .font(.caption.weight(.bold))
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 5)
+                                        .background(session.previewSource == .preferRAW ? Color.orange : Color.blue, in: Capsule())
+                                        .foregroundStyle(.white)
                                     }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(session.previewSource == .preferRAW ? Color.orange : Color.blue, in: Capsule())
-                                    .foregroundStyle(.white)
+                                    .buttonStyle(.plain)
+                                    .help("Toggle PreviewSource between PreferRaster and PreferRAW (J)")
                                 }
-                                .buttonStyle(.plain)
-                                .help("Toggle PreviewSource between PreferRaster and PreferRAW (J)")
+
+                                if currentItem.hasRAWFile && (session.previewSource == .preferRAW || !currentItem.isMediaPair) {
+                                    FullRAWActionButton(item: currentItem, session: session)
+                                }
                             }
                         }
                         .padding(12)
@@ -356,7 +362,55 @@ struct FilmstripView: View {
     }
 }
 
-// MARK: - Filmstrip Image Canvas View
+// MARK: - Full RAW Action Button
+
+struct FullRAWActionButton: View {
+    let item: MediaItem
+    let session: CullingSession
+
+    @State private var loadTask: Task<Void, Never>?
+
+    var body: some View {
+        if !session.isFullRAWLoaded(for: item) {
+            if session.isLoadingFullRAW(for: item) {
+                HStack(spacing: 5) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                    Text("Demosaicing RAW…")
+                        .font(.caption.weight(.medium))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+                .foregroundStyle(.white)
+            } else {
+                Button {
+                    loadTask?.cancel()
+                    loadTask = Task {
+                        _ = await session.loadFullRAW(for: item)
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "camera.aperture")
+                        Text("Load Full RAW")
+                            .font(.caption.weight(.medium))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .help("Demosaic full RAW for critical focus inspection (ADR-0005)")
+                .onDisappear {
+                    loadTask?.cancel()
+                    loadTask = nil
+                }
+            }
+        }
+    }
+}
 
 // MARK: - Swipe Action Badge View
 
@@ -428,8 +482,6 @@ struct FilmstripImageCanvasView: View {
     let session: CullingSession
 
     @State private var previewImage: CGImage?
-    @State private var fullRawImage: CGImage?
-    @State private var isLoadingFullRaw = false
     @State private var zoomScale: CGFloat = 1.0
     @State private var pinchScale: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
@@ -442,9 +494,11 @@ struct FilmstripImageCanvasView: View {
     }
 
     private var displayedImage: CGImage? {
-        fullRawImage
-            ?? previewImage
-            ?? session.inMemoryFullRAWImage(for: item)
+        if (session.previewSource == .preferRAW || !item.isMediaPair),
+           let fullRaw = session.inMemoryFullRAWImage(for: item) {
+            return fullRaw
+        }
+        return previewImage
             ?? session.inMemoryPreviewImage(for: item, maxPixelSize: 2048)
             ?? session.inMemoryThumbnailImage(for: item, maxPixelSize: 360)
     }
@@ -496,44 +550,6 @@ struct FilmstripImageCanvasView: View {
                             .scaleEffect(0.85 + 0.15 * progress)
                             .padding(.top, 40)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    }
-                }
-
-                // On-demand Full RAW demosaic action for critical focus inspection (ADR-0005)
-                if item.hasRAWFile && fullRawImage == nil && session.inMemoryFullRAWImage(for: item) == nil {
-                    VStack {
-                        HStack {
-                            Spacer()
-                            Button {
-                                Task {
-                                    isLoadingFullRaw = true
-                                    defer { isLoadingFullRaw = false }
-                                    if let raw = await session.loadFullRAW(for: item) {
-                                        if !Task.isCancelled {
-                                            fullRawImage = raw
-                                        }
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: 5) {
-                                    if isLoadingFullRaw {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                            .tint(.white)
-                                    } else {
-                                        Image(systemName: "camera.aperture")
-                                    }
-                                    Text(isLoadingFullRaw ? "Demosaicing RAW…" : "Load Full RAW")
-                                        .font(.caption.weight(.medium))
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(.ultraThinMaterial, in: Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            .padding(16)
-                        }
-                        Spacer()
                     }
                 }
             }

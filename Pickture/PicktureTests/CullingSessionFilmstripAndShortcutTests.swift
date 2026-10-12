@@ -610,4 +610,49 @@ struct CullingSessionFilmstripAndShortcutTests {
         let settingsScene = SettingsSheetView(session: session, showsDismissButton: false)
         #expect(settingsScene.showsDismissButton == false)
     }
+
+    @Test("Full RAW on-demand loading updates session state without mutating previewSource, and reflects memory cache state accurately")
+    func fullRAWLoadingSessionStateAndCacheLifecycle() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("DSC0002.JPG")
+        let rawURL = root.appendingPathComponent("DSC0002.ARW")
+
+        try createTestJPEG(at: jpgURL, width: 320, height: 240, r: 50, g: 100, b: 150)
+        let rawHeaderPrefix = try Data(contentsOf: jpgURL)
+        var rawData = rawHeaderPrefix
+        rawData.append(Data(repeating: 0xBB, count: 2048))
+        try rawData.write(to: rawURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+
+        let item = try #require(session.items.first)
+        #expect(item.hasRAWFile)
+        #expect(item.isMediaPair)
+
+        // Initially not loaded and in preferRaster
+        #expect(!session.isFullRAWLoaded(for: item))
+        #expect(!session.isLoadingFullRAW(for: item))
+        #expect(session.previewSource == .preferRaster)
+
+        // Load full RAW
+        let fullImage = await session.loadFullRAW(for: item)
+        #expect(fullImage != nil)
+        #expect(session.isFullRAWLoaded(for: item))
+        #expect(!session.isLoadingFullRAW(for: item))
+        // Calling loadFullRAW does NOT alter the user's global session representation preference
+        #expect(session.previewSource == .preferRaster)
+
+        // Repeated load returns cached image immediately
+        let cachedImage = await session.loadFullRAW(for: item)
+        #expect(cachedImage != nil)
+        #expect(session.isFullRAWLoaded(for: item))
+
+        // clearMediaCache evicts cache, so isFullRAWLoaded becomes false and permits reload
+        session.clearMediaCache()
+        #expect(!session.isFullRAWLoaded(for: item))
+    }
 }

@@ -30,6 +30,7 @@ final class CullingSession: CullingInteractionTarget {
         mediaPipeline.cacheSizeLimitBytes
     }
     private(set) var cacheGeneration: Int = 0
+    private(set) var loadingFullRAWItemIDs: Set<String> = []
 
     var cacheSizeLimitMegabytes: Double {
         get {
@@ -563,6 +564,7 @@ final class CullingSession: CullingInteractionTarget {
     func clearMediaCache() {
         mediaPipeline.clearCache()
         thumbnailAspectRatios.removeAll()
+        loadingFullRAWItemIDs.removeAll()
         self.cacheGeneration &+= 1
     }
 
@@ -887,6 +889,7 @@ final class CullingSession: CullingInteractionTarget {
         activeConflictItemID = nil
         isConflictSheetPresented = false
         lastErrorMessage = nil
+        loadingFullRAWItemIDs.removeAll()
         exifByItemID.removeAll()
         headerSupplementedItemIDs.removeAll()
         filterCriteria.reset()
@@ -978,8 +981,24 @@ final class CullingSession: CullingInteractionTarget {
         await mediaPipeline.loadPreviewImageData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
+    func isLoadingFullRAW(for item: MediaItem) -> Bool {
+        loadingFullRAWItemIDs.contains(item.id)
+    }
+
+    func isFullRAWLoaded(for item: MediaItem) -> Bool {
+        inMemoryFullRAWImage(for: item) != nil
+    }
+
     func loadFullRAW(for item: MediaItem) async -> CGImage? {
-        await mediaPipeline.loadFullRAW(for: item)
+        if let existing = inMemoryFullRAWImage(for: item) {
+            return existing
+        }
+        loadingFullRAWItemIDs.insert(item.id)
+        defer {
+            loadingFullRAWItemIDs.remove(item.id)
+            self.cacheGeneration &+= 1
+        }
+        return await mediaPipeline.loadFullRAW(for: item)
     }
 
 
