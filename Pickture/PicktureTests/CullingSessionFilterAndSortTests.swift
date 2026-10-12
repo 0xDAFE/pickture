@@ -143,7 +143,7 @@ struct CullingSessionFilterAndSortTests {
     }
 
     @Test("ExifMetadata lazily supplements missing tags via header-only reads, preferring raster in MediaPair")
-    func exifMetadataSupplementedViaHeaderPreferringRasterInMediaPair() throws {
+    func exifMetadataSupplementedViaHeaderPreferringRasterInMediaPair() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -177,6 +177,7 @@ struct CullingSessionFilterAndSortTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundExifPreloading()
 
         let item = try #require(session.items.first)
         #expect(item.isMediaPair == true)
@@ -193,7 +194,7 @@ struct CullingSessionFilterAndSortTests {
     }
 
     @Test("ExifMetadata is cached in MetadataSyncStore and survives simulated session restarts")
-    func exifMetadataCachedInMetadataSyncStoreAndSurvivesRestarts() throws {
+    func exifMetadataCachedInMetadataSyncStoreAndSurvivesRestarts() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -213,6 +214,7 @@ struct CullingSessionFilterAndSortTests {
         // Session 1: Extract and cache
         let session1 = CullingSession(storageRootURL: storeURL)
         try session1.openFolder(at: root)
+        await session1.waitForBackgroundExifPreloading()
         let item1 = try #require(session1.items.first)
 
         let exif1 = session1.exifMetadata(for: item1)
@@ -357,7 +359,7 @@ struct CullingSessionFilterAndSortTests {
     }
 
     @Test("FilterCriteria filters by Camera Model and Lens Model with logical OR within category")
-    func filterCriteriaCameraAndLensModel() throws {
+    func filterCriteriaCameraAndLensModel() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -371,6 +373,7 @@ struct CullingSessionFilterAndSortTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundExifPreloading()
 
         #expect(session.availableCameraModels == ["Canon R5", "Nikon Z9", "Sony A1"])
         #expect(session.availableLensModels == ["FE 50mm F1.2 GM", "NIKKOR 50mm f/1.2", "RF 50mm F1.2L"])
@@ -445,7 +448,7 @@ struct CullingSessionFilterAndSortTests {
     }
 
     @Test("FilterCriteria combines selections using logical OR within category and logical AND across categories")
-    func filterCriteriaORWithinAndANDAcross() throws {
+    func filterCriteriaORWithinAndANDAcross() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -461,6 +464,7 @@ struct CullingSessionFilterAndSortTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundExifPreloading()
 
         let item1 = try #require(session.items.first { $0.baseName == "MATCH" })
         let item2 = try #require(session.items.first { $0.baseName == "WRONG_RATING" })
@@ -587,7 +591,7 @@ struct CullingSessionFilterAndSortTests {
     }
 
     @Test("Users can sort visible MediaItems by Capture Date in ascending and descending order")
-    func sortingByCaptureDateAscendingAndDescending() throws {
+    func sortingByCaptureDateAscendingAndDescending() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -601,6 +605,7 @@ struct CullingSessionFilterAndSortTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundExifPreloading()
 
         // Ascending (earliest first)
         session.setSortOption(SortOption(field: .captureDate, order: .ascending))
@@ -612,7 +617,7 @@ struct CullingSessionFilterAndSortTests {
     }
 
     @Test("Capture date sorting places items with dates before items without dates in both ascending and descending orders")
-    func sortingByCaptureDateWithNilDates() throws {
+    func sortingByCaptureDateWithNilDates() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -624,6 +629,7 @@ struct CullingSessionFilterAndSortTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundExifPreloading()
 
         // Ascending
         session.setSortOption(SortOption(field: .captureDate, order: .ascending))

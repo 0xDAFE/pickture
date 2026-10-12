@@ -280,7 +280,7 @@ struct CullingSequenceAndZeroIOTests {
     }
 
     @Test("Capture date sorting places items with nil dates at sequence tail in both ascending and descending order")
-    func captureDateSortingWithNilDatesAtTail() throws {
+    func captureDateSortingWithNilDatesAtTail() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -292,6 +292,7 @@ struct CullingSequenceAndZeroIOTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundExifPreloading()
 
         // 1. Ascending by capture date: dated first, undated at tail
         session.setSortOption(SortOption(field: .captureDate, order: .ascending))

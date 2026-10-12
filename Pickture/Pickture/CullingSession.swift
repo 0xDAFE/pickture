@@ -286,7 +286,13 @@ final class CullingSession: CullingInteractionTarget {
         return fallbackAspectRatio(for: item)
     }
 
-    func recordThumbnailAspectRatio(_ ratio: CGFloat, for item: MediaItem, previewSource: PreviewSource? = nil) {
+    func recordThumbnailAspectRatio(
+        _ ratio: CGFloat,
+        for item: MediaItem,
+        previewSource: PreviewSource? = nil,
+        pixelWidth: Int? = nil,
+        pixelHeight: Int? = nil
+    ) {
         guard !ratio.isNaN && !ratio.isInfinite && ratio > 0 else { return }
         let source = previewSource ?? self.previewSource
         let key = aspectRatioKey(for: item, previewSource: source)
@@ -295,10 +301,10 @@ final class CullingSession: CullingInteractionTarget {
             thumbnailAspectRatios[item.id] = ratio
         }
 
-        let cacheKey = mediaPipeline.thumbnailCacheKey(for: item, previewSource: source)
-        let width = Int(ratio * 1000)
-        let height = 1000
-        mediaPipeline.cache.recordDimensions(key: cacheKey, pixelWidth: width, pixelHeight: height)
+        if let width = pixelWidth, let height = pixelHeight, width > 0, height > 0 {
+            let cacheKey = mediaPipeline.thumbnailCacheKey(for: item, previewSource: source)
+            mediaPipeline.cache.recordDimensions(key: cacheKey, pixelWidth: width, pixelHeight: height)
+        }
     }
 
     func recordThumbnailAspectRatio(_ ratio: CGFloat, for itemID: String) {
@@ -330,7 +336,7 @@ final class CullingSession: CullingInteractionTarget {
             }
         }
 
-        return Task(priority: .utility) { [weak self, pipeline, keysToQuery, itemSourceToKey] in
+        return Task.detached(priority: .utility) { [weak self, pipeline, keysToQuery, itemSourceToKey] in
             let cachedRatios = pipeline.cache.batchAspectRatios(keys: keysToQuery)
             guard !cachedRatios.isEmpty, !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
@@ -667,11 +673,17 @@ final class CullingSession: CullingInteractionTarget {
     func updateCurationMetadata(_ metadata: CurationMetadata, for item: MediaItem) {
         metadataSyncEngine.updateCurationMetadata(metadata, for: item)
         refreshDerivedCounts()
+        if filterCriteria.isActive || sortOption.field == .starRating {
+            recomputeCullingSequence()
+        }
     }
 
     func stagePendingMetadata(_ metadata: CurationMetadata, for item: MediaItem) {
         metadataSyncEngine.stagePendingMetadata(metadata, for: item)
         refreshDerivedCounts()
+        if filterCriteria.isActive || sortOption.field == .starRating {
+            recomputeCullingSequence()
+        }
     }
 
     func curationMetadata(for item: MediaItem) -> CurationMetadata {
@@ -690,8 +702,12 @@ final class CullingSession: CullingInteractionTarget {
         metadataSyncEngine.conflict(for: item)
     }
 
+    func exifMetadata(forItemID itemID: String) -> ExifMetadata {
+        exifByItemID[itemID] ?? metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
+    }
+
     func exifMetadata(for item: MediaItem) -> ExifMetadata {
-        exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif ?? ExifMetadata()
+        exifMetadata(forItemID: item.id)
     }
 
     /// Preloads EXIF metadata in the background off the MainActor.
@@ -702,7 +718,7 @@ final class CullingSession: CullingInteractionTarget {
         let itemsToLoad = targetItems.filter { item in
             guard item.kind != .video else { return false }
             if headerSupplementedItemIDs.contains(item.id) { return false }
-            let existing = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif ?? ExifMetadata()
+            let existing = exifMetadata(for: item)
             if existing.cameraModel != nil && existing.lensModel != nil && existing.dateTimeOriginal != nil && !existing.isoSpeedRatings.isEmpty && existing.focalLength != nil {
                 headerSupplementedItemIDs.insert(item.id)
                 exifByItemID[item.id] = existing
@@ -735,7 +751,7 @@ final class CullingSession: CullingInteractionTarget {
                     await MainActor.run { [weak self] in
                         guard let self, !Task.isCancelled else { return }
                         self.indexedExifCount = count
-                        let existing = self.exifByItemID[itemID] ?? self.metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
+                        let existing = self.exifMetadata(forItemID: itemID)
                         let merged = existing.supplementing(with: exif)
                         self.headerSupplementedItemIDs.insert(itemID)
                         self.exifByItemID[itemID] = merged
@@ -758,7 +774,7 @@ final class CullingSession: CullingInteractionTarget {
                 self.isExifPreloading = false
                 self.backgroundExifTask = nil
                 for (itemID, headerExif) in extracted {
-                    let existing = self.exifByItemID[itemID] ?? self.metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
+                    let existing = self.exifMetadata(forItemID: itemID)
                     let merged = existing.supplementing(with: headerExif)
                     self.headerSupplementedItemIDs.insert(itemID)
                     self.exifByItemID[itemID] = merged
@@ -775,7 +791,7 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     func captureDate(for item: MediaItem) -> Date? {
-        (exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif)?.dateTimeOriginal
+        exifMetadata(for: item).dateTimeOriginal
     }
 
     func recomputeCullingSequence(force: Bool = false) {
@@ -785,7 +801,7 @@ final class CullingSession: CullingInteractionTarget {
 
         let filtered = items.filter { item in
             let curation = curationMetadata(for: item)
-            let exif = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif
+            let exif = exifMetadata(for: item)
             let sync = syncState(for: item)
             return filterCriteria.matches(item: item, curation: curation, exif: exif, syncState: sync)
         }
@@ -836,14 +852,13 @@ final class CullingSession: CullingInteractionTarget {
     func refreshDerivedCounts() {
         pendingWritesCount = metadataSyncEngine.pendingWritesCount
         conflictedItemsCount = metadataSyncEngine.conflictedItemsCount
-        recomputeCullingSequence()
     }
 
     var availableCameraModels: [String] {
         var set = Set<String>()
         for item in items {
-            if let exif = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif,
-               let model = exif.cameraModel, !model.isEmpty {
+            let exif = exifMetadata(for: item)
+            if let model = exif.cameraModel, !model.isEmpty {
                 set.insert(model)
             }
         }
@@ -853,8 +868,8 @@ final class CullingSession: CullingInteractionTarget {
     var availableLensModels: [String] {
         var set = Set<String>()
         for item in items {
-            if let exif = exifByItemID[item.id] ?? metadataSyncStore.record(for: item.id)?.exif,
-               let lens = exif.lensModel, !lens.isEmpty {
+            let exif = exifMetadata(for: item)
+            if let lens = exif.lensModel, !lens.isEmpty {
                 set.insert(lens)
             }
         }
@@ -1151,6 +1166,35 @@ final class CullingSession: CullingInteractionTarget {
         try await openResolvedFolderAsync(resolvedURL: resolvedURL, updatedRecents: updatedRecents, lazySidecars: lazySidecars)
     }
 
+    private static func mergeSortedMediaItems(
+        _ lhs: [MediaItem],
+        _ rhs: [MediaItem],
+        by comparator: (MediaItem, MediaItem) -> Bool = MediaDiscovery.mediaItemSortComparator
+    ) -> [MediaItem] {
+        guard !lhs.isEmpty else { return rhs }
+        guard !rhs.isEmpty else { return lhs }
+        var merged: [MediaItem] = []
+        merged.reserveCapacity(lhs.count + rhs.count)
+        var i = 0
+        var j = 0
+        while i < lhs.count && j < rhs.count {
+            if comparator(lhs[i], rhs[j]) {
+                merged.append(lhs[i])
+                i += 1
+            } else {
+                merged.append(rhs[j])
+                j += 1
+            }
+        }
+        if i < lhs.count {
+            merged.append(contentsOf: lhs[i...])
+        }
+        if j < rhs.count {
+            merged.append(contentsOf: rhs[j...])
+        }
+        return merged
+    }
+
     private func openResolvedFolderAsync(resolvedURL: URL, updatedRecents: [RecentFolder], lazySidecars: Bool) async throws {
         if pendingWritesCount > 0 {
             await flushPendingWrites()
@@ -1185,13 +1229,13 @@ final class CullingSession: CullingInteractionTarget {
                     hasSetCurrentFolder = true
                 }
                 if Task.isCancelled { break }
-                accumulatedItems.append(contentsOf: batch.items)
+                accumulatedItems = Self.mergeSortedMediaItems(accumulatedItems, batch.items)
                 pendingMetadataBatch.append(contentsOf: batch.items)
 
                 let now = Date()
                 if now.timeIntervalSince(lastPublishedTime) >= 0.25 {
                     lastPublishedTime = now
-                    self.items = accumulatedItems.sorted(by: MediaDiscovery.mediaItemSortComparator)
+                    self.items = accumulatedItems
                     self.initializeMetadata(for: pendingMetadataBatch)
                     pendingMetadataBatch.removeAll()
                     self.openFolderProgress = batch.progress
@@ -1212,7 +1256,7 @@ final class CullingSession: CullingInteractionTarget {
             self.currentFolderURL = resolvedURL
         }
 
-        self.items = accumulatedItems.sorted(by: MediaDiscovery.mediaItemSortComparator)
+        self.items = accumulatedItems
         if !pendingMetadataBatch.isEmpty {
             self.initializeMetadata(for: pendingMetadataBatch)
             pendingMetadataBatch.removeAll()
@@ -1250,15 +1294,6 @@ final class CullingSession: CullingInteractionTarget {
             self.items = discoveredItems
             initializeMetadata(for: self.items)
             warmThumbnailAspectRatios(for: self.items)
-            for item in self.items {
-                guard item.kind != .video else { continue }
-                let headerExif = ExifHeaderExtractor.extractHeaderExif(for: item)
-                let existing = self.exifByItemID[item.id] ?? self.metadataSyncStore.record(for: item.id)?.exif ?? ExifMetadata()
-                let merged = existing.supplementing(with: headerExif)
-                self.headerSupplementedItemIDs.insert(item.id)
-                self.exifByItemID[item.id] = merged
-                self.metadataSyncStore.recordExif(merged, for: item.id)
-            }
             self.lastErrorMessage = nil
             if !isSyncSuspended {
                 scheduleFlushPendingWrites()
