@@ -643,6 +643,7 @@ struct CullingSessionFilmstripAndShortcutTests {
         let fullImage = await session.loadFullRAW(for: item)
         #expect(fullImage != nil)
         #expect(session.isFullRAWLoaded(for: item))
+        #expect(session.loadedFullRAWItemIDs.contains(item.id))
         #expect(!session.isLoadingFullRAW(for: item))
         // Calling loadFullRAW does NOT alter the user's global session representation preference
         #expect(session.previewSource == .preferRaster)
@@ -651,10 +652,12 @@ struct CullingSessionFilmstripAndShortcutTests {
         let cachedImage = await session.loadFullRAW(for: item)
         #expect(cachedImage != nil)
         #expect(session.isFullRAWLoaded(for: item))
+        #expect(session.loadedFullRAWItemIDs.contains(item.id))
 
         // clearMediaCache evicts cache, so isFullRAWLoaded becomes false and permits reload
         session.clearMediaCache()
         #expect(!session.isFullRAWLoaded(for: item))
+        #expect(!session.loadedFullRAWItemIDs.contains(item.id))
     }
 
     @Test("FilmstripRepresentationControls resolves states accurately across MediaPairs, standalone RAWs, toggles, demosaicing, and cache evictions")
@@ -762,5 +765,18 @@ struct CullingSessionFilmstripAndShortcutTests {
 
         #expect(observationFired == true)
         #expect(session.previewRepresentation(for: item) == .fullRAW)
+
+        var evictionObservationFired = false
+        withObservationTracking {
+            _ = session.previewRepresentation(for: item)
+        } onChange: {
+            evictionObservationFired = true
+        }
+
+        #expect(!evictionObservationFired)
+        session.clearMediaCache()
+
+        #expect(evictionObservationFired == true)
+        #expect(session.previewRepresentation(for: item) == .rawPreview)
     }
 }

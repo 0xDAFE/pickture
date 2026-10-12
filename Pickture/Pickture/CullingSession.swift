@@ -31,6 +31,7 @@ final class CullingSession: CullingInteractionTarget {
     }
     private(set) var cacheGeneration: Int = 0
     private(set) var loadingFullRAWItemIDs: Set<String> = []
+    private(set) var loadedFullRAWItemIDs: Set<String> = []
 
     var cacheSizeLimitMegabytes: Double {
         get {
@@ -564,6 +565,7 @@ final class CullingSession: CullingInteractionTarget {
     func clearMediaCache() {
         mediaPipeline.clearCache()
         thumbnailAspectRatios.removeAll()
+        loadedFullRAWItemIDs.removeAll()
         loadingFullRAWItemIDs.removeAll()
         self.cacheGeneration &+= 1
     }
@@ -889,6 +891,7 @@ final class CullingSession: CullingInteractionTarget {
         activeConflictItemID = nil
         isConflictSheetPresented = false
         lastErrorMessage = nil
+        loadedFullRAWItemIDs.removeAll()
         loadingFullRAWItemIDs.removeAll()
         exifByItemID.removeAll()
         headerSupplementedItemIDs.removeAll()
@@ -962,8 +965,7 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     func inMemoryFullRAWImage(for item: MediaItem) -> CGImage? {
-        _ = cacheGeneration
-        return mediaPipeline.inMemoryFullRAWImage(for: item)
+        mediaPipeline.inMemoryFullRAWImage(for: item)
     }
 
     func cachedPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {
@@ -987,12 +989,10 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     func isFullRAWLoaded(for item: MediaItem) -> Bool {
-        _ = cacheGeneration
-        return inMemoryFullRAWImage(for: item) != nil
+        loadedFullRAWItemIDs.contains(item.id) || inMemoryFullRAWImage(for: item) != nil
     }
 
     func previewRepresentation(for item: MediaItem) -> PreviewRepresentation {
-        _ = cacheGeneration
         if item.isMediaPair && previewSource == .preferRaster {
             return .raster
         }
@@ -1001,14 +1001,18 @@ final class CullingSession: CullingInteractionTarget {
 
     func loadFullRAW(for item: MediaItem) async -> CGImage? {
         if let existing = inMemoryFullRAWImage(for: item) {
+            loadedFullRAWItemIDs.insert(item.id)
             return existing
         }
         loadingFullRAWItemIDs.insert(item.id)
         defer {
             loadingFullRAWItemIDs.remove(item.id)
-            self.cacheGeneration &+= 1
         }
-        return await mediaPipeline.loadFullRAW(for: item)
+        let image = await mediaPipeline.loadFullRAW(for: item)
+        if image != nil {
+            loadedFullRAWItemIDs.insert(item.id)
+        }
+        return image
     }
 
 

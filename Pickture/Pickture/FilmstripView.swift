@@ -349,8 +349,7 @@ struct FilmstripRepresentationControls: View {
     let session: CullingSession
 
     var state: PreviewRepresentation {
-        _ = session.cacheGeneration
-        return session.previewRepresentation(for: item)
+        session.previewRepresentation(for: item)
     }
 
     var body: some View {
@@ -457,7 +456,6 @@ struct FullRAWActionButton: View {
     @State private var loadTask: Task<Void, Never>?
 
     var body: some View {
-        let _ = session.cacheGeneration
         if !session.isFullRAWLoaded(for: item) {
             if session.isLoadingFullRAW(for: item) {
                 HStack(spacing: 5) {
@@ -582,6 +580,7 @@ struct FilmstripImageCanvasView: View {
 
     private var displayedImage: CGImage? {
         if (session.previewSource == .preferRAW || !item.isMediaPair),
+           session.isFullRAWLoaded(for: item),
            let fullRaw = session.inMemoryFullRAWImage(for: item) {
             return fullRaw
         }
