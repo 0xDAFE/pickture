@@ -25,8 +25,8 @@ struct MediaGridCellView: View, Equatable {
     @State private var isHovered = false
     @Environment(\.colorScheme) private var colorScheme
 
-    private var taskKey: String {
-        "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)-\(syncState.rawValue)"
+    var thumbnailTaskKey: String {
+        "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)"
     }
 
     private var displayedThumbnail: CGImage? {
@@ -103,10 +103,7 @@ struct MediaGridCellView: View, Equatable {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.displayFileName), \(item.mediaTypeBadge)\(item.isMediaPair ? ", RAW+JPG pair" : ""), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
-        .task(id: taskKey) {
-            if syncState == .loading {
-                await hydrateMetadata?()
-            }
+        .task(id: thumbnailTaskKey) {
             guard let loadThumbnail else { return }
             isLoadingThumbnail = true
             defer { isLoadingThumbnail = false }
@@ -119,6 +116,11 @@ struct MediaGridCellView: View, Equatable {
                 if !Task.isCancelled {
                     thumbnailImage = nil
                 }
+            }
+        }
+        .task(id: syncState == .loading) {
+            if syncState == .loading {
+                await hydrateMetadata?()
             }
         }
     }

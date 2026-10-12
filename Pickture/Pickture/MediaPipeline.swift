@@ -270,9 +270,11 @@ final class MediaPipeline {
         }
         let diskCache = self.cache
         let dataToStore = extracted.jpegData
+        let pixelWidth = finalImage?.width
+        let pixelHeight = finalImage?.height
         // Asynchronously persist to disk cache at utility priority without blocking immediate in-memory display
-        Task(priority: .utility) { [diskCache, key, dataToStore] in
-            diskCache.storeData(dataToStore, forKey: key)
+        Task(priority: .utility) { [diskCache, key, dataToStore, pixelWidth, pixelHeight] in
+            diskCache.storeData(dataToStore, forKey: key, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
         }
         syncCacheMetrics()
         return finalImage
@@ -292,10 +294,11 @@ final class MediaPipeline {
         guard let extracted, !Task.isCancelled else {
             return nil
         }
-        if let finalImage = extracted.image ?? PreviewLoader.decodeCGImage(from: extracted.jpegData) {
+        let finalImage = extracted.image ?? PreviewLoader.decodeCGImage(from: extracted.jpegData)
+        if let finalImage {
             DecodedImageCache.shared.setImage(finalImage, forKey: key)
         }
-        cache.storeData(extracted.jpegData, forKey: key)
+        cache.storeData(extracted.jpegData, forKey: key, pixelWidth: finalImage?.width, pixelHeight: finalImage?.height)
         syncCacheMetrics()
         return extracted.jpegData
     }

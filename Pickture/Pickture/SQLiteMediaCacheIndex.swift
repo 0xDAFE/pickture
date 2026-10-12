@@ -38,13 +38,41 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
             file_name TEXT NOT NULL,
             byte_size INTEGER NOT NULL,
             last_accessed_at REAL NOT NULL,
-            access_sequence INTEGER NOT NULL
+            access_sequence INTEGER NOT NULL,
+            pixel_width INTEGER,
+            pixel_height INTEGER
         );
         """)
+
+        ensureColumns()
 
         execute("""
         CREATE INDEX IF NOT EXISTS idx_access_sequence ON cache_entries (access_sequence);
         """)
+    }
+
+    private func ensureColumns() {
+        guard let db else { return }
+        var stmt: OpaquePointer?
+        let sql = "PRAGMA table_info(cache_entries);"
+        var hasPixelWidth = false
+        var hasPixelHeight = false
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let colNamePtr = sqlite3_column_text(stmt, 1) {
+                    let colName = String(cString: colNamePtr)
+                    if colName == "pixel_width" { hasPixelWidth = true }
+                    if colName == "pixel_height" { hasPixelHeight = true }
+                }
+            }
+            sqlite3_finalize(stmt)
+        }
+        if !hasPixelWidth {
+            execute("ALTER TABLE cache_entries ADD COLUMN pixel_width INTEGER;")
+        }
+        if !hasPixelHeight {
+            execute("ALTER TABLE cache_entries ADD COLUMN pixel_height INTEGER;")
+        }
     }
 
     deinit {
@@ -97,7 +125,7 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
 
     func entry(forKey key: String) -> MediaCacheEntry? {
         guard let db else { return nil }
-        let sql = "SELECT file_name, byte_size, last_accessed_at, access_sequence FROM cache_entries WHERE key = ? LIMIT 1;"
+        let sql = "SELECT file_name, byte_size, last_accessed_at, access_sequence, pixel_width, pixel_height FROM cache_entries WHERE key = ? LIMIT 1;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
@@ -108,12 +136,22 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
             let byteSize = sqlite3_column_int64(stmt, 1)
             let lastAccessedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2))
             let accessSequence = UInt64(sqlite3_column_int64(stmt, 3))
+            var pixelWidth: Int? = nil
+            var pixelHeight: Int? = nil
+            if sqlite3_column_type(stmt, 4) != SQLITE_NULL {
+                pixelWidth = Int(sqlite3_column_int(stmt, 4))
+            }
+            if sqlite3_column_type(stmt, 5) != SQLITE_NULL {
+                pixelHeight = Int(sqlite3_column_int(stmt, 5))
+            }
             return MediaCacheEntry(
                 key: key,
                 fileName: fileName,
                 byteSize: byteSize,
                 lastAccessedAt: lastAccessedAt,
-                accessSequence: accessSequence
+                accessSequence: accessSequence,
+                pixelWidth: pixelWidth,
+                pixelHeight: pixelHeight
             )
         }
         return nil
@@ -133,13 +171,15 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
     func insertOrReplace(entry: MediaCacheEntry) {
         guard let db else { return }
         let sql = """
-        INSERT INTO cache_entries (key, file_name, byte_size, last_accessed_at, access_sequence)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO cache_entries (key, file_name, byte_size, last_accessed_at, access_sequence, pixel_width, pixel_height)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
             file_name = excluded.file_name,
             byte_size = excluded.byte_size,
             last_accessed_at = excluded.last_accessed_at,
-            access_sequence = excluded.access_sequence;
+            access_sequence = excluded.access_sequence,
+            pixel_width = COALESCE(excluded.pixel_width, cache_entries.pixel_width),
+            pixel_height = COALESCE(excluded.pixel_height, cache_entries.pixel_height);
         """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
@@ -150,7 +190,76 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
         sqlite3_bind_int64(stmt, 3, entry.byteSize)
         sqlite3_bind_double(stmt, 4, entry.lastAccessedAt.timeIntervalSince1970)
         sqlite3_bind_int64(stmt, 5, Int64(entry.accessSequence))
+        if let w = entry.pixelWidth {
+            sqlite3_bind_int(stmt, 6, Int32(w))
+        } else {
+            sqlite3_bind_null(stmt, 6)
+        }
+        if let h = entry.pixelHeight {
+            sqlite3_bind_int(stmt, 7, Int32(h))
+        } else {
+            sqlite3_bind_null(stmt, 7)
+        }
         sqlite3_step(stmt)
+    }
+
+    func updateDimensions(key: String, pixelWidth: Int, pixelHeight: Int) {
+        guard let db else { return }
+        let sql = "UPDATE cache_entries SET pixel_width = ?, pixel_height = ? WHERE key = ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_int(stmt, 1, Int32(pixelWidth))
+        sqlite3_bind_int(stmt, 2, Int32(pixelHeight))
+        sqlite3_bind_text(stmt, 3, key, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+    }
+
+    func aspectRatio(forKey key: String) -> CGFloat? {
+        guard let db else { return nil }
+        let sql = "SELECT pixel_width, pixel_height FROM cache_entries WHERE key = ? AND pixel_width IS NOT NULL AND pixel_height IS NOT NULL AND pixel_height > 0 LIMIT 1;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            let width = sqlite3_column_int(stmt, 0)
+            let height = sqlite3_column_int(stmt, 1)
+            if height > 0 {
+                return CGFloat(width) / CGFloat(height)
+            }
+        }
+        return nil
+    }
+
+    func batchAspectRatios(keys: [String]) -> [String: CGFloat] {
+        guard let db, !keys.isEmpty else { return [:] }
+        var results: [String: CGFloat] = [:]
+        let chunkSize = 500
+        for chunk in stride(from: 0, to: keys.count, by: chunkSize) {
+            let slice = Array(keys[chunk..<min(chunk + chunkSize, keys.count)])
+            let placeholders = Array(repeating: "?", count: slice.count).joined(separator: ",")
+            let sql = "SELECT key, pixel_width, pixel_height FROM cache_entries WHERE key IN (\(placeholders)) AND pixel_width IS NOT NULL AND pixel_height IS NOT NULL AND pixel_height > 0;"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { continue }
+            for (idx, key) in slice.enumerated() {
+                sqlite3_bind_text(stmt, Int32(idx + 1), key, -1, SQLITE_TRANSIENT)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let keyPtr = sqlite3_column_text(stmt, 0) {
+                    let key = String(cString: keyPtr)
+                    let width = sqlite3_column_int(stmt, 1)
+                    let height = sqlite3_column_int(stmt, 2)
+                    if height > 0 {
+                        results[key] = CGFloat(width) / CGFloat(height)
+                    }
+                }
+            }
+            sqlite3_finalize(stmt)
+        }
+        return results
     }
 
     func updateAccess(key: String, lastAccessedAt: Date, accessSequence: UInt64) {
@@ -179,7 +288,7 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
 
     func fetchOldestEntries(limit: Int) -> [MediaCacheEntry] {
         guard let db else { return [] }
-        let sql = "SELECT key, file_name, byte_size, last_accessed_at, access_sequence FROM cache_entries ORDER BY access_sequence ASC LIMIT ?;"
+        let sql = "SELECT key, file_name, byte_size, last_accessed_at, access_sequence, pixel_width, pixel_height FROM cache_entries ORDER BY access_sequence ASC LIMIT ?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
@@ -192,12 +301,22 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
             let byteSize = sqlite3_column_int64(stmt, 2)
             let lastAccessedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3))
             let accessSequence = UInt64(sqlite3_column_int64(stmt, 4))
+            var pixelWidth: Int? = nil
+            var pixelHeight: Int? = nil
+            if sqlite3_column_type(stmt, 5) != SQLITE_NULL {
+                pixelWidth = Int(sqlite3_column_int(stmt, 5))
+            }
+            if sqlite3_column_type(stmt, 6) != SQLITE_NULL {
+                pixelHeight = Int(sqlite3_column_int(stmt, 6))
+            }
             entries.append(MediaCacheEntry(
                 key: key,
                 fileName: fileName,
                 byteSize: byteSize,
                 lastAccessedAt: lastAccessedAt,
-                accessSequence: accessSequence
+                accessSequence: accessSequence,
+                pixelWidth: pixelWidth,
+                pixelHeight: pixelHeight
             ))
         }
         return entries

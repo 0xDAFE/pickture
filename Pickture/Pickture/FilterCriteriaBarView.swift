@@ -790,7 +790,7 @@ struct FilterCriteriaBarView: View {
         HStack(spacing: 4) {
             ProgressView()
                 .controlSize(.mini)
-            Text("Indexing metadata: \(session.indexedExifCount)/\(session.totalExifTargetCount)")
+            Text("Indexing... \(session.indexedExifCount)/\(session.totalExifTargetCount)")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
