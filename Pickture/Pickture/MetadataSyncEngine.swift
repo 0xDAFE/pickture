@@ -41,6 +41,21 @@ final class MetadataSyncEngine {
     @ObservationIgnored
     private var backgroundHydrationTask: Task<Void, Never>? = nil
 
+    @ObservationIgnored
+    private var pendingStoreTask: Task<Void, Never>? = nil
+
+    func enqueueStoreOperation(_ operation: @escaping @Sendable () async -> Void) {
+        let previous = pendingStoreTask
+        pendingStoreTask = Task {
+            _ = await previous?.value
+            await operation()
+        }
+    }
+
+    func waitForPendingStoreWrites() async {
+        await pendingStoreTask?.value
+    }
+
     // MARK: - Integrations & Observation Callbacks
 
     @ObservationIgnored
@@ -144,7 +159,7 @@ final class MetadataSyncEngine {
         if let local = metadataByItemID[itemID] {
             return local
         }
-        if let persisted = syncStore.record(for: itemID) {
+        if let persisted = syncStore.cachedRecord(for: itemID) {
             return persisted.metadata
         }
         return CurationMetadata()
@@ -158,7 +173,7 @@ final class MetadataSyncEngine {
         if let state = syncStateByItemID[itemID] {
             return state
         }
-        if let persisted = syncStore.record(for: itemID) {
+        if let persisted = syncStore.cachedRecord(for: itemID) {
             return persisted.syncState
         }
         return .synced
@@ -172,7 +187,7 @@ final class MetadataSyncEngine {
         if let local = baseSnapshotByItemID[itemID] {
             return local
         }
-        return syncStore.record(for: itemID)?.baseSnapshot
+        return syncStore.cachedRecord(for: itemID)?.baseSnapshot
     }
 
     func baseSnapshot(for item: MediaItem) -> BaseSnapshot? {
@@ -183,7 +198,7 @@ final class MetadataSyncEngine {
         if let local = conflictsByItemID[itemID] {
             return local
         }
-        return syncStore.record(for: itemID)?.conflict
+        return syncStore.cachedRecord(for: itemID)?.conflict
     }
 
     func conflict(for item: MediaItem) -> MetadataConflict? {
@@ -205,7 +220,9 @@ final class MetadataSyncEngine {
         metadataByItemID[itemID] = metadata
         syncStateByItemID[itemID] = .pendingWrite
         conflictsByItemID.removeValue(forKey: itemID)
-        syncStore.stagePendingWrite(metadata, baseSnapshot: base, for: itemID)
+        enqueueStoreOperation { [syncStore] in
+            await syncStore.stagePendingWrite(metadata, baseSnapshot: base, for: itemID)
+        }
         onStateChange?()
 
         if !isSyncSuspended {
@@ -378,19 +395,19 @@ final class MetadataSyncEngine {
             case .conflict(let conflict):
                 syncStateByItemID[item.id] = .conflicted
                 conflictsByItemID[item.id] = conflict
-                syncStore.recordConflict(conflict, for: item.id)
+                await syncStore.recordConflict(conflict, for: item.id)
 
             case .success(let newBase):
                 metadataByItemID[item.id] = newBase.metadata
                 baseSnapshotByItemID[item.id] = newBase
                 syncStateByItemID[item.id] = .synced
                 conflictsByItemID.removeValue(forKey: item.id)
-                syncStore.markSynced(for: item.id, baseSnapshot: newBase)
+                await syncStore.markSynced(for: item.id, baseSnapshot: newBase)
             }
             onStateChange?()
         } catch {
             syncStateByItemID[item.id] = .syncError
-            syncStore.updateSyncState(.syncError, for: item.id)
+            await syncStore.updateSyncState(.syncError, for: item.id)
             onSyncError?(error, item)
             onStateChange?()
             throw error
@@ -436,7 +453,7 @@ final class MetadataSyncEngine {
         syncStateByItemID[item.id] = .synced
         baseSnapshotByItemID[item.id] = newBase
         conflictsByItemID.removeValue(forKey: item.id)
-        syncStore.resolveConflict(for: item.id, resolvedMetadata: resolvedMetadata, newBaseSnapshot: newBase)
+        await syncStore.resolveConflict(for: item.id, resolvedMetadata: resolvedMetadata, newBaseSnapshot: newBase)
         onStateChange?()
     }
 
@@ -473,7 +490,7 @@ final class MetadataSyncEngine {
 
         for item in failedItems {
             syncStateByItemID[item.id] = .pendingWrite
-            syncStore.updateSyncState(.pendingWrite, for: item.id)
+            await syncStore.updateSyncState(.pendingWrite, for: item.id)
         }
         onStateChange?()
         await flushPendingWrites()
@@ -485,7 +502,7 @@ final class MetadataSyncEngine {
         currentItems = items
         if isLazy {
             for item in items {
-                let persisted = syncStore.record(for: item.id)
+                let persisted = syncStore.cachedRecord(for: item.id)
 
                 if let persisted {
                     if let persistedExif = persisted.exif {
@@ -523,7 +540,7 @@ final class MetadataSyncEngine {
     }
 
     func hydrateItemSynchronously(_ item: MediaItem) {
-        let persisted = syncStore.record(for: item.id)
+        let persisted = syncStore.cachedRecord(for: item.id)
         let sidecarURL = SidecarCodec.resolveSidecarReadURL(for: item)
 
         var diskData: Data? = nil
@@ -557,7 +574,9 @@ final class MetadataSyncEngine {
             metadataByItemID[item.id] = effectiveCuration
             syncStateByItemID[item.id] = .synced
             baseSnapshotByItemID[item.id] = snapshot
-            syncStore.recordBaseSnapshot(snapshot, exif: exif, for: item.id)
+            enqueueStoreOperation { [syncStore] in
+                await syncStore.recordBaseSnapshot(snapshot, exif: exif, for: item.id)
+            }
         }
 
         if let persisted {
@@ -591,10 +610,14 @@ final class MetadataSyncEngine {
                     case .conflict(let conflict):
                         syncStateByItemID[item.id] = .conflicted
                         conflictsByItemID[item.id] = conflict
-                        syncStore.recordConflict(conflict, for: item.id)
+                        enqueueStoreOperation { [syncStore] in
+                            await syncStore.recordConflict(conflict, for: item.id)
+                        }
                     case .cleanMerge(let merged):
                         metadataByItemID[item.id] = merged
-                        syncStore.stagePendingWrite(merged, baseSnapshot: base, for: item.id)
+                        enqueueStoreOperation { [syncStore] in
+                            await syncStore.stagePendingWrite(merged, baseSnapshot: base, for: item.id)
+                        }
                     case .noChange:
                         break
                     }
@@ -610,11 +633,15 @@ final class MetadataSyncEngine {
                     case .conflict(let conflict):
                         syncStateByItemID[item.id] = .conflicted
                         conflictsByItemID[item.id] = conflict
-                        syncStore.recordConflict(conflict, for: item.id)
+                        enqueueStoreOperation { [syncStore] in
+                            await syncStore.recordConflict(conflict, for: item.id)
+                        }
                     case .cleanMerge(let merged):
                         metadataByItemID[item.id] = merged
                         let newBase = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
-                        syncStore.stagePendingWrite(merged, baseSnapshot: newBase, for: item.id)
+                        enqueueStoreOperation { [syncStore] in
+                            await syncStore.stagePendingWrite(merged, baseSnapshot: newBase, for: item.id)
+                        }
                         baseSnapshotByItemID[item.id] = newBase
                     case .noChange:
                         break
@@ -673,14 +700,14 @@ final class MetadataSyncEngine {
             if let exif {
                 onExifDiscovered?(item.id, exif)
             }
-            syncStore.recordBaseSnapshot(snapshot, exif: existingExif ?? exif, for: item.id)
+            await syncStore.recordBaseSnapshot(snapshot, exif: existingExif ?? exif, for: item.id)
 
         case .none:
             let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
             metadataByItemID[item.id] = CurationMetadata()
             syncStateByItemID[item.id] = .synced
             baseSnapshotByItemID[item.id] = emptySnapshot
-            syncStore.recordBaseSnapshot(emptySnapshot, exif: existingExif, for: item.id)
+            await syncStore.recordBaseSnapshot(emptySnapshot, exif: existingExif, for: item.id)
         }
 
         if refreshCounts {
@@ -728,6 +755,30 @@ final class MetadataSyncEngine {
         onStateChange?()
     }
 
+    func resetMetadataSyncStore() async {
+        await waitForPendingStoreWrites()
+        cancelTasks()
+        await syncStore.reset()
+        metadataByItemID.removeAll()
+        syncStateByItemID.removeAll()
+        baseSnapshotByItemID.removeAll()
+        conflictsByItemID.removeAll()
+        for item in currentItems {
+            let outcome = Self.readSidecarData(for: item)
+            switch outcome {
+            case .sidecar(let curation, _, let digest, let modDate):
+                metadataByItemID[item.id] = curation
+                syncStateByItemID[item.id] = .synced
+                baseSnapshotByItemID[item.id] = BaseSnapshot(metadata: curation, fileDigest: digest, modificationDate: modDate)
+            case .none:
+                metadataByItemID[item.id] = CurationMetadata()
+                syncStateByItemID[item.id] = .synced
+                baseSnapshotByItemID[item.id] = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+            }
+        }
+        onStateChange?()
+    }
+
     @discardableResult
     func close(
         timeoutNanoseconds: UInt64 = 2_500_000_000,
@@ -741,11 +792,13 @@ final class MetadataSyncEngine {
         let pending = allItems.filter { syncState(for: $0.id) == .pendingWrite }
 
         if pending.isEmpty {
+            await waitForPendingStoreWrites()
             reset()
             return .success
         }
 
         if force {
+            await waitForPendingStoreWrites()
             reset()
             return .closedWithPendingJournaled
         }
@@ -760,6 +813,8 @@ final class MetadataSyncEngine {
             _ = await group.next()
             group.cancelAll()
         }
+
+        await waitForPendingStoreWrites()
 
         let remainingPending = resolvedItems(items).filter { syncState(for: $0.id) == .pendingWrite }.count
         if remainingPending == 0 {

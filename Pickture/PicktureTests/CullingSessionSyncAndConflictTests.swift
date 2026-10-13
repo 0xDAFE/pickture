@@ -15,7 +15,7 @@ struct CullingSessionSyncAndConflictTests {
     // MARK: - Slice 1: Optimistic Curation & BaseSnapshot Persistence
 
     @Test("Assigning StarRating, PickFlag, or ColorLabel updates UI state immediately and persists PendingWrite with BaseSnapshot in MetadataSyncStore")
-    func optimisticCurationUpdatesUIAndPersistsPendingWriteWithBaseSnapshot() throws {
+    func optimisticCurationUpdatesUIAndPersistsPendingWriteWithBaseSnapshot() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -47,6 +47,7 @@ struct CullingSessionSyncAndConflictTests {
         session.setStarRating(5, for: item)
         session.setPickFlag(.picked, for: item)
         session.setColorLabel(.green, for: item)
+        await session.waitForPendingStoreWrites()
 
         let expectedOptimistic = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green)
         #expect(session.curationMetadata(for: item) == expectedOptimistic)
@@ -54,7 +55,8 @@ struct CullingSessionSyncAndConflictTests {
         #expect(session.pendingWritesCount == 1)
 
         // Verify MetadataSyncStore holds the pending write alongside the item's BaseSnapshot
-        let record = try #require(session.metadataSyncStore.record(for: item.id))
+        let storeRecord = await session.metadataSyncStore.record(for: item.id)
+        let record = try #require(storeRecord)
         #expect(record.syncState == .pendingWrite)
         #expect(record.metadata == expectedOptimistic)
         #expect(record.baseSnapshot?.metadata == initialMetadata)
@@ -64,7 +66,7 @@ struct CullingSessionSyncAndConflictTests {
     // MARK: - Slice 2: Durability Across App Restarts & Cache Purge Isolation
 
     @Test("MetadataSyncStore survives simulated app restarts and is unaffected by MediaCache quota changes or clearMediaCache")
-    func metadataSyncStoreSurvivesRestartsAndCachePurges() throws {
+    func metadataSyncStoreSurvivesRestartsAndCachePurges() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -98,6 +100,8 @@ struct CullingSessionSyncAndConflictTests {
         #expect(session1.mediaCacheTotalBytes == 0)
         #expect(session1.curationMetadata(for: item1) == pendingExpected)
         #expect(session1.syncState(for: item1) == .pendingWrite)
+
+        await session1.waitForPendingStoreWrites()
 
         // Session 2: simulate cold app restart with a brand new CullingSession
         let session2 = CullingSession(storageRootURL: storeRoot)
@@ -659,7 +663,7 @@ struct CullingSessionSyncAndConflictTests {
     }
 
     @Test("SyncError items preserve local mutations on reload and evaluate conflicts if external XMP appears")
-    func syncErrorPreservesMutationsAndDetectsConflictOnReload() throws {
+    func syncErrorPreservesMutationsAndDetectsConflictOnReload() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -674,18 +678,19 @@ struct CullingSessionSyncAndConflictTests {
         try initialXMP.write(to: xmpURL)
 
         let session1 = CullingSession(storageRootURL: storeRoot)
+        session1.isSyncSuspended = true
         try session1.openFolder(at: root)
 
         let item1 = try #require(session1.items.first)
         session1.setStarRating(5, for: item1)
         session1.setPickFlag(.picked, for: item1)
+        await session1.waitForPendingStoreWrites()
 
         // Delete the XMP on disk to simulate external deletion / ESTALE condition
         try FileManager.default.removeItem(at: xmpURL)
 
         // Mark syncState as .syncError in store
-        let syncStore = MetadataSyncStore(storeDirectoryURL: storeRoot)
-        syncStore.updateSyncState(.syncError, for: item1.id)
+        await session1.metadataSyncStore.updateSyncState(.syncError, for: item1.id)
 
         // Case 1: Re-open folder with deleted XMP while in syncError -> local mutations must NOT be erased
         let session2 = CullingSession(storageRootURL: storeRoot)

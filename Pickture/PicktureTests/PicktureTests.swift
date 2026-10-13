@@ -358,6 +358,7 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(session.curationMetadata(for: item) == pendingMetadata)
         #expect(session.syncState(for: item) == .pendingWrite)
 
+        await session.waitForPendingStoreWrites()
         let restartedSession = CullingSession(storageRootURL: storeURL)
         try restartedSession.openFolder(at: root)
         let restartedItem = try #require(restartedSession.items.first)

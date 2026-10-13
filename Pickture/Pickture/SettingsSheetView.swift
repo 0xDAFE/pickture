@@ -4,6 +4,7 @@ struct SettingsSheetView: View {
     @Bindable var session: CullingSession
     var showsDismissButton: Bool = true
     @Environment(\.dismiss) private var dismiss
+    @State private var isShowingResetConfirmation: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -140,6 +141,25 @@ struct SettingsSheetView: View {
 
                     Toggle("Subfolder Mode", isOn: $session.isRecursiveSubfolderMode)
                 }
+
+                Section {
+                    Button(role: .destructive) {
+                        if session.pendingWritesCount > 0 {
+                            isShowingResetConfirmation = true
+                            session.isResetSyncStoreAlertPresented = true
+                        } else {
+                            Task {
+                                await session.resetMetadataSyncStore()
+                            }
+                        }
+                    } label: {
+                        Label("Reset Metadata Sync Store", systemImage: "arrow.counterclockwise")
+                    }
+                } header: {
+                    Text("Advanced / Troubleshooting")
+                } footer: {
+                    Text("Purges the internal SQLite metadata sync database without deleting sidecars (.xmp) or media files on disk. If unwritten mutations exist, a confirmation warning will be shown.")
+                }
             }
             .formStyle(.grouped)
             .navigationTitle("Pickture Settings")
@@ -150,6 +170,31 @@ struct SettingsSheetView: View {
                             dismiss()
                         }
                     }
+                }
+            }
+            .confirmationDialog(
+                "Reset Metadata Sync Store?",
+                isPresented: $isShowingResetConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Reset Sync Store", role: .destructive) {
+                    session.isResetSyncStoreAlertPresented = false
+                    Task {
+                        await session.resetMetadataSyncStore()
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    session.isResetSyncStoreAlertPresented = false
+                }
+            } message: {
+                Text("You have \(session.pendingWritesCount) unwritten rating(s) or flag(s) that have not yet synced to sidecars. Resetting will discard these unwritten changes.")
+            }
+            .onChange(of: isShowingResetConfirmation) { _, newValue in
+                session.isResetSyncStoreAlertPresented = newValue
+            }
+            .onChange(of: session.isResetSyncStoreAlertPresented) { _, newValue in
+                if isShowingResetConfirmation != newValue {
+                    isShowingResetConfirmation = newValue
                 }
             }
         }

@@ -135,6 +135,7 @@ final class CullingSession: CullingInteractionTarget {
         set { metadataSyncEngine.isSyncSuspended = newValue }
     }
     var isConflictSheetPresented: Bool = false
+    var isResetSyncStoreAlertPresented: Bool = false
     var activeConflictItemID: String?
     var subfolderMode: SubfolderMode = .immediate
     var previewSource: PreviewSource = .preferRaster
@@ -658,6 +659,18 @@ final class CullingSession: CullingInteractionTarget {
         mediaPipeline.flushIndexImmediately()
     }
 
+    /// Resets the persistent SQLite MetadataSyncStore and re-hydrates in-memory state.
+    func resetMetadataSyncStore() async {
+        await metadataSyncEngine.resetMetadataSyncStore()
+        refreshDerivedCounts()
+        recomputeCullingSequence(force: true)
+    }
+
+    /// Waits for any background SQLite point writes to complete.
+    func waitForPendingStoreWrites() async {
+        await metadataSyncEngine.waitForPendingStoreWrites()
+    }
+
     func setStarRating(_ rating: StarRating, for item: MediaItem) {
         applyCurationAction(.starRating(rating), to: item)
     }
@@ -703,7 +716,7 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     func exifMetadata(forItemID itemID: String) -> ExifMetadata {
-        exifByItemID[itemID] ?? metadataSyncStore.record(for: itemID)?.exif ?? ExifMetadata()
+        exifByItemID[itemID] ?? metadataSyncStore.cachedRecord(for: itemID)?.exif ?? ExifMetadata()
     }
 
     func exifMetadata(for item: MediaItem) -> ExifMetadata {
@@ -755,7 +768,9 @@ final class CullingSession: CullingInteractionTarget {
                         let merged = existing.supplementing(with: exif)
                         self.headerSupplementedItemIDs.insert(itemID)
                         self.exifByItemID[itemID] = merged
-                        self.metadataSyncStore.recordExif(merged, for: itemID)
+                        self.metadataSyncEngine.enqueueStoreOperation { [metadataSyncStore] in
+                            await metadataSyncStore.recordExif(merged, for: itemID)
+                        }
 
                         let now = Date()
                         if now.timeIntervalSince(lastThrottledTime) >= 0.25 {
@@ -778,7 +793,9 @@ final class CullingSession: CullingInteractionTarget {
                     let merged = existing.supplementing(with: headerExif)
                     self.headerSupplementedItemIDs.insert(itemID)
                     self.exifByItemID[itemID] = merged
-                    self.metadataSyncStore.recordExif(merged, for: itemID)
+                    self.metadataSyncEngine.enqueueStoreOperation { [metadataSyncStore] in
+                        await metadataSyncStore.recordExif(merged, for: itemID)
+                    }
                 }
                 self.recomputeCullingSequence(force: true)
                 self.refreshDerivedCounts()

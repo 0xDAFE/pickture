@@ -31,7 +31,7 @@ struct MetadataSyncEngineTests {
     // MARK: - 1. Optimistic Staging & Journal Persistence
 
     @Test("Optimistic staging updates in-memory state and persists pending write with base snapshot into sync store journal")
-    func optimisticStagingAndJournalPersistence() throws {
+    func optimisticStagingAndJournalPersistence() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -46,7 +46,6 @@ struct MetadataSyncEngineTests {
         let storeRoot = root.appendingPathComponent(".test-sync-store", isDirectory: true)
         let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
         engine.isSyncSuspended = true
-
         engine.initializeMetadata(for: [item], isLazy: false)
 
         #expect(engine.syncState(for: item) == .synced)
@@ -66,7 +65,9 @@ struct MetadataSyncEngineTests {
         #expect(engine.syncSummaryBadgeText == "1 Pending")
 
         // Check durable journal persistence
-        let record = try #require(engine.syncStore.record(for: item.id))
+        await engine.waitForPendingStoreWrites()
+        let storeRecord = await engine.syncStore.record(for: item.id)
+        let record = try #require(storeRecord)
         #expect(record.syncState == .pendingWrite)
         #expect(record.metadata == mutatedMetadata)
         #expect(record.baseSnapshot?.metadata == initialMetadata)
@@ -325,7 +326,9 @@ struct MetadataSyncEngineTests {
         #expect(forcedResult == .closedWithPendingJournaled)
 
         // Verify mutations remain intact in durable MetadataSyncStore journal
-        let persistedRecord = try #require(engine.syncStore.record(for: item.id))
+        await engine.waitForPendingStoreWrites()
+        let storeRecord = await engine.syncStore.record(for: item.id)
+        let persistedRecord = try #require(storeRecord)
         #expect(persistedRecord.syncState == .pendingWrite)
         #expect(persistedRecord.metadata == pendingMeta)
 
