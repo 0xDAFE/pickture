@@ -444,4 +444,181 @@ struct DecoupledCellInvalidationTests {
         )
         #expect(videoSize == expectedVideoSize)
     }
+
+    // MARK: - Acceptance Criterion: Decoupled Thumbnail Decoding Task Key Contracts
+
+    @Test("MediaGridCellView thumbnailTaskKey remains stable across curation modifications, sync state transitions, and selection toggles")
+    func mediaGridCellViewThumbnailTaskKeyStabilityAcrossCurationAndSyncState() {
+        let item = makeDummyMediaItem(id: "item-stability-1", baseName: "DSC_9999")
+        let baseCell = MediaGridCellView(
+            item: item,
+            curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+            syncState: .synced,
+            isSelected: false,
+            previewSource: .preferRaster,
+            cacheGeneration: 1
+        )
+        let expectedBaseKey = "item-stability-1-preferRaster-1"
+        #expect(baseCell.thumbnailTaskKey == expectedBaseKey)
+
+        // 1. Modifying curation metadata does NOT change thumbnailTaskKey
+        let ratings: [StarRating] = [1, 2, 3, 4, 5]
+        for rating in ratings {
+            let ratedCell = MediaGridCellView(
+                item: item,
+                curation: CurationMetadata(starRating: rating, pickFlag: .unflagged, colorLabel: .none),
+                syncState: .synced,
+                isSelected: false,
+                previewSource: .preferRaster,
+                cacheGeneration: 1
+            )
+            #expect(ratedCell.thumbnailTaskKey == expectedBaseKey)
+        }
+
+        let flags: [PickFlag] = [.picked, .rejected, .unflagged]
+        for flag in flags {
+            let flaggedCell = MediaGridCellView(
+                item: item,
+                curation: CurationMetadata(starRating: 0, pickFlag: flag, colorLabel: .none),
+                syncState: .synced,
+                isSelected: false,
+                previewSource: .preferRaster,
+                cacheGeneration: 1
+            )
+            #expect(flaggedCell.thumbnailTaskKey == expectedBaseKey)
+        }
+
+        let colors: [ColorLabel] = [.red, .yellow, .green, .blue, .purple, .none]
+        for color in colors {
+            let coloredCell = MediaGridCellView(
+                item: item,
+                curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: color),
+                syncState: .synced,
+                isSelected: false,
+                previewSource: .preferRaster,
+                cacheGeneration: 1
+            )
+            #expect(coloredCell.thumbnailTaskKey == expectedBaseKey)
+        }
+
+        // 2. Transitioning syncState does NOT change thumbnailTaskKey
+        let syncStates: [SyncState] = [.loading, .synced, .pendingWrite, .conflicted, .syncError]
+        for state in syncStates {
+            let stateCell = MediaGridCellView(
+                item: item,
+                curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+                syncState: state,
+                isSelected: false,
+                previewSource: .preferRaster,
+                cacheGeneration: 1
+            )
+            #expect(stateCell.thumbnailTaskKey == expectedBaseKey)
+        }
+
+        // 3. Selection changes do NOT change thumbnailTaskKey
+        let selectedCell = MediaGridCellView(
+            item: item,
+            curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+            syncState: .synced,
+            isSelected: true,
+            previewSource: .preferRaster,
+            cacheGeneration: 1
+        )
+        #expect(selectedCell.thumbnailTaskKey == expectedBaseKey)
+
+        // 4. Changing previewSource DOES change thumbnailTaskKey
+        let rawSourceCell = MediaGridCellView(
+            item: item,
+            curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+            syncState: .synced,
+            isSelected: false,
+            previewSource: .preferRAW,
+            cacheGeneration: 1
+        )
+        #expect(rawSourceCell.thumbnailTaskKey == "item-stability-1-preferRAW-1")
+
+        // 5. Incrementing cacheGeneration DOES change thumbnailTaskKey
+        let newGenCell = MediaGridCellView(
+            item: item,
+            curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+            syncState: .synced,
+            isSelected: false,
+            previewSource: .preferRaster,
+            cacheGeneration: 2
+        )
+        #expect(newGenCell.thumbnailTaskKey == "item-stability-1-preferRaster-2")
+    }
+
+    @Test("FilmstripThumbnailCell thumbnailTaskKey remains stable across curation modifications, sync state transitions, and selection toggles")
+    func filmstripThumbnailCellThumbnailTaskKeyStabilityAcrossCurationAndSyncState() {
+        let item = makeDummyMediaItem(id: "item-filmstrip-stability", baseName: "DSC_8888")
+        let baseCell = FilmstripThumbnailCell(
+            item: item,
+            curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+            syncState: .synced,
+            isSelected: false,
+            previewSource: .preferRaster,
+            cacheGeneration: 1
+        )
+        let expectedBaseKey = "item-filmstrip-stability-preferRaster-1"
+        #expect(baseCell.thumbnailTaskKey == expectedBaseKey)
+
+        // Curation modifications
+        let modifiedCurationCell = FilmstripThumbnailCell(
+            item: item,
+            curation: CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green),
+            syncState: .synced,
+            isSelected: false,
+            previewSource: .preferRaster,
+            cacheGeneration: 1
+        )
+        #expect(modifiedCurationCell.thumbnailTaskKey == expectedBaseKey)
+
+        // Sync state transitions
+        for state in [SyncState.loading, .synced, .pendingWrite, .conflicted, .syncError] {
+            let stateCell = FilmstripThumbnailCell(
+                item: item,
+                curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+                syncState: state,
+                isSelected: false,
+                previewSource: .preferRaster,
+                cacheGeneration: 1
+            )
+            #expect(stateCell.thumbnailTaskKey == expectedBaseKey)
+        }
+
+        // Selection change
+        let selectedCell = FilmstripThumbnailCell(
+            item: item,
+            curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+            syncState: .synced,
+            isSelected: true,
+            previewSource: .preferRaster,
+            cacheGeneration: 1
+        )
+        #expect(selectedCell.thumbnailTaskKey == expectedBaseKey)
+
+        // Preview source toggle
+        let rawCell = FilmstripThumbnailCell(
+            item: item,
+            curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+            syncState: .synced,
+            isSelected: false,
+            previewSource: .preferRAW,
+            cacheGeneration: 1
+        )
+        #expect(rawCell.thumbnailTaskKey == "item-filmstrip-stability-preferRAW-1")
+
+        // Cache generation increment
+        let newGenCell = FilmstripThumbnailCell(
+            item: item,
+            curation: CurationMetadata(starRating: 0, pickFlag: .unflagged, colorLabel: .none),
+            syncState: .synced,
+            isSelected: false,
+            previewSource: .preferRaster,
+            cacheGeneration: 5
+        )
+        #expect(newGenCell.thumbnailTaskKey == "item-filmstrip-stability-preferRaster-5")
+    }
 }
+

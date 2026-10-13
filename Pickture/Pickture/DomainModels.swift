@@ -956,3 +956,36 @@ nonisolated struct SortOption: Codable, Hashable, Sendable {
         self.order = order
     }
 }
+
+// MARK: - CullingSequence
+
+nonisolated struct CullingSequence: Hashable, Sendable {
+    public let items: [MediaItem]
+    public let indicesByItemID: [String: Int]
+    public let visibleMediaPairCount: Int
+    public let visibleVideoCount: Int
+
+    public init(items: [MediaItem] = []) {
+        self.items = items
+        var indices: [String: Int] = [:]
+        indices.reserveCapacity(items.count)
+        var mediaPairs = 0
+        var videos = 0
+        for (idx, item) in items.enumerated() {
+            indices[item.id] = idx
+            if item.isMediaPair { mediaPairs += 1 }
+            if item.kind == .video { videos += 1 }
+        }
+        self.indicesByItemID = indices
+        self.visibleMediaPairCount = mediaPairs
+        self.visibleVideoCount = videos
+    }
+
+    public init(_ items: [MediaItem]) {
+        self.init(items: items)
+    }
+
+    public func index(for itemID: String) -> Int? {
+        indicesByItemID[itemID]
+    }
+}

@@ -98,6 +98,106 @@ struct MediaCacheSQLiteAndMetalTests {
         #expect(index.stats().count == 2)
     }
 
+    @Test("SQLiteMediaCacheIndex records dimensions, calculates aspect ratios, and batch queries across large slices")
+    func sqliteIndexDimensionsAndBatchAspectRatios() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let dbURL = root.appendingPathComponent("cache-index.sqlite3")
+        let index = SQLiteMediaCacheIndex(databaseURL: dbURL)
+
+        // 1. Insert entries with pixel dimensions
+        let entry1 = MediaCacheEntry(
+            key: "photo_3_2",
+            fileName: "photo1.jpg",
+            byteSize: 200,
+            pixelWidth: 3000,
+            pixelHeight: 2000
+        )
+        let entry2 = MediaCacheEntry(
+            key: "video_16_9",
+            fileName: "video1.mov",
+            byteSize: 500,
+            pixelWidth: 1920,
+            pixelHeight: 1080
+        )
+        let entryNoDim = MediaCacheEntry(
+            key: "unknown_dim",
+            fileName: "raw1.cr3",
+            byteSize: 100
+        )
+
+        index.insertOrReplace(entry: entry1)
+        index.insertOrReplace(entry: entry2)
+        index.insertOrReplace(entry: entryNoDim)
+
+        let fetched1 = try #require(index.entry(forKey: "photo_3_2"))
+        #expect(fetched1.pixelWidth == 3000)
+        #expect(fetched1.pixelHeight == 2000)
+        #expect(abs((fetched1.aspectRatio ?? 0) - 1.5) < 0.001)
+
+        let fetched2 = try #require(index.entry(forKey: "video_16_9"))
+        #expect(fetched2.pixelWidth == 1920)
+        #expect(fetched2.pixelHeight == 1080)
+        #expect(abs((fetched2.aspectRatio ?? 0) - (16.0 / 9.0)) < 0.001)
+
+        let fetchedNoDim = try #require(index.entry(forKey: "unknown_dim"))
+        #expect(fetchedNoDim.pixelWidth == nil)
+        #expect(fetchedNoDim.pixelHeight == nil)
+        #expect(fetchedNoDim.aspectRatio == nil)
+
+        // 2. updateDimensions
+        index.updateDimensions(key: "unknown_dim", pixelWidth: 4000, pixelHeight: 3000)
+        #expect(abs((index.aspectRatio(forKey: "unknown_dim") ?? 0) - (4.0 / 3.0)) < 0.001)
+
+        // 3. batchAspectRatios across > 500 items to exercise slicing logic
+        var keysToQuery: [String] = ["photo_3_2", "video_16_9", "unknown_dim", "non_existent"]
+        for i in 1...600 {
+            let key = "synthetic_\(i)"
+            let width = 1000 + i
+            let height = 1000
+            index.insertOrReplace(entry: MediaCacheEntry(
+                key: key,
+                fileName: "\(key).jpg",
+                byteSize: 50,
+                pixelWidth: width,
+                pixelHeight: height
+            ))
+            keysToQuery.append(key)
+        }
+
+        let batchResults = index.batchAspectRatios(keys: keysToQuery)
+        #expect(batchResults.count == 603) // 3 existing + 600 synthetic, non_existent omitted
+        #expect(abs((batchResults["photo_3_2"] ?? 0) - 1.5) < 0.001)
+        #expect(abs((batchResults["video_16_9"] ?? 0) - (16.0 / 9.0)) < 0.001)
+        #expect(abs((batchResults["unknown_dim"] ?? 0) - (4.0 / 3.0)) < 0.001)
+        #expect(batchResults["non_existent"] == nil)
+        #expect(abs((batchResults["synthetic_600"] ?? 0) - 1.6) < 0.001)
+    }
+
+    @Test("MediaCache records dimensions and provides nonisolated batch aspect ratio lookups")
+    @MainActor
+    func mediaCacheDimensionsAndBatchAspectRatios() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let cacheDir = root.appendingPathComponent("cache")
+        let cache = MediaCache(cacheDirectoryURL: cacheDir, initialLimitBytes: 10_000)
+
+        let dummyData = Data(repeating: 0xAA, count: 64)
+        cache.storeData(dummyData, forKey: "item_portrait", pixelWidth: 2000, pixelHeight: 3000)
+        cache.storeData(dummyData, forKey: "item_landscape", pixelWidth: 6000, pixelHeight: 4000)
+
+        #expect(abs((cache.aspectRatio(forKey: "item_portrait") ?? 0) - (2.0 / 3.0)) < 0.001)
+        #expect(abs((cache.aspectRatio(forKey: "item_landscape") ?? 0) - 1.5) < 0.001)
+        #expect(cache.aspectRatio(forKey: "item_missing") == nil)
+
+        let batch = cache.batchAspectRatios(keys: ["item_portrait", "item_landscape", "item_missing"])
+        #expect(batch.count == 2)
+        #expect(abs((batch["item_portrait"] ?? 0) - (2.0 / 3.0)) < 0.001)
+        #expect(abs((batch["item_landscape"] ?? 0) - 1.5) < 0.001)
+    }
+
     // MARK: - MediaCache Scaling & Quota Eviction
 
     @Test("MediaCache enforces byte quota with indexed LRU eviction across multiple stores")

@@ -64,6 +64,11 @@ _Avoid_: Render mode, View source, Image quality
 A composable query over the current folder or subtree combining filename substring, `StarRating`, `PickFlag`, `ColorLabel`, `ExifMetadata` facets, media kind, and `SyncState` (using OR within a dimension and AND across dimensions).
 _Avoid_: Search filter, View query, Facet state
 
+**CullingSequence**:
+The ordered sequence of `MediaItem`s matching the active `FilterCriteria` and `SortOption`, serving as the single source of truth for Grid ordering, Filmstrip ordering, sequential navigation, and speculative prefetch lookahead.
+_Avoid_: Visible items, Filtered results, View list
+
+
 ### Interaction & Workflows
 
 **CurationAction**:

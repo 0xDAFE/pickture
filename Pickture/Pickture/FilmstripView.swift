@@ -845,6 +845,10 @@ struct FilmstripThumbnailCell: View, Equatable {
 
     @State private var thumbnail: CGImage?
 
+    var thumbnailTaskKey: String {
+        "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)"
+    }
+
     private var displayedImage: CGImage? {
         thumbnail ?? cachedThumbnail
     }
@@ -1010,10 +1014,7 @@ struct FilmstripThumbnailCell: View, Equatable {
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(item.baseName), \(curation.starRating.value) stars, \(curation.pickFlag.rawValue), sync: \(syncState.rawValue)")
-        .task(id: "\(item.id)-\(previewSource.rawValue)-\(cacheGeneration)") {
-            if syncState == .loading {
-                await hydrateMetadata?()
-            }
+        .task(id: thumbnailTaskKey) {
             guard let loadThumbnail else { return }
             if let decoded = await loadThumbnail() {
                 if !Task.isCancelled {
@@ -1024,6 +1025,11 @@ struct FilmstripThumbnailCell: View, Equatable {
                 if !Task.isCancelled {
                     thumbnail = nil
                 }
+            }
+        }
+        .task(id: syncState == .loading) {
+            if syncState == .loading {
+                await hydrateMetadata?()
             }
         }
     }

@@ -7,6 +7,31 @@ nonisolated struct MediaCacheEntry: Codable, Hashable, Sendable {
     let byteSize: Int64
     var lastAccessedAt: Date
     var accessSequence: UInt64
+    var pixelWidth: Int?
+    var pixelHeight: Int?
+
+    var aspectRatio: CGFloat? {
+        guard let w = pixelWidth, let h = pixelHeight, h > 0 else { return nil }
+        return CGFloat(w) / CGFloat(h)
+    }
+
+    init(
+        key: String,
+        fileName: String,
+        byteSize: Int64,
+        lastAccessedAt: Date = Date(),
+        accessSequence: UInt64 = 0,
+        pixelWidth: Int? = nil,
+        pixelHeight: Int? = nil
+    ) {
+        self.key = key
+        self.fileName = fileName
+        self.byteSize = byteSize
+        self.lastAccessedAt = lastAccessedAt
+        self.accessSequence = accessSequence
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+    }
 }
 
 @MainActor
@@ -95,7 +120,19 @@ final class MediaCache {
         return data
     }
 
-    func storeData(_ data: Data, forKey key: String) {
+    nonisolated func batchAspectRatios(keys: [String]) -> [String: CGFloat] {
+        db.batchAspectRatios(keys: keys)
+    }
+
+    nonisolated func aspectRatio(forKey key: String) -> CGFloat? {
+        db.aspectRatio(forKey: key)
+    }
+
+    func recordDimensions(key: String, pixelWidth: Int, pixelHeight: Int) {
+        db.updateDimensions(key: key, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+    }
+
+    func storeData(_ data: Data, forKey key: String, pixelWidth: Int? = nil, pixelHeight: Int? = nil) {
         try? FileManager.default.createDirectory(at: cacheDirectoryURL, withIntermediateDirectories: true)
 
         let byteSize = Int64(data.count)
@@ -117,7 +154,9 @@ final class MediaCache {
                 fileName: fileName,
                 byteSize: byteSize,
                 lastAccessedAt: Date(),
-                accessSequence: seq
+                accessSequence: seq,
+                pixelWidth: pixelWidth,
+                pixelHeight: pixelHeight
             )
             db.insertOrReplace(entry: entry)
             totalCachedBytes += byteSize
