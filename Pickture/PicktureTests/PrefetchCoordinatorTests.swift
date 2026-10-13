@@ -370,7 +370,7 @@ struct PrefetchCoordinatorTests {
 
         // Upcoming item 2 should be pre-warmed in DecodedImageCache
         let prewarmedItem2 = session.items[2]
-        let cached = session.cachedPreviewImage(for: prewarmedItem2, maxPixelSize: 2048)
+        let cached = await session.cachedPreviewImage(for: prewarmedItem2, maxPixelSize: 2048)
         #expect(cached != nil)
     }
 

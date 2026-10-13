@@ -94,7 +94,7 @@ struct CullingSessionSyncAndConflictTests {
         #expect(session1.syncState(for: item1) == .pendingWrite)
 
         // Clear MediaCache and adjust cache limit
-        session1.clearMediaCache()
+        await session1.clearMediaCache()
         session1.setUserConfiguredCacheSizeLimitBytes(MediaCache.minUserQuotaBytes)
 
         #expect(session1.mediaCacheTotalBytes == 0)

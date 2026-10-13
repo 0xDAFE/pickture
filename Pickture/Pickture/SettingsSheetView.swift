@@ -55,7 +55,9 @@ struct SettingsSheetView: View {
                     }
 
                     Button(role: .destructive) {
-                        session.clearMediaCache()
+                        Task {
+                            await session.clearMediaCache()
+                        }
                     } label: {
                         Label("Clear Cache", systemImage: "trash")
                     }

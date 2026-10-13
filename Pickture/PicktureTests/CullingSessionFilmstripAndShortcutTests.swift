@@ -574,7 +574,7 @@ struct CullingSessionFilmstripAndShortcutTests {
     }
 
     @Test("Filmstrip task key contract incorporates item.id, previewSource, and cacheGeneration, invalidating on toggle and cache clear")
-    func filmstripTaskKeyContract() throws {
+    func filmstripTaskKeyContract() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -593,7 +593,7 @@ struct CullingSessionFilmstripAndShortcutTests {
         #expect(key1 != key2)
 
         // Clear media cache: cacheGeneration must increment, key must change
-        session.clearMediaCache()
+        await session.clearMediaCache()
         #expect(session.cacheGeneration == initialGen + 1)
         let key3 = "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)"
         #expect(key2 != key3)
@@ -655,7 +655,7 @@ struct CullingSessionFilmstripAndShortcutTests {
         #expect(session.loadedFullRAWItemIDs.contains(item.id))
 
         // clearMediaCache evicts cache, so isFullRAWLoaded becomes false and permits reload
-        session.clearMediaCache()
+        await session.clearMediaCache()
         #expect(!session.isFullRAWLoaded(for: item))
         #expect(!session.loadedFullRAWItemIDs.contains(item.id))
     }
@@ -719,7 +719,7 @@ struct CullingSessionFilmstripAndShortcutTests {
         #expect(standaloneControlsFullRAW.state == .fullRAW)
 
         // 7. Cache eviction resets both items back to .rawPreview (when in RAW mode)
-        session.clearMediaCache()
+        await session.clearMediaCache()
         session.setPreviewSource(.preferRAW)
         #expect(session.previewRepresentation(for: pairItem) == .rawPreview)
         #expect(session.previewRepresentation(for: standaloneItem) == .rawPreview)
@@ -774,7 +774,7 @@ struct CullingSessionFilmstripAndShortcutTests {
         }
 
         #expect(!evictionObservationFired)
-        session.clearMediaCache()
+        await session.clearMediaCache()
 
         #expect(evictionObservationFired == true)
         #expect(session.previewRepresentation(for: item) == .rawPreview)

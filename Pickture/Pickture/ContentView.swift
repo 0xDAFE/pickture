@@ -272,13 +272,13 @@ private enum SelfContainedPreviewData {
             if item.kind == .photo {
                 let file = item.preferredFile(for: session.previewSource)
                 if let extracted = PreviewLoader.extractImageThumbnail(from: file.url, maxPixelSize: 360) {
-                    session.mediaCache.storeData(extracted.jpegData, forKey: key)
+                    Task { await session.mediaCache.storeData(extracted.jpegData, forKey: key) }
                 }
             } else if let videoThumbData {
-                session.mediaCache.storeData(videoThumbData, forKey: key)
+                Task { await session.mediaCache.storeData(videoThumbData, forKey: key) }
             }
         }
-        session.setCacheSizeLimitBytes(session.cacheSizeLimitBytes)
+        session.setUserConfiguredCacheSizeLimitBytes(session.cacheSizeLimitBytes)
         session.selectedItemID = session.items.first?.id
         return session
     }

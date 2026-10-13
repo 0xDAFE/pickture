@@ -123,18 +123,27 @@ final class MediaPipeline {
         self.cache = cache
         self.thumbnailQueue = ThumbnailQueueActor(maxConcurrentWorkers: maxConcurrentThumbnailWorkers)
         self.heavyDecodeLimiter = heavyDecodeLimiter
-        self.totalCachedBytes = cache.totalCachedBytes
-        self.cacheSizeLimitBytes = cache.cacheSizeLimitBytes
+        self.totalCachedBytes = 0
+        self.cacheSizeLimitBytes = initialLimitBytes
+        Task { [weak self, cache] in
+            let metrics = await cache.metrics()
+            await MainActor.run { [weak self] in
+                self?.totalCachedBytes = metrics.totalBytes
+                self?.cacheSizeLimitBytes = metrics.limitBytes
+            }
+        }
     }
 
-    func syncCacheMetrics() {
-        self.totalCachedBytes = cache.totalCachedBytes
-        self.cacheSizeLimitBytes = cache.cacheSizeLimitBytes
+    func syncCacheMetrics() async {
+        let metrics = await cache.metrics()
+        self.totalCachedBytes = metrics.totalBytes
+        self.cacheSizeLimitBytes = metrics.limitBytes
     }
 
-    func setCacheSizeLimitBytes(_ bytes: Int64) {
-        cache.setCacheSizeLimitBytes(bytes)
-        syncCacheMetrics()
+    func setCacheSizeLimitBytes(_ bytes: Int64) async {
+        self.cacheSizeLimitBytes = bytes
+        await cache.setCacheSizeLimitBytes(bytes)
+        await syncCacheMetrics()
     }
 
     func setUserConfiguredCacheSizeLimitBytes(_ limitBytes: Int64) {
@@ -142,7 +151,10 @@ final class MediaPipeline {
             MediaCache.maxUserQuotaBytes,
             max(MediaCache.minUserQuotaBytes, limitBytes)
         )
-        setCacheSizeLimitBytes(clamped)
+        self.cacheSizeLimitBytes = clamped
+        Task { [weak self] in
+            await self?.setCacheSizeLimitBytes(clamped)
+        }
     }
 
     func applyStorageVolumeProfile(_ profile: StorageVolumeProfile, isHighSpeedLAN: Bool = false) async {
@@ -152,14 +164,14 @@ final class MediaPipeline {
         await heavyDecodeLimiter.setMaxConcurrent(heavyPermits)
     }
 
-    func clearCache() {
+    func clearCache() async {
         DecodedImageCache.shared.clear()
-        cache.clear()
-        syncCacheMetrics()
+        await cache.clear()
+        self.totalCachedBytes = 0
     }
 
-    func flushIndexImmediately() {
-        cache.flushIndexImmediately()
+    func flushIndexImmediately() async {
+        await cache.flushIndexImmediately()
     }
 
     nonisolated func thumbnailCacheKey(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) -> String {
@@ -177,9 +189,9 @@ final class MediaPipeline {
         return "\(rawFile.id)#fullraw#preferRAW"
     }
 
-    func isThumbnailCached(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) -> Bool {
+    func isThumbnailCached(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) async -> Bool {
         let key = thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
-        return cache.contains(key: key)
+        return await cache.contains(key: key)
     }
 
     func inMemoryThumbnailImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) -> CGImage? {
@@ -197,13 +209,13 @@ final class MediaPipeline {
         return DecodedImageCache.shared.image(forKey: key)
     }
 
-    func cachedThumbnailImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) -> CGImage? {
+    func cachedThumbnailImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) async -> CGImage? {
         let key = thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
         if let inMemory = DecodedImageCache.shared.image(forKey: key) {
             return inMemory
         }
-        guard let cachedData = cache.readData(forKey: key) else {
-            syncCacheMetrics()
+        guard let cachedData = await cache.readData(forKey: key) else {
+            await syncCacheMetrics()
             return nil
         }
         guard let decoded = PreviewLoader.decodeCGImage(from: cachedData) else {
@@ -213,13 +225,13 @@ final class MediaPipeline {
         return decoded
     }
 
-    func cachedPreviewImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 2048) -> CGImage? {
+    func cachedPreviewImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 2048) async -> CGImage? {
         let key = previewCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
         if let inMemory = DecodedImageCache.shared.image(forKey: key) {
             return inMemory
         }
-        guard let cachedData = cache.readData(forKey: key) else {
-            syncCacheMetrics()
+        guard let cachedData = await cache.readData(forKey: key) else {
+            await syncCacheMetrics()
             return nil
         }
         guard let decoded = PreviewLoader.decodeCGImage(from: cachedData) else {
@@ -229,13 +241,13 @@ final class MediaPipeline {
         return decoded
     }
 
-    func cachedFullRAWImage(for item: MediaItem) -> CGImage? {
+    func cachedFullRAWImage(for item: MediaItem) async -> CGImage? {
         let key = fullRAWCacheKey(for: item)
         if let inMemory = DecodedImageCache.shared.image(forKey: key) {
             return inMemory
         }
-        guard let cachedData = cache.readData(forKey: key) else {
-            syncCacheMetrics()
+        guard let cachedData = await cache.readData(forKey: key) else {
+            await syncCacheMetrics()
             return nil
         }
         guard let decoded = PreviewLoader.decodeCGImage(from: cachedData) else {
@@ -250,7 +262,7 @@ final class MediaPipeline {
         if let inMemory = DecodedImageCache.shared.image(forKey: key) {
             return inMemory
         }
-        if let cachedData = cache.readData(forKey: key),
+        if let cachedData = await cache.readData(forKey: key),
            let decoded = PreviewLoader.decodeCGImage(from: cachedData) {
             DecodedImageCache.shared.setImage(decoded, forKey: key)
             return decoded
@@ -273,16 +285,17 @@ final class MediaPipeline {
         let pixelWidth = finalImage?.width
         let pixelHeight = finalImage?.height
         // Asynchronously persist to disk cache at utility priority without blocking immediate in-memory display
-        Task(priority: .utility) { [diskCache, key, dataToStore, pixelWidth, pixelHeight] in
-            diskCache.storeData(dataToStore, forKey: key, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        Task(priority: .utility) { [weak self, diskCache, key, dataToStore, pixelWidth, pixelHeight] in
+            await diskCache.storeData(dataToStore, forKey: key, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+            await self?.syncCacheMetrics()
         }
-        syncCacheMetrics()
+        await syncCacheMetrics()
         return finalImage
     }
 
     func loadThumbnailData(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) async -> Data? {
         let key = thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
-        if let cached = cache.readData(forKey: key) {
+        if let cached = await cache.readData(forKey: key) {
             return cached
         }
         guard !Task.isCancelled else { return nil }
@@ -298,8 +311,8 @@ final class MediaPipeline {
         if let finalImage {
             DecodedImageCache.shared.setImage(finalImage, forKey: key)
         }
-        cache.storeData(extracted.jpegData, forKey: key, pixelWidth: finalImage?.width, pixelHeight: finalImage?.height)
-        syncCacheMetrics()
+        await cache.storeData(extracted.jpegData, forKey: key, pixelWidth: finalImage?.width, pixelHeight: finalImage?.height)
+        await syncCacheMetrics()
         return extracted.jpegData
     }
 
@@ -308,7 +321,7 @@ final class MediaPipeline {
         if let inMemory = DecodedImageCache.shared.image(forKey: key) {
             return inMemory
         }
-        if let cachedData = cache.readData(forKey: key),
+        if let cachedData = await cache.readData(forKey: key),
            let decoded = PreviewLoader.decodeCGImage(from: cachedData) {
             DecodedImageCache.shared.setImage(decoded, forKey: key)
             return decoded
@@ -328,16 +341,17 @@ final class MediaPipeline {
         let diskCache = self.cache
         let dataToStore = extracted.jpegData
         // Asynchronously persist to disk cache at utility priority without blocking immediate in-memory display
-        Task(priority: .utility) { [diskCache, key, dataToStore] in
-            diskCache.storeData(dataToStore, forKey: key)
+        Task(priority: .utility) { [weak self, diskCache, key, dataToStore] in
+            await diskCache.storeData(dataToStore, forKey: key)
+            await self?.syncCacheMetrics()
         }
-        syncCacheMetrics()
+        await syncCacheMetrics()
         return finalImage
     }
 
     func loadPreviewImageData(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 2048) async -> Data? {
         let key = previewCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
-        if let cached = cache.readData(forKey: key) {
+        if let cached = await cache.readData(forKey: key) {
             return cached
         }
         guard !Task.isCancelled else { return nil }
@@ -351,8 +365,8 @@ final class MediaPipeline {
         if let finalImage = extracted.image ?? PreviewLoader.decodeCGImage(from: extracted.jpegData) {
             DecodedImageCache.shared.setImage(finalImage, forKey: key)
         }
-        cache.storeData(extracted.jpegData, forKey: key)
-        syncCacheMetrics()
+        await cache.storeData(extracted.jpegData, forKey: key)
+        await syncCacheMetrics()
         return extracted.jpegData
     }
 
@@ -361,7 +375,7 @@ final class MediaPipeline {
         if let inMemory = DecodedImageCache.shared.image(forKey: key) {
             return inMemory
         }
-        if let cachedData = cache.readData(forKey: key),
+        if let cachedData = await cache.readData(forKey: key),
            let decoded = PreviewLoader.decodeCGImage(from: cachedData) {
             DecodedImageCache.shared.setImage(decoded, forKey: key)
             return decoded
@@ -377,10 +391,11 @@ final class MediaPipeline {
         let diskCache = self.cache
         let dataToStore = result.data
         // Asynchronously persist to disk cache at utility priority without blocking immediate in-memory display
-        Task(priority: .utility) { [diskCache, key, dataToStore] in
-            diskCache.storeData(dataToStore, forKey: key)
+        Task(priority: .utility) { [weak self, diskCache, key, dataToStore] in
+            await diskCache.storeData(dataToStore, forKey: key)
+            await self?.syncCacheMetrics()
         }
-        syncCacheMetrics()
+        await syncCacheMetrics()
         return result.image
     }
 
@@ -397,4 +412,3 @@ final class MediaPipeline {
         await thumbnailQueue.cancel(id: key)
     }
 }
-

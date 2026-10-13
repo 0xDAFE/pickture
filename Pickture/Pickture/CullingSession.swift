@@ -304,7 +304,9 @@ final class CullingSession: CullingInteractionTarget {
 
         if let width = pixelWidth, let height = pixelHeight, width > 0, height > 0 {
             let cacheKey = mediaPipeline.thumbnailCacheKey(for: item, previewSource: source)
-            mediaPipeline.cache.recordDimensions(key: cacheKey, pixelWidth: width, pixelHeight: height)
+            Task { [cache = mediaPipeline.cache] in
+                await cache.recordDimensions(key: cacheKey, pixelWidth: width, pixelHeight: height)
+            }
         }
     }
 
@@ -338,7 +340,7 @@ final class CullingSession: CullingInteractionTarget {
         }
 
         return Task.detached(priority: .utility) { [weak self, pipeline, keysToQuery, itemSourceToKey] in
-            let cachedRatios = pipeline.cache.batchAspectRatios(keys: keysToQuery)
+            let cachedRatios = await pipeline.cache.batchAspectRatios(keys: keysToQuery)
             guard !cachedRatios.isEmpty, !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 guard let self, !Task.isCancelled else { return }
@@ -625,38 +627,39 @@ final class CullingSession: CullingInteractionTarget {
         mediaPipeline.thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
-    func isThumbnailCached(for item: MediaItem, maxPixelSize: Int = 360) -> Bool {
-        mediaPipeline.isThumbnailCached(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    func isThumbnailCached(for item: MediaItem, maxPixelSize: Int = 360) async -> Bool {
+        await mediaPipeline.isThumbnailCached(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func inMemoryThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) -> CGImage? {
         mediaPipeline.inMemoryThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
-    func cachedThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) -> CGImage? {
-        mediaPipeline.cachedThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    func cachedThumbnailImage(for item: MediaItem, maxPixelSize: Int = 360) async -> CGImage? {
+        await mediaPipeline.cachedThumbnailImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
-    func setCacheSizeLimitBytes(_ limitBytes: Int64) {
-        mediaPipeline.setCacheSizeLimitBytes(limitBytes)
+    func setCacheSizeLimitBytes(_ limitBytes: Int64) async {
+        await mediaPipeline.setCacheSizeLimitBytes(limitBytes)
     }
 
     func setUserConfiguredCacheSizeLimitBytes(_ limitBytes: Int64) {
         mediaPipeline.setUserConfiguredCacheSizeLimitBytes(limitBytes)
     }
 
-    func clearMediaCache() {
-        mediaPipeline.clearCache()
+    func clearMediaCache() async {
+        DecodedImageCache.shared.clear()
         thumbnailAspectRatios.removeAll()
         loadedFullRAWItemIDs.removeAll()
         loadingFullRAWItemIDs.removeAll()
         self.cacheGeneration &+= 1
+        await mediaPipeline.clearCache()
     }
 
     /// Flushes the thumbnail cache index immediately to disk.
     /// Called on session close, background transition, or application termination.
-    func flushMediaCacheIndex() {
-        mediaPipeline.flushIndexImmediately()
+    func flushMediaCacheIndex() async {
+        await mediaPipeline.flushIndexImmediately()
     }
 
     /// Resets the persistent SQLite MetadataSyncStore and re-hydrates in-memory state.
@@ -960,6 +963,7 @@ final class CullingSession: CullingInteractionTarget {
     ) async -> CloseFolderResult {
         guard currentFolderURL != nil else {
             cleanCloseSession()
+            await mediaPipeline.flushIndexImmediately()
             return .success
         }
 
@@ -970,6 +974,7 @@ final class CullingSession: CullingInteractionTarget {
         )
         if result == .success || result == .closedWithPendingJournaled {
             cleanCloseSession()
+            await mediaPipeline.flushIndexImmediately()
         }
         return result
     }
@@ -989,7 +994,9 @@ final class CullingSession: CullingInteractionTarget {
         navigationIdleTask?.cancel()
         navigationIdleTask = nil
         DirectoryListingCache.shared.clear()
-        mediaPipeline.flushIndexImmediately()
+        Task { [mediaPipeline] in
+            await mediaPipeline.flushIndexImmediately()
+        }
         isDiscovering = false
         openFolderProgress = nil
         folderAccessService.stopAccessingCurrentFolder()
@@ -1085,12 +1092,12 @@ final class CullingSession: CullingInteractionTarget {
         mediaPipeline.inMemoryFullRAWImage(for: item)
     }
 
-    func cachedPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) -> CGImage? {
-        mediaPipeline.cachedPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+    func cachedPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) async -> CGImage? {
+        await mediaPipeline.cachedPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
-    func cachedFullRAWImage(for item: MediaItem) -> CGImage? {
-        mediaPipeline.cachedFullRAWImage(for: item)
+    func cachedFullRAWImage(for item: MediaItem) async -> CGImage? {
+        await mediaPipeline.cachedFullRAWImage(for: item)
     }
 
     func loadPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) async -> CGImage? {

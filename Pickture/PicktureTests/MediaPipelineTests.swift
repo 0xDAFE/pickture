@@ -5,6 +5,7 @@ import Testing
 import UniformTypeIdentifiers
 @testable import Pickture
 
+@Suite("MediaPipeline Tests", .serialized)
 @MainActor
 struct MediaPipelineTests {
 
@@ -101,16 +102,16 @@ struct MediaPipelineTests {
         let pipeline = MediaPipeline(cacheDirectoryURL: tempDir.appendingPathComponent("cache"))
 
         // Before loading: item is not cached
-        #expect(!pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
-        #expect(pipeline.cachedThumbnailImage(for: item, previewSource: .preferRaster) == nil)
+        #expect(await !pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
+        #expect(await pipeline.cachedThumbnailImage(for: item, previewSource: .preferRaster) == nil)
 
         // Load thumbnail data
         let loadedData = try #require(await pipeline.loadThumbnailData(for: item, previewSource: .preferRaster, maxPixelSize: 360))
         #expect(!loadedData.isEmpty)
 
         // Now cached
-        #expect(pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
-        let cachedImage = try #require(pipeline.cachedThumbnailImage(for: item, previewSource: .preferRaster))
+        #expect(await pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
+        let cachedImage = try #require(await pipeline.cachedThumbnailImage(for: item, previewSource: .preferRaster))
         #expect(cachedImage.width > 0)
         #expect(cachedImage.height > 0)
         #expect(pipeline.totalCachedBytes > 0)
@@ -137,14 +138,14 @@ struct MediaPipelineTests {
         #expect(previewKey.contains("#preview#"))
 
         // Preview before load
-        #expect(pipeline.cachedPreviewImage(for: item, previewSource: .preferRaster) == nil)
+        #expect(await pipeline.cachedPreviewImage(for: item, previewSource: .preferRaster) == nil)
 
         // Load preview
         let previewData = try #require(await pipeline.loadPreviewImageData(for: item, previewSource: .preferRaster, maxPixelSize: 2048))
         #expect(!previewData.isEmpty)
 
         // Preview after load
-        let previewCG = try #require(pipeline.cachedPreviewImage(for: item, previewSource: .preferRaster))
+        let previewCG = try #require(await pipeline.cachedPreviewImage(for: item, previewSource: .preferRaster))
         #expect(previewCG.width > 0)
         #expect(previewCG.height > 0)
     }
@@ -255,7 +256,7 @@ struct MediaPipelineTests {
         _ = await blockerTask.value
         let result = await loadTask.value
         #expect(result == nil)
-        #expect(!pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
+        #expect(await !pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
     }
 
     @Test("Cache quota clamping and LRU eviction under byte quota")
@@ -283,17 +284,17 @@ struct MediaPipelineTests {
         _ = try #require(await pipeline.loadThumbnailData(for: item1, previewSource: .preferRaster))
         _ = try #require(await pipeline.loadThumbnailData(for: item2, previewSource: .preferRaster))
 
-        #expect(pipeline.isThumbnailCached(for: item1, previewSource: .preferRaster))
-        #expect(pipeline.isThumbnailCached(for: item2, previewSource: .preferRaster))
+        #expect(await pipeline.isThumbnailCached(for: item1, previewSource: .preferRaster))
+        #expect(await pipeline.isThumbnailCached(for: item2, previewSource: .preferRaster))
 
         let total = pipeline.totalCachedBytes
         #expect(total > 0)
 
         // Evict item1 by setting quota lower than total bytes but >= item2's size
-        pipeline.setCacheSizeLimitBytes(total / 2)
+        await pipeline.setCacheSizeLimitBytes(total / 2)
         #expect(pipeline.totalCachedBytes <= total / 2)
-        #expect(!pipeline.isThumbnailCached(for: item1, previewSource: .preferRaster))
-        #expect(pipeline.isThumbnailCached(for: item2, previewSource: .preferRaster))
+        #expect(await !pipeline.isThumbnailCached(for: item1, previewSource: .preferRaster))
+        #expect(await pipeline.isThumbnailCached(for: item2, previewSource: .preferRaster))
     }
 
     @Test("clearCache removes all entries and flushIndexImmediately writes index to disk")
@@ -310,13 +311,13 @@ struct MediaPipelineTests {
 
         _ = try #require(await pipeline.loadThumbnailData(for: item, previewSource: .preferRaster))
         #expect(pipeline.totalCachedBytes > 0)
-        #expect(pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
+        #expect(await pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
 
-        pipeline.clearCache()
+        await pipeline.clearCache()
         #expect(pipeline.totalCachedBytes == 0)
-        #expect(!pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
+        #expect(await !pipeline.isThumbnailCached(for: item, previewSource: .preferRaster))
 
-        pipeline.flushIndexImmediately()
+        await pipeline.flushIndexImmediately()
         let indexFile = pipeline.cache.indexFileURL
         #expect(FileManager.default.fileExists(atPath: indexFile.path))
     }
@@ -418,7 +419,7 @@ struct MediaPipelineTests {
         #expect(memoryHit?.width == image.width)
 
         // Repeated cachedThumbnailImage returns from memory
-        let cached = pipeline.cachedThumbnailImage(for: item, previewSource: .preferRaster, maxPixelSize: 360)
+        let cached = await pipeline.cachedThumbnailImage(for: item, previewSource: .preferRaster, maxPixelSize: 360)
         #expect(cached != nil)
 
         // Preview direct display
@@ -443,7 +444,7 @@ struct MediaPipelineTests {
         let fullImage = try #require(await pipeline.loadFullRAW(for: item))
         let fullRawKey = pipeline.fullRAWCacheKey(for: item)
         #expect(DecodedImageCache.shared.image(forKey: fullRawKey) != nil)
-        #expect(pipeline.cachedFullRAWImage(for: item) != nil)
+        #expect(await pipeline.cachedFullRAWImage(for: item) != nil)
     }
 }
 
