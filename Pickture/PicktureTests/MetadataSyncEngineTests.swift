@@ -46,7 +46,8 @@ struct MetadataSyncEngineTests {
         let storeRoot = root.appendingPathComponent(".test-sync-store", isDirectory: true)
         let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
         engine.isSyncSuspended = true
-        engine.initializeMetadata(for: [item], isLazy: false)
+        engine.initializeMetadata(for: [item])
+        await engine.waitForBackgroundHydration()
 
         #expect(engine.syncState(for: item) == .synced)
         #expect(engine.curationMetadata(for: item) == initialMetadata)
@@ -87,7 +88,8 @@ struct MetadataSyncEngineTests {
         let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
         engine.isSyncSuspended = true
 
-        engine.initializeMetadata(for: [item], isLazy: false)
+        engine.initializeMetadata(for: [item])
+        await engine.waitForBackgroundHydration()
         #expect(engine.syncState(for: item) == .synced)
 
         // Stage optimistic mutation
@@ -138,7 +140,8 @@ struct MetadataSyncEngineTests {
         let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
         engine.isSyncSuspended = true
 
-        engine.initializeMetadata(for: [item], isLazy: false)
+        engine.initializeMetadata(for: [item])
+        await engine.waitForBackgroundHydration()
         #expect(engine.syncState(for: item) == .synced)
 
         // Local stages mutation: 5 stars, picked, green
@@ -200,7 +203,8 @@ struct MetadataSyncEngineTests {
         let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
         engine.isSyncSuspended = true
 
-        engine.initializeMetadata(for: [item], isLazy: false)
+        engine.initializeMetadata(for: [item])
+        await engine.waitForBackgroundHydration()
 
         // Local changes pickFlag only (rating remains 1, label remains none)
         let localMetadata = CurationMetadata(starRating: 1, pickFlag: .picked, colorLabel: .none)
@@ -250,7 +254,8 @@ struct MetadataSyncEngineTests {
         let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
         engine.isSyncSuspended = true
 
-        engine.initializeMetadata(for: allItems, isLazy: false)
+        engine.initializeMetadata(for: allItems)
+        await engine.waitForBackgroundHydration()
 
         // Create conflicts for all 3 items:
         // Local: starRating = 5, pickFlag = .picked
@@ -307,7 +312,8 @@ struct MetadataSyncEngineTests {
 
         let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
         engine.isSyncSuspended = true
-        engine.initializeMetadata(for: [item], isLazy: false)
+        engine.initializeMetadata(for: [item])
+        await engine.waitForBackgroundHydration()
 
         let pendingMeta = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .blue)
         engine.updateCurationMetadata(pendingMeta, for: item)
@@ -334,7 +340,7 @@ struct MetadataSyncEngineTests {
 
         // Resumption: a new engine instance reloads pending writes from the store
         let engine2 = MetadataSyncEngine(storeDirectoryURL: storeRoot)
-        engine2.initializeMetadata(for: [item], isLazy: false)
+        engine2.initializeMetadata(for: [item])
         #expect(engine2.syncState(for: item) == .pendingWrite)
         #expect(engine2.curationMetadata(for: item) == pendingMeta)
         #expect(engine2.pendingWritesCount == 1)
@@ -348,5 +354,134 @@ struct MetadataSyncEngineTests {
         let sidecarData = try Data(contentsOf: root.appendingPathComponent("IMG_3001.xmp"))
         let (flushedCuration, _) = try SidecarCodec.parse(data: sidecarData)
         #expect(flushedCuration == pendingMeta)
+    }
+
+    // MARK: - 7. Non-Blocking Writes & Off-MainActor Hydration (Issue #61 Acceptance Criteria)
+
+    @Test("performDiskFlush executes off @MainActor on background thread")
+    func nonBlockingBackgroundFlushExecutionOffMainActor() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let item = try createTestItem(in: root, fileName: "OFF_MAIN.JPG")
+        let storeRoot = root.appendingPathComponent(".test-sync-store", isDirectory: true)
+        let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
+        engine.isSyncSuspended = true
+        engine.initializeMetadata(for: [item])
+        await engine.waitForBackgroundHydration()
+
+        // Stage mutation
+        let curation = CurationMetadata(starRating: 4, pickFlag: .picked, colorLabel: .green)
+        engine.updateCurationMetadata(curation, for: item)
+
+        // Flush pending writes
+        await engine.flushPendingWrites(in: [item])
+
+        #expect(engine.syncState(for: item) == .synced)
+        let sidecarURL = root.appendingPathComponent("OFF_MAIN.xmp")
+        #expect(FileManager.default.fileExists(atPath: sidecarURL.path))
+    }
+
+    @Test("Optimistic pendingWrite transitions to synced with BaseSnapshot without MainActor stalls")
+    func transitionPendingWriteToSyncedWithoutMainActorStalls() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let item = try createTestItem(in: root, fileName: "OPTIMISTIC_STALL.JPG")
+        let storeRoot = root.appendingPathComponent(".test-sync-store", isDirectory: true)
+        let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
+        engine.isSyncSuspended = true
+        engine.initializeMetadata(for: [item])
+        await engine.waitForBackgroundHydration()
+
+        #expect(engine.syncState(for: item) == .synced)
+        let initialCuration = CurationMetadata(starRating: 3, pickFlag: .unflagged, colorLabel: .red)
+        engine.updateCurationMetadata(initialCuration, for: item)
+
+        // Synchronous UI transition without blocking
+        #expect(engine.syncState(for: item) == .pendingWrite)
+        #expect(engine.curationMetadata(for: item) == initialCuration)
+
+        await engine.waitForPendingStoreWrites()
+        let recordBeforeFlush = await engine.syncStore.record(for: item.id)
+        #expect(recordBeforeFlush?.syncState == .pendingWrite)
+
+        // Flush to disk
+        await engine.flushPendingWrites(in: [item])
+        #expect(engine.syncState(for: item) == .synced)
+        let recordAfterFlush = await engine.syncStore.record(for: item.id)
+        #expect(recordAfterFlush?.syncState == .synced)
+        #expect(recordAfterFlush?.baseSnapshot?.metadata == initialCuration)
+    }
+
+    @Test("Bounded concurrency queue adheres to StorageVolumeProfile workers")
+    func boundedConcurrencyAdheresToStorageVolumeProfile() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let storeRoot = root.appendingPathComponent(".test-sync-store", isDirectory: true)
+        let engine = MetadataSyncEngine(storeDirectoryURL: storeRoot)
+
+        // Test profile worker counts
+        engine.setStorageVolumeProfile(.networkShare)
+        #expect(engine.storageVolumeProfile.defaultSidecarWriteWorkers == 1)
+
+        engine.setStorageVolumeProfile(.internalSSD)
+        #expect(engine.storageVolumeProfile.defaultSidecarWriteWorkers == 4)
+
+        engine.setStorageVolumeProfile(.removableMedia)
+        #expect(engine.storageVolumeProfile.defaultSidecarWriteWorkers == 2)
+
+        // Set to networkShare (1 worker) and flush a batch of items
+        engine.setStorageVolumeProfile(.networkShare)
+        engine.isSyncSuspended = true
+
+        var items = [MediaItem]()
+        for i in 1...5 {
+            let it = try createTestItem(in: root, fileName: "NET_\(i).JPG")
+            items.append(it)
+        }
+        engine.initializeMetadata(for: items)
+        await engine.waitForBackgroundHydration()
+
+        for (idx, it) in items.enumerated() {
+            engine.updateCurationMetadata(CurationMetadata(starRating: StarRating(idx + 1)), for: it)
+        }
+        #expect(engine.pendingWritesCount == 5)
+
+        await engine.flushPendingWrites(in: items)
+
+        #expect(engine.pendingWritesCount == 0)
+        for (idx, it) in items.enumerated() {
+            #expect(engine.syncState(for: it) == .synced)
+            let xmp = root.appendingPathComponent("NET_\(idx + 1).xmp")
+            #expect(FileManager.default.fileExists(atPath: xmp.path))
+        }
+    }
+
+    @Test("readSidecarData executes in background off @MainActor")
+    func hydrateMetadataOffMainActor() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let item = try createTestItem(in: root, fileName: "HYDRATE_BG.JPG")
+        let xmp = root.appendingPathComponent("HYDRATE_BG.xmp")
+        let expected = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .yellow)
+        let xmpData = try SidecarCodec.update(xmlData: nil, with: expected)
+        try xmpData.write(to: xmp)
+
+        // Verify SidecarCodec async read
+        let readData = await SidecarCodec.readData(from: xmp)
+        #expect(readData == xmpData)
+
+        // Verify readSidecarData returns correct HydrationOutcome
+        let outcome = await MetadataSyncEngine.readSidecarData(for: item)
+        switch outcome {
+        case .sidecar(let curation, _, let digest, _):
+            #expect(curation == expected)
+            #expect(digest == SidecarCodec.computeDigest(for: xmpData))
+        case .none:
+            Issue.record("Expected sidecar outcome but received .none")
+        }
     }
 }

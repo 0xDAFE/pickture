@@ -88,8 +88,20 @@ nonisolated enum SidecarCodec {
 
     // MARK: - Safe Disk I/O & Invalidation Helpers
 
+    static func readData(from url: URL) async -> Data? {
+        await Task.detached(priority: .utility) {
+            try? Data(contentsOf: url)
+        }.value
+    }
+
     static func readData(from url: URL) -> Data? {
         try? Data(contentsOf: url)
+    }
+
+    static func resolveSidecarReadURL(for item: MediaItem) async -> URL? {
+        await Task.detached(priority: .utility) {
+            resolveSidecarReadURL(for: item)
+        }.value
     }
 
     // MARK: - XMP Parsing
@@ -103,20 +115,22 @@ nonisolated enum SidecarCodec {
 
     @discardableResult
     static func write(curation: CurationMetadata, for item: MediaItem) async throws -> [URL] {
-        let targets = resolveSidecarWriteURLs(for: item)
-        let fm = FileManager.default
-        var actualWritten: [URL] = []
-        for url in targets {
-            let existingData = readData(from: url)
-            let updatedData = try update(xmlData: existingData, with: curation)
-            let dir = url.deletingLastPathComponent()
-            if !fm.fileExists(atPath: dir.path) {
-                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try await Task.detached(priority: .utility) {
+            let targets = resolveSidecarWriteURLs(for: item)
+            let fm = FileManager.default
+            var actualWritten: [URL] = []
+            for url in targets {
+                let existingData = try? Data(contentsOf: url)
+                let updatedData = try update(xmlData: existingData, with: curation)
+                let dir = url.deletingLastPathComponent()
+                if !fm.fileExists(atPath: dir.path) {
+                    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                }
+                let writtenURL = try await writeCoordinatedWithRetry(data: updatedData, to: url)
+                actualWritten.append(writtenURL)
             }
-            let writtenURL = try await writeCoordinatedWithRetry(data: updatedData, to: url)
-            actualWritten.append(writtenURL)
-        }
-        return actualWritten
+            return actualWritten
+        }.value
     }
 
     @discardableResult

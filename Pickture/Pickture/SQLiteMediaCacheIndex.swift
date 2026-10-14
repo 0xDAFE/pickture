@@ -521,8 +521,9 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
     func checkpointWAL() {
         lock.lock()
         defer { lock.unlock() }
-        guard let db else { return }
-        sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, nil, nil)
+        execute("PRAGMA synchronous = FULL;")
+        execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        execute("PRAGMA synchronous = NORMAL;")
     }
 
     // MARK: - Testing Inspection Support

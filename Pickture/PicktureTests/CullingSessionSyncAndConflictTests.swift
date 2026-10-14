@@ -33,6 +33,7 @@ struct CullingSessionSyncAndConflictTests {
         session.isSyncSuspended = true
 
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
         #expect(session.items.count == 1)
 
         let item = try #require(session.items.first)
@@ -83,6 +84,7 @@ struct CullingSessionSyncAndConflictTests {
         let session1 = CullingSession(storageRootURL: storeRoot)
         session1.isSyncSuspended = true
         try session1.openFolder(at: root)
+        await session1.waitForBackgroundHydration()
 
         let item1 = try #require(session1.items.first)
         session1.setStarRating(4, for: item1)
@@ -107,6 +109,7 @@ struct CullingSessionSyncAndConflictTests {
         let session2 = CullingSession(storageRootURL: storeRoot)
         session2.isSyncSuspended = true
         try session2.openFolder(at: root)
+        await session2.waitForBackgroundHydration()
 
         let item2 = try #require(session2.items.first)
         #expect(session2.syncState(for: item2) == .pendingWrite)
@@ -131,6 +134,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         #expect(session.syncState(for: item) == .synced)
@@ -194,6 +198,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         #expect(session.syncState(for: item) == .synced)
@@ -251,6 +256,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         session.setStarRating(5, for: item) // local = 5 stars, unflagged, none
@@ -318,6 +324,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item1 = try #require(session.items.first { $0.baseName == "BATCH_1" })
         let item2 = try #require(session.items.first { $0.baseName == "BATCH_2" })
@@ -398,6 +405,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         let curation = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green)
@@ -450,6 +458,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item1 = try #require(session.items.first { $0.baseName == "REENTRANT_1" })
         let item2 = try #require(session.items.first { $0.baseName == "REENTRANT_2" })
@@ -512,6 +521,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         #expect(session.syncState(for: item) == .synced)
@@ -556,6 +566,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         #expect(session.syncState(for: item) == .synced)
@@ -567,6 +578,7 @@ struct CullingSessionSyncAndConflictTests {
 
         // Refresh folder in Pickture
         try await session.refreshFolder()
+        await session.waitForBackgroundHydration()
 
         let refreshedItem = try #require(session.items.first)
         // Expected: sidecar is gone, so curation should be reset to default / empty CurationMetadata(),
@@ -593,6 +605,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         session.setStarRating(5, for: item) // pending mutation
@@ -634,6 +647,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
 
@@ -680,6 +694,7 @@ struct CullingSessionSyncAndConflictTests {
         let session1 = CullingSession(storageRootURL: storeRoot)
         session1.isSyncSuspended = true
         try session1.openFolder(at: root)
+        await session1.waitForBackgroundHydration()
 
         let item1 = try #require(session1.items.first)
         session1.setStarRating(5, for: item1)
@@ -695,6 +710,7 @@ struct CullingSessionSyncAndConflictTests {
         // Case 1: Re-open folder with deleted XMP while in syncError -> local mutations must NOT be erased
         let session2 = CullingSession(storageRootURL: storeRoot)
         try session2.openFolder(at: root)
+        await session2.waitForBackgroundHydration()
 
         let item2 = try #require(session2.items.first)
         #expect(session2.curationMetadata(for: item2).starRating == 5)
@@ -708,6 +724,7 @@ struct CullingSessionSyncAndConflictTests {
         // Reopen folder again: must detect conflict with the newly appeared external XMP!
         let session3 = CullingSession(storageRootURL: storeRoot)
         try session3.openFolder(at: root)
+        await session3.waitForBackgroundHydration()
 
         let item3 = try #require(session3.items.first)
         #expect(session3.syncState(for: item3) == .conflicted)

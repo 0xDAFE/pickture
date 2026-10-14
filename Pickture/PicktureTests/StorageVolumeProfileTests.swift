@@ -22,6 +22,7 @@ struct StorageVolumeProfileTests {
         #expect(ssd.prefetchMinWorkers == 2)
         #expect(ssd.prefetchMaxWorkers == 6)
         #expect(ssd.prefetchLookaheadDepth == 8)
+        #expect(ssd.defaultSidecarWriteWorkers == 4)
 
         let removable = StorageVolumeProfile.removableMedia
         #expect(removable.maxConcurrentThumbnailGenerations == 3)
@@ -29,6 +30,7 @@ struct StorageVolumeProfileTests {
         #expect(removable.prefetchMinWorkers == 2)
         #expect(removable.prefetchMaxWorkers == 3)
         #expect(removable.prefetchLookaheadDepth == 4)
+        #expect(removable.defaultSidecarWriteWorkers == 2)
 
         let network = StorageVolumeProfile.networkShare
         #expect(network.maxConcurrentThumbnailGenerations == 2)
@@ -36,6 +38,7 @@ struct StorageVolumeProfileTests {
         #expect(network.prefetchMinWorkers == 1)
         #expect(network.prefetchMaxWorkers == 2)
         #expect(network.prefetchLookaheadDepth == 3)
+        #expect(network.defaultSidecarWriteWorkers == 1)
     }
 
     @Test("High-Speed LAN override expands network share limits while leaving local SSD unchanged")

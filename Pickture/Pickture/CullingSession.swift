@@ -599,6 +599,7 @@ final class CullingSession: CullingInteractionTarget {
     private func applyActiveVolumeProfile() {
         let profile = storageVolumeProfile
         let highSpeed = isHighSpeedLANOverrideEnabled
+        metadataSyncEngine.setStorageVolumeProfile(profile)
         Task {
             await mediaPipeline.applyStorageVolumeProfile(profile, isHighSpeedLAN: highSpeed)
             await prefetchCoordinator.applyStorageVolumeProfile(profile, isHighSpeedLAN: highSpeed)
@@ -606,6 +607,7 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     private func setupMetadataSyncEngineBindings() {
+        metadataSyncEngine.setStorageVolumeProfile(storageVolumeProfile)
         metadataSyncEngine.itemsProvider = { [weak self] in
             self?.items ?? []
         }
@@ -1368,6 +1370,10 @@ final class CullingSession: CullingInteractionTarget {
 
     func startBackgroundSidecarHydration() {
         metadataSyncEngine.startBackgroundSidecarHydration(for: items)
+    }
+
+    func waitForBackgroundHydration() async {
+        await metadataSyncEngine.waitForBackgroundHydration()
     }
 
     func toggleSubfolderMode() async throws {

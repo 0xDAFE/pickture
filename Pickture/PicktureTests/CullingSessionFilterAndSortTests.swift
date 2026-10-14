@@ -95,7 +95,7 @@ struct CullingSessionFilterAndSortTests {
     // MARK: - Slice 1: ExifMetadata Extraction & Caching
 
     @Test("ExifMetadata is populated from .xmp Sidecar tags first")
-    func exifMetadataPopulatedFromXMPFirst() throws {
+    func exifMetadataPopulatedFromXMPFirst() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -127,6 +127,7 @@ struct CullingSessionFilterAndSortTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         #expect(session.items.count == 1)
         let item = try #require(session.items.first)
@@ -177,6 +178,7 @@ struct CullingSessionFilterAndSortTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
         await session.waitForBackgroundExifPreloading()
 
         let item = try #require(session.items.first)
@@ -422,7 +424,7 @@ struct CullingSessionFilterAndSortTests {
     }
 
     @Test("FilterCriteria filters by SyncState with logical OR within category")
-    func filterCriteriaSyncStateORWithin() throws {
+    func filterCriteriaSyncStateORWithin() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -432,6 +434,7 @@ struct CullingSessionFilterAndSortTests {
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let s1 = try #require(session.items.first { $0.baseName == "S1" })
         let s2 = try #require(session.items.first { $0.baseName == "S2" })

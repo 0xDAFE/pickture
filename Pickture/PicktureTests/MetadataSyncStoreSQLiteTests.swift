@@ -182,6 +182,7 @@ struct MetadataSyncStoreSQLiteTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         #expect(session.syncState(for: item) == .synced)

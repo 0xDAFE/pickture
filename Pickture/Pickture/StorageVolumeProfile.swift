@@ -30,6 +30,14 @@ public enum StorageVolumeProfile: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    public var defaultSidecarWriteWorkers: Int {
+        switch self {
+        case .internalSSD: return 4
+        case .removableMedia: return 2
+        case .networkShare: return 1
+        }
+    }
+
     public var defaultPrefetchWorkers: (baseline: Int, max: Int) {
         switch self {
         case .internalSSD: return (baseline: 2, max: 6)
