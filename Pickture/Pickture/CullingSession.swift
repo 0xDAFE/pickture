@@ -728,6 +728,11 @@ final class CullingSession: CullingInteractionTarget {
         exifMetadata(forItemID: item.id)
     }
 
+    /// Preloads EXIF metadata for all current items in the culling session adhering to storageVolumeProfile.
+    func preloadExifMetadataForCurrentItems() {
+        startBackgroundExifPreloading(for: self.items)
+    }
+
     /// Preloads EXIF metadata in the background off the MainActor.
     /// Runs via Task.detached at .utility priority so network-bound header reads over NAS/SMB
     /// do not inherit @MainActor isolation or block UI event processing.
@@ -756,10 +761,12 @@ final class CullingSession: CullingInteractionTarget {
         indexedExifCount = 0
 
         var lastThrottledTime = Date.distantPast
+        let volumeProfile = self.storageVolumeProfile
 
         backgroundExifTask = Task.detached(priority: .utility) { [weak self] in
             let extracted = await ExifHeaderExtractor.extractBatch(
                 for: itemsToLoad,
+                volumeProfile: volumeProfile,
                 isPaused: { [weak self] in
                     await MainActor.run { [weak self] in
                         self?.isCullingNavigating ?? false

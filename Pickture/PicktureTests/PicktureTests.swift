@@ -12,6 +12,7 @@ import Testing
 import UniformTypeIdentifiers
 @testable import Pickture
 
+@Suite("CullingSession Discovery and Cache Tests", .serialized)
 @MainActor
 struct CullingSessionDiscoveryAndCacheTests {
 

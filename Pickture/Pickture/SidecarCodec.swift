@@ -1021,37 +1021,7 @@ final class XMPDocumentTree {
     }
 
     private static func parseDate(_ string: String) -> Date? {
-        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return nil }
-
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
-        if let d = isoFormatter.date(from: trimmed) {
-            return d
-        }
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds, .withDashSeparatorInDate, .withColonSeparatorInTime]
-        if let d = isoFormatter.date(from: trimmed) {
-            return d
-        }
-
-        let customFormatter = DateFormatter()
-        customFormatter.locale = Locale(identifier: "en_US_POSIX")
-        customFormatter.timeZone = TimeZone(secondsFromGMT: 0)
-
-        let formats = [
-            "yyyy:MM:dd HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm:ssZ",
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-            "yyyy-MM-dd"
-        ]
-        for f in formats {
-            customFormatter.dateFormat = f
-            if let d = customFormatter.date(from: trimmed) {
-                return d
-            }
-        }
-        return nil
+        ExifHeaderExtractor.parseDate(string)
     }
 }
 
