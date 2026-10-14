@@ -13,33 +13,41 @@ nonisolated enum SidecarCodec {
     }
 
     private static func resolveSidecarReadURLSync(for item: MediaItem) -> URL? {
-        let fm = FileManager.default
         let dir = item.directoryURL.standardizedFileURL
 
-        // 1. Check <basename>.xmp first (Lightroom / Capture One / Bridge / default convention)
+        // 1. Check DirectoryListingCache first (ADR-0009, ADR-0013)
+        if let cached = DirectoryListingCache.shared.contents(for: dir) {
+            // Check <basename>.xmp (case-insensitive) in cached directory contents
+            let targetBase = "\(item.baseName).xmp".lowercased()
+            if let matched = cached.first(where: { $0.lastPathComponent.lowercased() == targetBase }) {
+                return matched.standardizedFileURL
+            }
+
+            // Check <filename>.<ext>.xmp (Darktable convention) in cached directory contents
+            let files = associatedFiles(for: item)
+            let candidateNames = Set(files.map { "\($0.fileName).xmp".lowercased() })
+            if let matched = cached.first(where: { candidateNames.contains($0.lastPathComponent.lowercased()) }) {
+                return matched.standardizedFileURL
+            }
+
+            // If the directory listing is cached and the sidecar is not in it, it does not exist on disk!
+            return nil
+        }
+
+        // 2. Uncached directory fallback: check disk without polluting session cache
+        let fm = FileManager.default
         let basenameURL = dir.appendingPathComponent("\(item.baseName).xmp").standardizedFileURL
         if fm.fileExists(atPath: basenameURL.path) {
             return basenameURL
         }
 
-        // Retrieve directory contents from in-memory cache or query disk once (ADR-0009)
-        let contents: [URL]
-        if let cached = DirectoryListingCache.shared.contents(for: dir) {
-            contents = cached
-        } else if let diskContents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-            contents = diskContents
-            DirectoryListingCache.shared.setContents(diskContents, for: dir)
-        } else {
-            contents = []
-        }
+        let contents = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
 
-        // Also check case-insensitive match for <basename>.xmp in the directory
         let targetBase = "\(item.baseName).xmp".lowercased()
         if let matched = contents.first(where: { $0.lastPathComponent.lowercased() == targetBase }) {
             return matched.standardizedFileURL
         }
 
-        // 2. Check <filename>.<ext>.xmp (Darktable sidecar convention)
         let files = associatedFiles(for: item)
         for file in files {
             let extURL = dir.appendingPathComponent("\(file.fileName).xmp").standardizedFileURL
@@ -55,6 +63,8 @@ nonisolated enum SidecarCodec {
 
         return nil
     }
+
+
 
     static func resolveSidecarWriteURLs(for item: MediaItem) -> [URL] {
         let fm = FileManager.default
@@ -127,9 +137,19 @@ nonisolated enum SidecarCodec {
             }
             let writtenURL = try await writeCoordinatedWithRetry(data: updatedData, to: url)
             actualWritten.append(writtenURL)
+
+            let standardizedDir = dir.standardizedFileURL
+            if var cached = DirectoryListingCache.shared.contents(for: standardizedDir) {
+                let stdWritten = writtenURL.standardizedFileURL
+                if !cached.contains(stdWritten) {
+                    cached.append(stdWritten)
+                    DirectoryListingCache.shared.setContents(cached, for: standardizedDir)
+                }
+            }
         }
         return actualWritten
     }
+
 
     @discardableResult
     static func writeCoordinatedWithRetry(data: Data, to url: URL) async throws -> URL {

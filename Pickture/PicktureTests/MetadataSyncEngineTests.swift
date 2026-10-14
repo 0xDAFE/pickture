@@ -484,4 +484,40 @@ struct MetadataSyncEngineTests {
             Issue.record("Expected sidecar outcome but received .none")
         }
     }
+
+    @Test("initializeMetadata pre-emptively resolves items without sidecars to synced using DirectoryListingCache")
+    func initializeMetadataPreemptivelyResolvesItemsWithoutSidecars() async throws {
+        let root = try makeTemporaryDirectory()
+        defer {
+            DirectoryListingCache.shared.clear(for: root)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let store = MetadataSyncStore(storeDirectoryURL: root)
+        let engine = await MetadataSyncEngine(syncStore: store)
+
+        var items: [MediaItem] = []
+        var urls: [URL] = []
+        for i in 1...5 {
+            let item = try createTestItem(in: root, fileName: "NOSIDECAR_\(i).JPG")
+            items.append(item)
+            urls.append(item.primaryFile.url)
+        }
+
+        // Populate DirectoryListingCache with ONLY the image files (zero sidecars)
+        DirectoryListingCache.shared.setContents(urls, for: root)
+
+        // Initialize metadata
+        await engine.initializeMetadata(for: items, isLazy: false)
+
+        // All items must immediately be .synced with empty metadata, NOT .loading
+        for item in items {
+            let state = await engine.syncState(for: item)
+            let curation = await engine.curationMetadata(for: item)
+            #expect(state == .synced)
+            #expect(curation == CurationMetadata())
+        }
+    }
 }
+
+

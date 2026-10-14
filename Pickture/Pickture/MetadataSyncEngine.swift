@@ -590,9 +590,25 @@ final class MetadataSyncEngine {
                     baseSnapshotByItemID[item.id] = persisted.baseSnapshot
                 }
             } else {
-                syncStateByItemID[item.id] = .loading
-                metadataByItemID[item.id] = CurationMetadata()
-                baseSnapshotByItemID[item.id] = nil
+                let dir = item.directoryURL.standardizedFileURL
+                let hasListing = DirectoryListingCache.shared.contents(for: dir) != nil
+                let resolvedSidecar = item.sidecarURL ?? SidecarCodec.resolveSidecarReadURL(for: item)
+
+                if hasListing && resolvedSidecar == nil {
+                    // Pre-emptive in-memory resolution for items confirmed without sidecars (ADR-0013)
+                    let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+                    metadataByItemID[item.id] = CurationMetadata()
+                    syncStateByItemID[item.id] = .synced
+                    baseSnapshotByItemID[item.id] = emptySnapshot
+                    let itemID = item.id
+                    enqueueStoreOperation { [syncStore] in
+                        await syncStore.recordBaseSnapshot(emptySnapshot, exif: nil, for: itemID)
+                    }
+                } else {
+                    syncStateByItemID[item.id] = .loading
+                    metadataByItemID[item.id] = CurationMetadata()
+                    baseSnapshotByItemID[item.id] = nil
+                }
             }
         }
         onStateChange?()
@@ -607,11 +623,25 @@ final class MetadataSyncEngine {
     }
 
     nonisolated static func readSidecarData(for item: MediaItem) async -> HydrationOutcome {
-        let fallbackURL = await SidecarCodec.resolveSidecarReadURL(for: item)
-        let sidecarURL = item.sidecarURL ?? fallbackURL
-        guard let sidecarURL, let data = try? Data(contentsOf: sidecarURL) else {
+        let sidecarURL: URL?
+        if let direct = item.sidecarURL {
+            sidecarURL = direct
+        } else {
+            sidecarURL = await SidecarCodec.resolveSidecarReadURL(for: item)
+        }
+        guard let sidecarURL else {
             return .none
         }
+        let data: Data?
+        if let asyncData = await SidecarCodec.readData(from: sidecarURL) {
+            data = asyncData
+        } else {
+            data = try? Data(contentsOf: sidecarURL)
+        }
+        guard let data else {
+            return .none
+        }
+
         let digest = SidecarCodec.computeDigest(for: data)
         let modDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         if let parsed = try? SidecarCodec.parse(data: data) {
@@ -619,6 +649,8 @@ final class MetadataSyncEngine {
         }
         return .sidecar(curation: CurationMetadata(), exif: nil, digest: digest, modDate: modDate)
     }
+
+
 
     func hydrateMetadata(for item: MediaItem, refreshCounts: Bool = true) async {
         let outcome = await Self.readSidecarData(for: item)

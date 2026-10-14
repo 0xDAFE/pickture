@@ -52,6 +52,44 @@ struct SidecarCodecTests {
         #expect(SidecarCodec.resolveSidecarReadURL(for: pairItem)?.standardizedFileURL == basenameXmp.standardizedFileURL)
     }
 
+    @Test("SidecarCodec resolves read URL strictly from DirectoryListingCache when cache is populated")
+    func sidecarReadResolutionUsesDirectoryListingCacheFirst() throws {
+        let root = try makeTemporaryDirectory()
+        defer {
+            DirectoryListingCache.shared.clear(for: root)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let rawURL = root.appendingPathComponent("CACHE_TEST.ARW")
+        try Data("raw".utf8).write(to: rawURL)
+        let rawFile = MediaFile(url: rawURL, formatKind: .raw)
+        let item = MediaItem(
+            id: "\(root.path)#CACHE_TEST",
+            baseName: "CACHE_TEST",
+            directoryURL: root,
+            relativeDirectoryPath: "",
+            kind: .photo,
+            primaryFile: rawFile,
+            mediaPair: nil,
+            sidecarURL: nil
+        )
+
+        // 1. Populate cache with ONLY the raw file (no sidecar)
+        DirectoryListingCache.shared.setContents([rawURL], for: root)
+
+        // Must return nil purely from in-memory cache without hitting disk
+        #expect(SidecarCodec.resolveSidecarReadURL(for: item) == nil)
+
+        // 2. Now add sidecar to cache
+        let sidecarURL = root.appendingPathComponent("CACHE_TEST.xmp")
+        DirectoryListingCache.shared.setContents([rawURL, sidecarURL], for: root)
+
+        // Must resolve from cache
+        let resolved = SidecarCodec.resolveSidecarReadURL(for: item)
+        #expect(resolved?.standardizedFileURL == sidecarURL.standardizedFileURL)
+    }
+
+
     @Test("Sidecar write targets write <basename>.xmp by default and update <filename>.<ext>.xmp if it already exists")
     func sidecarWriteTargetsDualConvention() throws {
         let root = try makeTemporaryDirectory()
