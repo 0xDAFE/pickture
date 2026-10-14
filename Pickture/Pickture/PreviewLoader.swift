@@ -631,8 +631,13 @@ nonisolated enum PreviewLoader {
         return nil
     }
 
+    nonisolated static func decodeCGImageAsync(from data: Data, cachingWithKey key: String? = nil) async -> CGImage? {
+        guard !Task.isCancelled else { return nil }
+        return await ImageDecoderActor.shared.decode(from: data, cachingWithKey: key)
+    }
+
     nonisolated static func decodeCGImageAsync(from data: Data) async -> CGImage? {
-        decodeCGImage(from: data)
+        await decodeCGImageAsync(from: data, cachingWithKey: nil)
     }
 
     static func encodeToJPEG(cgImage: CGImage, quality: Double = 0.82) -> Data? {
