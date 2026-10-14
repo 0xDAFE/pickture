@@ -23,6 +23,7 @@ struct StorageVolumeProfileTests {
         #expect(ssd.prefetchMaxWorkers == 6)
         #expect(ssd.prefetchLookaheadDepth == 8)
         #expect(ssd.defaultSidecarWriteWorkers == 4)
+        #expect(ssd.defaultSidecarHydrationWorkers == 6)
         #expect(ssd.defaultExifPreloadWorkers == 6)
 
         let removable = StorageVolumeProfile.removableMedia
@@ -32,6 +33,7 @@ struct StorageVolumeProfileTests {
         #expect(removable.prefetchMaxWorkers == 3)
         #expect(removable.prefetchLookaheadDepth == 4)
         #expect(removable.defaultSidecarWriteWorkers == 2)
+        #expect(removable.defaultSidecarHydrationWorkers == 3)
         #expect(removable.defaultExifPreloadWorkers == 4)
 
         let network = StorageVolumeProfile.networkShare
@@ -41,6 +43,7 @@ struct StorageVolumeProfileTests {
         #expect(network.prefetchMaxWorkers == 2)
         #expect(network.prefetchLookaheadDepth == 3)
         #expect(network.defaultSidecarWriteWorkers == 1)
+        #expect(network.defaultSidecarHydrationWorkers == 2)
         #expect(network.defaultExifPreloadWorkers == 2)
     }
 
@@ -52,12 +55,14 @@ struct StorageVolumeProfileTests {
         #expect(network.effectivePrefetchMinWorkers(isHighSpeedLAN: true) == 2)
         #expect(network.effectivePrefetchMaxWorkers(isHighSpeedLAN: true) == 4)
         #expect(network.effectivePrefetchLookahead(isHighSpeedLAN: true) == 6)
+        #expect(network.effectiveSidecarHydrationWorkers(isHighSpeedLAN: true) == 4)
         #expect(network.effectiveExifPreloadWorkers(isHighSpeedLAN: true) == 4)
 
         // Internal SSD is unaffected by high speed LAN toggle
         let ssd = StorageVolumeProfile.internalSSD
         #expect(ssd.effectiveThumbnailWorkers(isHighSpeedLAN: true) == 6)
         #expect(ssd.effectiveHeavyDecodes(isHighSpeedLAN: true) == 4)
+        #expect(ssd.effectiveSidecarHydrationWorkers(isHighSpeedLAN: true) == 6)
         #expect(ssd.effectiveExifPreloadWorkers(isHighSpeedLAN: true) == 6)
     }
 
@@ -70,6 +75,82 @@ struct StorageVolumeProfileTests {
         // Temporary directory on macOS local machine is internal SSD or removable, not a network share
         #expect(profile != .networkShare)
     }
+
+    @Test("StorageVolumeDetector multi-tier classification detects networkShare via Foundation, Darwin VFS, and path fallbacks")
+    func storageVolumeDetectorMultiTierClassification() {
+        // Tier 1: Foundation volumeIsLocal == false
+        let nonLocal = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeIsLocal: false
+        )
+        #expect(StorageVolumeDetector.profile(for: nonLocal) == .networkShare)
+
+        // Tier 1: Foundation volumeURLForRemounting != nil
+        let remountable = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeIsLocal: true,
+            volumeURLForRemounting: URL(string: "smb://nas.local/photos")
+        )
+        #expect(StorageVolumeDetector.profile(for: remountable) == .networkShare)
+
+        // Tier 1: Foundation volumeTypeName == "smbfs" or "nfs" or "webdav"
+        let smbType = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeTypeName: "smbfs"
+        )
+        #expect(StorageVolumeDetector.profile(for: smbType) == .networkShare)
+
+        let nfsType = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeTypeName: "nfs"
+        )
+        #expect(StorageVolumeDetector.profile(for: nfsType) == .networkShare)
+
+        // Tier 1: Foundation volumeMountFromLocation
+        let mountLoc = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeMountFromLocation: "//user@server/share"
+        )
+        #expect(StorageVolumeDetector.profile(for: mountLoc) == .networkShare)
+
+        // Tier 2: Darwin statfs (f_flags & MNT_LOCAL) == 0
+        let statfsRemote = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            statfsIsLocal: false
+        )
+        #expect(StorageVolumeDetector.profile(for: statfsRemote) == .networkShare)
+
+        // Tier 2: Darwin statfs f_fstypename == "smbfs"
+        let statfsSmb = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            statfsFSTypeName: "smbfs"
+        )
+        #expect(StorageVolumeDetector.profile(for: statfsSmb) == .networkShare)
+
+        // Path fallback: Standard network mount path (/net/)
+        let netPath = StorageVolumeDetector.VolumeAttributes(
+            path: "/net/smbhost/share",
+            volumeIsInternal: true
+        )
+        #expect(StorageVolumeDetector.profile(for: netPath) == .networkShare)
+
+        // Tier 3: Internal SSD
+        let internalSSD = StorageVolumeDetector.VolumeAttributes(
+            path: "/System/Volumes/Data",
+            volumeIsLocal: true,
+            volumeIsInternal: true
+        )
+        #expect(StorageVolumeDetector.profile(for: internalSSD) == .internalSSD)
+
+        // Tier 3: Removable media
+        let removable = StorageVolumeDetector.VolumeAttributes(
+            path: "/Volumes/EOS_DIGITAL",
+            volumeIsLocal: true,
+            volumeIsRemovable: true
+        )
+        #expect(StorageVolumeDetector.profile(for: removable) == .removableMedia)
+    }
+
 
     // MARK: - DirectoryListingCache (ADR-0009)
 

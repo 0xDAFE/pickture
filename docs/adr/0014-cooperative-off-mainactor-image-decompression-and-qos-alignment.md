@@ -1,0 +1,5 @@
+# Cooperative Off-MainActor Image Decompression and QoS Alignment
+
+To eliminate runtime priority inversions and main-runloop decompression hangs during rapid culling and navigation, all background disk persistence dispatched to `actor MediaCache` must run at `.userInitiated` priority (or inherit caller priority) rather than `.utility`, ensuring that user-interactive reads on the cache actor are never descheduled behind lower-QoS writes. Heavy disk file persistence is performed in cooperative background tasks before recording entries in the cache index, keeping the actor critical section minimal.
+
+All image decompression (`CGImageSourceCreateThumbnailAtIndex` and JPEG/HEIC rasterization) is decoupled from `@MainActor` and executed through a dedicated background `actor ImageDecoderActor` running on the cooperative thread pool. This guarantees that pixel decompression never blocks the main runloop, while preserving structured task priority and cooperative cancellation (`Task.isCancelled`) when SwiftUI views scroll off-screen or cancel image loading tasks.

@@ -112,3 +112,17 @@ _Avoid_: Temp folder, Image store
 **MetadataSyncStore**:
 The durable on-disk journal (surviving app restarts) that stores `BaseSnapshot`s, cached `ExifMetadata`, and queued `PendingWrite` mutations until they are flushed to their target `Sidecar`s or explicitly resolved.
 _Avoid_: Offline cache, Temp database
+
+**DirectoryListingCache**:
+The session-duration in-memory cache of directory listings populated during folder discovery that enables zero-I/O verification of file presence and sidecar resolution without issuing remote filesystem stat syscalls across network mounts.
+_Avoid_: Directory table, File index, Mount cache
+
+**MetadataHydration**:
+The asynchronous process of reading an on-disk `.xmp` `Sidecar`, parsing its non-destructive curation and EXIF tags, computing its digest, and updating `CurationMetadata` and `BaseSnapshot` off `@MainActor`.
+_Avoid_: Sidecar loading, Tag parsing, Metadata fetch
+
+**ImageDecoderActor**:
+The dedicated background actor running on the cooperative thread pool that executes CPU-intensive image decompression off `@MainActor` while honoring cooperative task cancellation (`Task.isCancelled`) and caller priority.
+_Avoid_: Background decoder, Image thread, Decompressor queue
+
+

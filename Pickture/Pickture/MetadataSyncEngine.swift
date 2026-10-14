@@ -2,6 +2,116 @@ import Foundation
 import Observation
 import OSLog
 
+/// Bounded LIFO queue for cell on-demand metadata hydration requests with cooperative task cancellation.
+actor HydrationQueueActor {
+    private var maxConcurrentWorkers: Int
+    private var activeWorkers: Int = 0
+
+    private struct PendingRequest {
+        let id: String
+        let execute: @Sendable () async -> Void
+        let cancel: @Sendable () -> Void
+    }
+
+    private var pendingQueue: [PendingRequest] = []
+    private var activeTasks: [String: Task<Void, Never>] = [:]
+
+    init(maxConcurrentWorkers: Int = 4) {
+        self.maxConcurrentWorkers = max(1, maxConcurrentWorkers)
+    }
+
+    func setMaxConcurrentWorkers(_ count: Int) {
+        self.maxConcurrentWorkers = max(1, count)
+        pump()
+    }
+
+    var currentMaxWorkers: Int {
+        maxConcurrentWorkers
+    }
+
+    var pendingCount: Int {
+        pendingQueue.count
+    }
+
+    var activeCount: Int {
+        activeWorkers
+    }
+
+    func enqueue<T: Sendable>(
+        id: String,
+        operation: @escaping @Sendable () async -> T?
+    ) async -> T? {
+        guard !Task.isCancelled else { return nil }
+
+        cancel(id: id)
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+                let request = PendingRequest(
+                    id: id,
+                    execute: {
+                        if Task.isCancelled {
+                            continuation.resume(returning: nil)
+                            return
+                        }
+                        let result = await operation()
+                        continuation.resume(returning: Task.isCancelled ? nil : result)
+                    },
+                    cancel: {
+                        continuation.resume(returning: nil)
+                    }
+                )
+                // LIFO: newest visible cell is placed at the front of the queue
+                pendingQueue.insert(request, at: 0)
+                pump()
+            }
+        } onCancel: {
+            Task {
+                await self.cancel(id: id)
+            }
+        }
+    }
+
+    func cancel(id: String) {
+        if let idx = pendingQueue.firstIndex(where: { $0.id == id }) {
+            let removed = pendingQueue.remove(at: idx)
+            removed.cancel()
+        }
+        if let task = activeTasks.removeValue(forKey: id) {
+            task.cancel()
+        }
+    }
+
+    func cancelAll() {
+        for request in pendingQueue {
+            request.cancel()
+        }
+        pendingQueue.removeAll()
+        for (_, task) in activeTasks {
+            task.cancel()
+        }
+        activeTasks.removeAll()
+    }
+
+    private func pump() {
+        while activeWorkers < maxConcurrentWorkers && !pendingQueue.isEmpty {
+            let next = pendingQueue.removeFirst()
+            activeWorkers += 1
+            let itemID = next.id
+
+            let workerTask = Task {
+                defer {
+                    self.activeWorkers -= 1
+                    self.activeTasks.removeValue(forKey: itemID)
+                    self.pump()
+                }
+                await next.execute()
+            }
+            activeTasks[itemID] = workerTask
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class MetadataSyncEngine {
@@ -23,9 +133,29 @@ final class MetadataSyncEngine {
     var flushDebounceNanoseconds: UInt64 = 500_000_000
     var simulatedFlushDelayNanoseconds: UInt64 = 0
     private(set) var storageVolumeProfile: StorageVolumeProfile = .internalSSD
+    private(set) var isHighSpeedLAN: Bool = false
 
-    func setStorageVolumeProfile(_ profile: StorageVolumeProfile) {
+    @ObservationIgnored
+    let hydrationQueue: HydrationQueueActor
+
+    @ObservationIgnored
+    private(set) var inFlightHydrations: [String: Task<Void, Never>] = [:]
+
+    var hydrationBatchDebounceNanoseconds: UInt64 = 300_000_000
+
+    @ObservationIgnored
+    private(set) var pendingHydrationBatch: [HydrationResult] = []
+
+    @ObservationIgnored
+    private var debouncedHydrationFlushTask: Task<Void, Never>? = nil
+
+    func setStorageVolumeProfile(_ profile: StorageVolumeProfile, isHighSpeedLAN: Bool = false) {
         self.storageVolumeProfile = profile
+        self.isHighSpeedLAN = isHighSpeedLAN
+        let workers = profile.effectiveSidecarHydrationWorkers(isHighSpeedLAN: isHighSpeedLAN)
+        Task { [hydrationQueue] in
+            await hydrationQueue.setMaxConcurrentWorkers(workers)
+        }
     }
 
     var isSyncSuspended: Bool = false {
@@ -83,10 +213,12 @@ final class MetadataSyncEngine {
 
     init(storeDirectoryURL: URL) {
         self.syncStore = MetadataSyncStore(storeDirectoryURL: storeDirectoryURL)
+        self.hydrationQueue = HydrationQueueActor(maxConcurrentWorkers: StorageVolumeProfile.internalSSD.defaultSidecarHydrationWorkers)
     }
 
     init(syncStore: MetadataSyncStore) {
         self.syncStore = syncStore
+        self.hydrationQueue = HydrationQueueActor(maxConcurrentWorkers: StorageVolumeProfile.internalSSD.defaultSidecarHydrationWorkers)
     }
 
     func resolvedItems(_ items: [MediaItem]? = nil) -> [MediaItem] {
@@ -568,6 +700,11 @@ final class MetadataSyncEngine {
     func initializeMetadata(for items: [MediaItem], isLazy: Bool = false) {
         currentItems = items
         for item in items {
+            let dir = item.directoryURL.standardizedFileURL
+            let hasListing = DirectoryListingCache.shared.contents(for: dir) != nil
+            let resolvedSidecar = item.sidecarURL ?? (hasListing ? SidecarCodec.resolveSidecarReadURLCached(for: item) : nil)
+            let confirmedNoSidecar = hasListing && resolvedSidecar == nil
+
             let persisted = syncStore.cachedRecord(for: item.id)
 
             if let persisted {
@@ -584,15 +721,37 @@ final class MetadataSyncEngine {
                     syncStateByItemID[item.id] = .conflicted
                     conflictsByItemID[item.id] = conflict
                     baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                } else if confirmedNoSidecar && (persisted.baseSnapshot?.fileDigest.isEmpty == false) {
+                    // Previously had an on-disk sidecar that has been deleted externally (Bug 1)
+                    let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+                    metadataByItemID[item.id] = CurationMetadata()
+                    syncStateByItemID[item.id] = .synced
+                    baseSnapshotByItemID[item.id] = emptySnapshot
+                    let itemID = item.id
+                    enqueueStoreOperation { [syncStore] in
+                        await syncStore.recordBaseSnapshot(emptySnapshot, exif: nil, for: itemID)
+                    }
                 } else {
                     metadataByItemID[item.id] = persisted.metadata
                     syncStateByItemID[item.id] = .synced
                     baseSnapshotByItemID[item.id] = persisted.baseSnapshot
                 }
             } else {
-                syncStateByItemID[item.id] = .loading
-                metadataByItemID[item.id] = CurationMetadata()
-                baseSnapshotByItemID[item.id] = nil
+                if confirmedNoSidecar {
+                    // Pre-emptive in-memory resolution for items confirmed without sidecars (ADR-0013)
+                    let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+                    metadataByItemID[item.id] = CurationMetadata()
+                    syncStateByItemID[item.id] = .synced
+                    baseSnapshotByItemID[item.id] = emptySnapshot
+                    let itemID = item.id
+                    enqueueStoreOperation { [syncStore] in
+                        await syncStore.recordBaseSnapshot(emptySnapshot, exif: nil, for: itemID)
+                    }
+                } else {
+                    syncStateByItemID[item.id] = .loading
+                    metadataByItemID[item.id] = CurationMetadata()
+                    baseSnapshotByItemID[item.id] = nil
+                }
             }
         }
         onStateChange?()
@@ -607,11 +766,25 @@ final class MetadataSyncEngine {
     }
 
     nonisolated static func readSidecarData(for item: MediaItem) async -> HydrationOutcome {
-        let fallbackURL = await SidecarCodec.resolveSidecarReadURL(for: item)
-        let sidecarURL = item.sidecarURL ?? fallbackURL
-        guard let sidecarURL, let data = try? Data(contentsOf: sidecarURL) else {
+        let sidecarURL: URL?
+        if let direct = item.sidecarURL {
+            sidecarURL = direct
+        } else {
+            sidecarURL = await SidecarCodec.resolveSidecarReadURL(for: item)
+        }
+        guard let sidecarURL else {
             return .none
         }
+        let data: Data?
+        if let asyncData = await SidecarCodec.readData(from: sidecarURL) {
+            data = asyncData
+        } else {
+            data = try? Data(contentsOf: sidecarURL)
+        }
+        guard let data else {
+            return .none
+        }
+
         let digest = SidecarCodec.computeDigest(for: data)
         let modDate = (try? sidecarURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         if let parsed = try? SidecarCodec.parse(data: data) {
@@ -620,38 +793,61 @@ final class MetadataSyncEngine {
         return .sidecar(curation: CurationMetadata(), exif: nil, digest: digest, modDate: modDate)
     }
 
-    func hydrateMetadata(for item: MediaItem, refreshCounts: Bool = true) async {
-        let outcome = await Self.readSidecarData(for: item)
 
-        guard !Task.isCancelled else { return }
+
+    struct LocalItemSyncState: Sendable {
+        var syncState: SyncState?
+        var metadata: CurationMetadata?
+        var baseSnapshot: BaseSnapshot?
+        var conflict: MetadataConflict?
+    }
+
+    struct HydrationResult: Sendable {
+        let itemID: String
+        let metadata: CurationMetadata
+        let syncState: SyncState
+        let baseSnapshot: BaseSnapshot?
+        let conflict: MetadataConflict?
+        let discoveredExif: ExifMetadata?
+    }
+
+    nonisolated static func processHydration(
+        for item: MediaItem,
+        syncStore: MetadataSyncStore,
+        existingExif: ExifMetadata?,
+        localState: LocalItemSyncState?
+    ) async -> HydrationResult? {
+        guard !Task.isCancelled else { return nil }
+        let outcome = await readSidecarData(for: item)
+        guard !Task.isCancelled else { return nil }
 
         let persisted = syncStore.cachedRecord(for: item.id)
-        let existingExif = existingExifProvider?(item.id)
 
         switch outcome {
         case .sidecar(let diskCuration, let diskExif, let diskDigest, let diskModDate):
+            let baseExif = existingExif ?? persisted?.exif
+            let discoveredExif: ExifMetadata?
             if let diskExif, !diskExif.isEmpty {
-                let mergedExif: ExifMetadata
-                if let persistedExif = persisted?.exif {
-                    mergedExif = diskExif.supplementing(with: persistedExif)
+                if let baseExif {
+                    discoveredExif = diskExif.supplementing(with: baseExif)
                 } else {
-                    mergedExif = diskExif
+                    discoveredExif = diskExif
                 }
-                onExifDiscovered?(item.id, mergedExif)
-            } else if let persistedExif = persisted?.exif {
-                onExifDiscovered?(item.id, persistedExif)
+            } else if let baseExif {
+                discoveredExif = baseExif
+            } else {
+                discoveredExif = nil
             }
 
-            let isPendingOrError = syncStateByItemID[item.id] == .pendingWrite || syncStateByItemID[item.id] == .syncError || persisted?.syncState == .pendingWrite || persisted?.syncState == .syncError
+            let isPendingOrError = localState?.syncState == .pendingWrite ||
+                localState?.syncState == .syncError ||
+                persisted?.syncState == .pendingWrite ||
+                persisted?.syncState == .syncError
 
             if isPendingOrError {
-                let local = metadataByItemID[item.id] ?? persisted?.metadata ?? CurationMetadata()
-                metadataByItemID[item.id] = local
-                if syncStateByItemID[item.id] == nil {
-                    syncStateByItemID[item.id] = persisted?.syncState ?? .pendingWrite
-                }
-                let base = baseSnapshotByItemID[item.id] ?? persisted?.baseSnapshot
-                baseSnapshotByItemID[item.id] = base
+                let local = localState?.metadata ?? persisted?.metadata ?? CurationMetadata()
+                let syncState = localState?.syncState ?? persisted?.syncState ?? .pendingWrite
+                let base = localState?.baseSnapshot ?? persisted?.baseSnapshot
 
                 if let base {
                     let remoteChanged = diskDigest != base.fileDigest
@@ -664,14 +860,34 @@ final class MetadataSyncEngine {
                     )
                     switch threeWay {
                     case .conflict(let conflict):
-                        syncStateByItemID[item.id] = .conflicted
-                        conflictsByItemID[item.id] = conflict
                         await syncStore.recordConflict(conflict, for: item.id)
+                        return HydrationResult(
+                            itemID: item.id,
+                            metadata: local,
+                            syncState: .conflicted,
+                            baseSnapshot: base,
+                            conflict: conflict,
+                            discoveredExif: discoveredExif
+                        )
                     case .cleanMerge(let merged):
-                        metadataByItemID[item.id] = merged
                         await syncStore.stagePendingWrite(merged, baseSnapshot: base, for: item.id)
+                        return HydrationResult(
+                            itemID: item.id,
+                            metadata: merged,
+                            syncState: syncState,
+                            baseSnapshot: base,
+                            conflict: nil,
+                            discoveredExif: discoveredExif
+                        )
                     case .noChange:
-                        break
+                        return HydrationResult(
+                            itemID: item.id,
+                            metadata: local,
+                            syncState: syncState,
+                            baseSnapshot: base,
+                            conflict: nil,
+                            discoveredExif: discoveredExif
+                        )
                     }
                 } else {
                     let threeWay = XMPConflictEngine.evaluateThreeWay(
@@ -683,58 +899,215 @@ final class MetadataSyncEngine {
                     )
                     switch threeWay {
                     case .conflict(let conflict):
-                        syncStateByItemID[item.id] = .conflicted
-                        conflictsByItemID[item.id] = conflict
                         await syncStore.recordConflict(conflict, for: item.id)
+                        return HydrationResult(
+                            itemID: item.id,
+                            metadata: local,
+                            syncState: .conflicted,
+                            baseSnapshot: nil,
+                            conflict: conflict,
+                            discoveredExif: discoveredExif
+                        )
                     case .cleanMerge(let merged):
-                        metadataByItemID[item.id] = merged
                         let newBase = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
-                        baseSnapshotByItemID[item.id] = newBase
                         await syncStore.stagePendingWrite(merged, baseSnapshot: newBase, for: item.id)
+                        return HydrationResult(
+                            itemID: item.id,
+                            metadata: merged,
+                            syncState: syncState,
+                            baseSnapshot: newBase,
+                            conflict: nil,
+                            discoveredExif: discoveredExif
+                        )
                     case .noChange:
-                        break
+                        return HydrationResult(
+                            itemID: item.id,
+                            metadata: local,
+                            syncState: syncState,
+                            baseSnapshot: nil,
+                            conflict: nil,
+                            discoveredExif: discoveredExif
+                        )
                     }
                 }
             } else if let persisted, persisted.syncState == .conflicted, let conflict = persisted.conflict {
-                metadataByItemID[item.id] = persisted.metadata
-                syncStateByItemID[item.id] = .conflicted
-                conflictsByItemID[item.id] = conflict
-                baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                return HydrationResult(
+                    itemID: item.id,
+                    metadata: persisted.metadata,
+                    syncState: .conflicted,
+                    baseSnapshot: persisted.baseSnapshot,
+                    conflict: conflict,
+                    discoveredExif: discoveredExif
+                )
             } else {
                 let snapshot = BaseSnapshot(metadata: diskCuration, fileDigest: diskDigest, modificationDate: diskModDate)
-                metadataByItemID[item.id] = diskCuration
-                syncStateByItemID[item.id] = .synced
-                baseSnapshotByItemID[item.id] = snapshot
                 await syncStore.recordBaseSnapshot(snapshot, exif: existingExif ?? diskExif, for: item.id)
+                return HydrationResult(
+                    itemID: item.id,
+                    metadata: diskCuration,
+                    syncState: .synced,
+                    baseSnapshot: snapshot,
+                    conflict: nil,
+                    discoveredExif: discoveredExif
+                )
             }
 
         case .none:
-            let isPendingOrError = syncStateByItemID[item.id] == .pendingWrite || syncStateByItemID[item.id] == .syncError || persisted?.syncState == .pendingWrite || persisted?.syncState == .syncError
+            let isPendingOrError = localState?.syncState == .pendingWrite ||
+                localState?.syncState == .syncError ||
+                persisted?.syncState == .pendingWrite ||
+                persisted?.syncState == .syncError
+
             if isPendingOrError {
-                let local = metadataByItemID[item.id] ?? persisted?.metadata ?? CurationMetadata()
-                metadataByItemID[item.id] = local
-                if syncStateByItemID[item.id] == nil {
-                    syncStateByItemID[item.id] = persisted?.syncState ?? .pendingWrite
-                }
-                if baseSnapshotByItemID[item.id] == nil {
-                    baseSnapshotByItemID[item.id] = persisted?.baseSnapshot
-                }
+                let local = localState?.metadata ?? persisted?.metadata ?? CurationMetadata()
+                let syncState = localState?.syncState ?? persisted?.syncState ?? .pendingWrite
+                let base = localState?.baseSnapshot ?? persisted?.baseSnapshot
+                return HydrationResult(
+                    itemID: item.id,
+                    metadata: local,
+                    syncState: syncState,
+                    baseSnapshot: base,
+                    conflict: nil,
+                    discoveredExif: nil
+                )
             } else if let persisted, persisted.syncState == .conflicted, let conflict = persisted.conflict {
-                metadataByItemID[item.id] = persisted.metadata
-                syncStateByItemID[item.id] = .conflicted
-                conflictsByItemID[item.id] = conflict
-                baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                return HydrationResult(
+                    itemID: item.id,
+                    metadata: persisted.metadata,
+                    syncState: .conflicted,
+                    baseSnapshot: persisted.baseSnapshot,
+                    conflict: conflict,
+                    discoveredExif: nil
+                )
             } else {
                 let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
-                metadataByItemID[item.id] = CurationMetadata()
-                syncStateByItemID[item.id] = .synced
-                baseSnapshotByItemID[item.id] = emptySnapshot
                 await syncStore.recordBaseSnapshot(emptySnapshot, exif: existingExif, for: item.id)
+                return HydrationResult(
+                    itemID: item.id,
+                    metadata: CurationMetadata(),
+                    syncState: .synced,
+                    baseSnapshot: emptySnapshot,
+                    conflict: nil,
+                    discoveredExif: nil
+                )
             }
+        }
+    }
+
+    private func localItemState(for itemID: String) -> (existingExif: ExifMetadata?, localState: LocalItemSyncState?) {
+        let exif = existingExifProvider?(itemID)
+        let state = LocalItemSyncState(
+            syncState: syncStateByItemID[itemID],
+            metadata: metadataByItemID[itemID],
+            baseSnapshot: baseSnapshotByItemID[itemID],
+            conflict: conflictsByItemID[itemID]
+        )
+        return (exif, state)
+    }
+
+    func recordBatchHydrationResult(_ result: HydrationResult) {
+        pendingHydrationBatch.append(result)
+        if debouncedHydrationFlushTask == nil {
+            let delay = self.hydrationBatchDebounceNanoseconds
+            debouncedHydrationFlushTask = Task { [weak self] in
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+                guard !Task.isCancelled, let self else { return }
+                await MainActor.run {
+                    self.debouncedHydrationFlushTask = nil
+                    self.flushHydrationBatch()
+                }
+            }
+        }
+    }
+
+    func flushHydrationBatch() {
+        debouncedHydrationFlushTask?.cancel()
+        debouncedHydrationFlushTask = nil
+        guard !pendingHydrationBatch.isEmpty else { return }
+        let batch = pendingHydrationBatch
+        pendingHydrationBatch.removeAll()
+
+        for result in batch {
+            applyHydrationResult(result, refreshCounts: false)
+        }
+        onStateChange?()
+    }
+
+    func applyHydrationResult(_ result: HydrationResult, refreshCounts: Bool = true) {
+        if syncStateByItemID[result.itemID] == .pendingWrite && result.syncState == .synced {
+            if let base = result.baseSnapshot {
+                baseSnapshotByItemID[result.itemID] = base
+            }
+        } else {
+            metadataByItemID[result.itemID] = result.metadata
+            syncStateByItemID[result.itemID] = result.syncState
+            if let base = result.baseSnapshot {
+                baseSnapshotByItemID[result.itemID] = base
+            }
+            if let conflict = result.conflict {
+                conflictsByItemID[result.itemID] = conflict
+            } else {
+                conflictsByItemID.removeValue(forKey: result.itemID)
+            }
+        }
+
+        if let exif = result.discoveredExif {
+            onExifDiscovered?(result.itemID, exif)
         }
 
         if refreshCounts {
             onStateChange?()
+        }
+    }
+
+    func hydrateMetadata(for item: MediaItem, refreshCounts: Bool = true) async {
+        guard !Task.isCancelled else { return }
+
+        // Fast path 1: If already in pendingHydrationBatch, extract and apply immediately
+        if let idx = pendingHydrationBatch.firstIndex(where: { $0.itemID == item.id }) {
+            let result = pendingHydrationBatch.remove(at: idx)
+            applyHydrationResult(result, refreshCounts: refreshCounts)
+            return
+        }
+
+        if let existing = inFlightHydrations[item.id] {
+            await existing.value
+            return
+        }
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.inFlightHydrations.removeValue(forKey: item.id) }
+
+            let (existingExif, localState) = self.localItemState(for: item.id)
+            let store = self.syncStore
+
+            let result = await self.hydrationQueue.enqueue(id: item.id) { () -> HydrationResult? in
+                guard !Task.isCancelled else { return nil }
+                return await Self.processHydration(
+                    for: item,
+                    syncStore: store,
+                    existingExif: existingExif,
+                    localState: localState
+                )
+            }
+
+            guard !Task.isCancelled, let result else { return }
+
+            if let idx = self.pendingHydrationBatch.firstIndex(where: { $0.itemID == item.id }) {
+                self.pendingHydrationBatch.remove(at: idx)
+            }
+
+            self.applyHydrationResult(result, refreshCounts: refreshCounts)
+        }
+
+        inFlightHydrations[item.id] = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
         }
     }
 
@@ -743,24 +1116,76 @@ final class MetadataSyncEngine {
         backgroundHydrationTask = Task(priority: .utility) { [weak self] in
             _ = await previousTask?.value
             guard let self else { return }
-            let itemsToHydrate: [MediaItem] = await MainActor.run {
+
+            let (itemsToHydrate, store, maxWorkers) = await MainActor.run {
                 let all = self.resolvedItems(items)
-                let loading = all.filter { self.syncStateByItemID[$0.id] == .loading }
-                let cached = all.filter { self.syncStateByItemID[$0.id] != .loading }
-                return loading + cached
+                let toHydrate = all.filter { item in
+                    let dir = item.directoryURL.standardizedFileURL
+                    let hasListing = DirectoryListingCache.shared.contents(for: dir) != nil
+                    let resolvedSidecar = item.sidecarURL ?? (hasListing ? SidecarCodec.resolveSidecarReadURLCached(for: item) : nil)
+                    let confirmedNoSidecar = hasListing && resolvedSidecar == nil
+                    return !confirmedNoSidecar
+                }
+                let limit = max(1, self.storageVolumeProfile.effectiveSidecarHydrationWorkers(isHighSpeedLAN: self.isHighSpeedLAN))
+                return (toHydrate, self.syncStore, limit)
             }
             guard !itemsToHydrate.isEmpty else { return }
 
-            for item in itemsToHydrate {
-                if Task.isCancelled { break }
-                await self.hydrateMetadata(for: item, refreshCounts: false)
-                await Task.yield()
+            await withTaskGroup(of: HydrationResult?.self) { group in
+                var index = 0
+                let total = itemsToHydrate.count
+
+                while index < total && index < maxWorkers {
+                    let item = itemsToHydrate[index]
+                    index += 1
+                    group.addTask {
+                        guard !Task.isCancelled else { return nil }
+                        let (existingExif, localState) = await MainActor.run { () -> (ExifMetadata?, LocalItemSyncState?) in
+                            self.localItemState(for: item.id)
+                        }
+
+                        return await Self.processHydration(
+                            for: item,
+                            syncStore: store,
+                            existingExif: existingExif,
+                            localState: localState
+                        )
+                    }
+                }
+
+                for await maybeResult in group {
+                    if let result = maybeResult {
+                        await MainActor.run {
+                            self.recordBatchHydrationResult(result)
+                        }
+                    }
+                    if index < total && !Task.isCancelled {
+                        let item = itemsToHydrate[index]
+                        index += 1
+                        group.addTask {
+                            guard !Task.isCancelled else { return nil }
+                            let (existingExif, localState) = await MainActor.run { () -> (ExifMetadata?, LocalItemSyncState?) in
+                                self.localItemState(for: item.id)
+                            }
+
+                            return await Self.processHydration(
+                                for: item,
+                                syncStore: store,
+                                existingExif: existingExif,
+                                localState: localState
+                            )
+                        }
+                    }
+                }
             }
+
             await MainActor.run {
+                self.flushHydrationBatch()
                 self.onStateChange?()
             }
         }
     }
+
 
     func waitForBackgroundHydration() async {
         await backgroundHydrationTask?.value
@@ -773,6 +1198,16 @@ final class MetadataSyncEngine {
         debouncedFlushTask = nil
         backgroundHydrationTask?.cancel()
         backgroundHydrationTask = nil
+        debouncedHydrationFlushTask?.cancel()
+        debouncedHydrationFlushTask = nil
+        pendingHydrationBatch.removeAll()
+        for (_, task) in inFlightHydrations {
+            task.cancel()
+        }
+        inFlightHydrations.removeAll()
+        Task { [hydrationQueue] in
+            await hydrationQueue.cancelAll()
+        }
     }
 
     func reset() {
