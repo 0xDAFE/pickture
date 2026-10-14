@@ -175,6 +175,11 @@ public struct StorageVolumeDetector {
         }
     }
 
+    private static func isNetworkFilesystemType(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower == "smbfs" || lower == "nfs" || lower == "webdav" || lower == "afpfs" || lower.contains("smb")
+    }
+
     public static func profile(for attributes: VolumeAttributes) -> StorageVolumeProfile {
         // Tier 1: Foundation URLResourceKey checks
         if let isLocal = attributes.volumeIsLocal, !isLocal {
@@ -183,10 +188,8 @@ public struct StorageVolumeDetector {
         if attributes.volumeURLForRemounting != nil {
             return .networkShare
         }
-        if let typeName = attributes.volumeTypeName?.lowercased() {
-            if typeName == "smbfs" || typeName == "nfs" || typeName == "webdav" || typeName == "afpfs" || typeName.contains("smb") {
-                return .networkShare
-            }
+        if let typeName = attributes.volumeTypeName, isNetworkFilesystemType(typeName) {
+            return .networkShare
         }
         if let mountLocation = attributes.volumeMountFromLocation?.lowercased() {
             if mountLocation.hasPrefix("//") || mountLocation.contains("smb:") || mountLocation.contains("nfs:") || mountLocation.contains("afp:") {
@@ -198,15 +201,13 @@ public struct StorageVolumeDetector {
         if let statfsLocal = attributes.statfsIsLocal, !statfsLocal {
             return .networkShare
         }
-        if let fsName = attributes.statfsFSTypeName?.lowercased() {
-            if fsName == "smbfs" || fsName == "nfs" || fsName == "webdav" || fsName == "afpfs" || fsName.contains("smb") {
-                return .networkShare
-            }
+        if let fsName = attributes.statfsFSTypeName, isNetworkFilesystemType(fsName) {
+            return .networkShare
         }
 
-        // Fallback: Path substrings (e.g. iPadOS FileProvider smbclientd or LiveFiles)
+        // Fallback: Standard network mount paths (/net/)
         let pathLower = attributes.path.lowercased()
-        if pathLower.contains("smbclientd") || pathLower.contains("livefiles") || pathLower.hasPrefix("/net/") || (pathLower.hasPrefix("/volumes/") && pathLower.contains("smb")) {
+        if pathLower.hasPrefix("/net/") {
             return .networkShare
         }
 

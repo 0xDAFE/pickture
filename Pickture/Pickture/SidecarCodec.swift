@@ -12,26 +12,35 @@ nonisolated enum SidecarCodec {
         resolveSidecarReadURLSync(for: item)
     }
 
+    public static func matchSidecar(in candidates: [URL], for item: MediaItem) -> URL? {
+        let targetBase = "\(item.baseName).xmp".lowercased()
+        if let matched = candidates.first(where: { $0.lastPathComponent.lowercased() == targetBase }) {
+            return matched.standardizedFileURL
+        }
+
+        let files = associatedFiles(for: item)
+        let candidateNames = Set(files.map { "\($0.fileName).xmp".lowercased() })
+        if let matched = candidates.first(where: { candidateNames.contains($0.lastPathComponent.lowercased()) }) {
+            return matched.standardizedFileURL
+        }
+
+        return nil
+    }
+
+    public static func resolveSidecarReadURLCached(for item: MediaItem) -> URL? {
+        let dir = item.directoryURL.standardizedFileURL
+        guard let cached = DirectoryListingCache.shared.contents(for: dir) else {
+            return nil
+        }
+        return matchSidecar(in: cached, for: item)
+    }
+
     private static func resolveSidecarReadURLSync(for item: MediaItem) -> URL? {
         let dir = item.directoryURL.standardizedFileURL
 
         // 1. Check DirectoryListingCache first (ADR-0009, ADR-0013)
         if let cached = DirectoryListingCache.shared.contents(for: dir) {
-            // Check <basename>.xmp (case-insensitive) in cached directory contents
-            let targetBase = "\(item.baseName).xmp".lowercased()
-            if let matched = cached.first(where: { $0.lastPathComponent.lowercased() == targetBase }) {
-                return matched.standardizedFileURL
-            }
-
-            // Check <filename>.<ext>.xmp (Darktable convention) in cached directory contents
-            let files = associatedFiles(for: item)
-            let candidateNames = Set(files.map { "\($0.fileName).xmp".lowercased() })
-            if let matched = cached.first(where: { candidateNames.contains($0.lastPathComponent.lowercased()) }) {
-                return matched.standardizedFileURL
-            }
-
-            // If the directory listing is cached and the sidecar is not in it, it does not exist on disk!
-            return nil
+            return matchSidecar(in: cached, for: item)
         }
 
         // 2. Uncached directory fallback: check disk without polluting session cache
@@ -42,10 +51,8 @@ nonisolated enum SidecarCodec {
         }
 
         let contents = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-
-        let targetBase = "\(item.baseName).xmp".lowercased()
-        if let matched = contents.first(where: { $0.lastPathComponent.lowercased() == targetBase }) {
-            return matched.standardizedFileURL
+        if let matched = matchSidecar(in: contents, for: item) {
+            return matched
         }
 
         let files = associatedFiles(for: item)
@@ -54,11 +61,6 @@ nonisolated enum SidecarCodec {
             if fm.fileExists(atPath: extURL.path) {
                 return extURL
             }
-        }
-
-        let candidateNames = Set(files.map { "\($0.fileName).xmp".lowercased() })
-        if let matched = contents.first(where: { candidateNames.contains($0.lastPathComponent.lowercased()) }) {
-            return matched.standardizedFileURL
         }
 
         return nil

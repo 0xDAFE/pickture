@@ -139,7 +139,7 @@ final class MetadataSyncEngine {
     let hydrationQueue: HydrationQueueActor
 
     @ObservationIgnored
-    private var inFlightHydrations: [String: Task<Void, Never>] = [:]
+    private(set) var inFlightHydrations: [String: Task<Void, Never>] = [:]
 
     var hydrationBatchDebounceNanoseconds: UInt64 = 300_000_000
 
@@ -700,6 +700,11 @@ final class MetadataSyncEngine {
     func initializeMetadata(for items: [MediaItem], isLazy: Bool = false) {
         currentItems = items
         for item in items {
+            let dir = item.directoryURL.standardizedFileURL
+            let hasListing = DirectoryListingCache.shared.contents(for: dir) != nil
+            let resolvedSidecar = item.sidecarURL ?? (hasListing ? SidecarCodec.resolveSidecarReadURLCached(for: item) : nil)
+            let confirmedNoSidecar = hasListing && resolvedSidecar == nil
+
             let persisted = syncStore.cachedRecord(for: item.id)
 
             if let persisted {
@@ -716,17 +721,23 @@ final class MetadataSyncEngine {
                     syncStateByItemID[item.id] = .conflicted
                     conflictsByItemID[item.id] = conflict
                     baseSnapshotByItemID[item.id] = persisted.baseSnapshot
+                } else if confirmedNoSidecar && (persisted.baseSnapshot?.fileDigest.isEmpty == false) {
+                    // Previously had an on-disk sidecar that has been deleted externally (Bug 1)
+                    let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
+                    metadataByItemID[item.id] = CurationMetadata()
+                    syncStateByItemID[item.id] = .synced
+                    baseSnapshotByItemID[item.id] = emptySnapshot
+                    let itemID = item.id
+                    enqueueStoreOperation { [syncStore] in
+                        await syncStore.recordBaseSnapshot(emptySnapshot, exif: nil, for: itemID)
+                    }
                 } else {
                     metadataByItemID[item.id] = persisted.metadata
                     syncStateByItemID[item.id] = .synced
                     baseSnapshotByItemID[item.id] = persisted.baseSnapshot
                 }
             } else {
-                let dir = item.directoryURL.standardizedFileURL
-                let hasListing = DirectoryListingCache.shared.contents(for: dir) != nil
-                let resolvedSidecar = item.sidecarURL ?? SidecarCodec.resolveSidecarReadURL(for: item)
-
-                if hasListing && resolvedSidecar == nil {
+                if confirmedNoSidecar {
                     // Pre-emptive in-memory resolution for items confirmed without sidecars (ADR-0013)
                     let emptySnapshot = BaseSnapshot(metadata: CurationMetadata(), fileDigest: "")
                     metadataByItemID[item.id] = CurationMetadata()
@@ -983,17 +994,30 @@ final class MetadataSyncEngine {
         }
     }
 
+    private func localItemState(for itemID: String) -> (existingExif: ExifMetadata?, localState: LocalItemSyncState?) {
+        let exif = existingExifProvider?(itemID)
+        let state = LocalItemSyncState(
+            syncState: syncStateByItemID[itemID],
+            metadata: metadataByItemID[itemID],
+            baseSnapshot: baseSnapshotByItemID[itemID],
+            conflict: conflictsByItemID[itemID]
+        )
+        return (exif, state)
+    }
+
     func recordBatchHydrationResult(_ result: HydrationResult) {
         pendingHydrationBatch.append(result)
         if debouncedHydrationFlushTask == nil {
-            debouncedHydrationFlushTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                if self.hydrationBatchDebounceNanoseconds > 0 {
-                    try? await Task.sleep(nanoseconds: self.hydrationBatchDebounceNanoseconds)
+            let delay = self.hydrationBatchDebounceNanoseconds
+            debouncedHydrationFlushTask = Task { [weak self] in
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: delay)
                 }
-                guard !Task.isCancelled else { return }
-                self.debouncedHydrationFlushTask = nil
-                self.flushHydrationBatch()
+                guard !Task.isCancelled, let self else { return }
+                await MainActor.run {
+                    self.debouncedHydrationFlushTask = nil
+                    self.flushHydrationBatch()
+                }
             }
         }
     }
@@ -1057,13 +1081,7 @@ final class MetadataSyncEngine {
             guard let self else { return }
             defer { self.inFlightHydrations.removeValue(forKey: item.id) }
 
-            let existingExif = self.existingExifProvider?(item.id)
-            let localState = LocalItemSyncState(
-                syncState: self.syncStateByItemID[item.id],
-                metadata: self.metadataByItemID[item.id],
-                baseSnapshot: self.baseSnapshotByItemID[item.id],
-                conflict: self.conflictsByItemID[item.id]
-            )
+            let (existingExif, localState) = self.localItemState(for: item.id)
             let store = self.syncStore
 
             let result = await self.hydrationQueue.enqueue(id: item.id) { () -> HydrationResult? in
@@ -1101,10 +1119,15 @@ final class MetadataSyncEngine {
 
             let (itemsToHydrate, store, maxWorkers) = await MainActor.run {
                 let all = self.resolvedItems(items)
-                let loading = all.filter { self.syncStateByItemID[$0.id] == .loading }
-                let cached = all.filter { self.syncStateByItemID[$0.id] != .loading }
+                let toHydrate = all.filter { item in
+                    let dir = item.directoryURL.standardizedFileURL
+                    let hasListing = DirectoryListingCache.shared.contents(for: dir) != nil
+                    let resolvedSidecar = item.sidecarURL ?? (hasListing ? SidecarCodec.resolveSidecarReadURLCached(for: item) : nil)
+                    let confirmedNoSidecar = hasListing && resolvedSidecar == nil
+                    return !confirmedNoSidecar
+                }
                 let limit = max(1, self.storageVolumeProfile.effectiveSidecarHydrationWorkers(isHighSpeedLAN: self.isHighSpeedLAN))
-                return (loading + cached, self.syncStore, limit)
+                return (toHydrate, self.syncStore, limit)
             }
             guard !itemsToHydrate.isEmpty else { return }
 
@@ -1118,14 +1141,7 @@ final class MetadataSyncEngine {
                     group.addTask {
                         guard !Task.isCancelled else { return nil }
                         let (existingExif, localState) = await MainActor.run { () -> (ExifMetadata?, LocalItemSyncState?) in
-                            let exif = self.existingExifProvider?(item.id)
-                            let state = LocalItemSyncState(
-                                syncState: self.syncStateByItemID[item.id],
-                                metadata: self.metadataByItemID[item.id],
-                                baseSnapshot: self.baseSnapshotByItemID[item.id],
-                                conflict: self.conflictsByItemID[item.id]
-                            )
-                            return (exif, state)
+                            self.localItemState(for: item.id)
                         }
 
                         return await Self.processHydration(
@@ -1149,14 +1165,7 @@ final class MetadataSyncEngine {
                         group.addTask {
                             guard !Task.isCancelled else { return nil }
                             let (existingExif, localState) = await MainActor.run { () -> (ExifMetadata?, LocalItemSyncState?) in
-                                let exif = self.existingExifProvider?(item.id)
-                                let state = LocalItemSyncState(
-                                    syncState: self.syncStateByItemID[item.id],
-                                    metadata: self.metadataByItemID[item.id],
-                                    baseSnapshot: self.baseSnapshotByItemID[item.id],
-                                    conflict: self.conflictsByItemID[item.id]
-                                )
-                                return (exif, state)
+                                self.localItemState(for: item.id)
                             }
 
                             return await Self.processHydration(
@@ -1176,6 +1185,7 @@ final class MetadataSyncEngine {
             }
         }
     }
+
 
     func waitForBackgroundHydration() async {
         await backgroundHydrationTask?.value

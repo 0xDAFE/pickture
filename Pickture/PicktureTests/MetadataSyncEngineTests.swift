@@ -723,6 +723,48 @@ struct MetadataSyncEngineTests {
         let remainingInBatch = await MainActor.run { engine.pendingHydrationBatch.count }
         #expect(remainingInBatch == 0)
     }
+
+    @Test("Opening a folder of 100 items lacking sidecars produces zero background hydration tasks and zero loading spinners")
+    func folderOf100ItemsLackingSidecarsProducesZeroBackgroundHydrationTasks() async throws {
+        let root = try makeTemporaryDirectory()
+        defer {
+            DirectoryListingCache.shared.clear(for: root)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let store = MetadataSyncStore(storeDirectoryURL: root)
+        let engine = await MetadataSyncEngine(syncStore: store)
+
+        var items: [MediaItem] = []
+        var urls: [URL] = []
+        for i in 1...100 {
+            let item = try createTestItem(in: root, fileName: "NOSIDECAR_\(i).JPG")
+            items.append(item)
+            urls.append(item.primaryFile.url)
+        }
+
+        // Cache the directory listing so sidecar absence is confirmed in-memory
+        DirectoryListingCache.shared.setContents(urls, for: root)
+
+        // Initialize metadata with isLazy: false (simulating standard folder open)
+        await engine.initializeMetadata(for: items, isLazy: false)
+
+        // Verify every single item is immediately .synced with empty snapshot (no .loading)
+        for item in items {
+            let state = await engine.syncState(for: item)
+            let base = await engine.baseSnapshot(for: item)
+            #expect(state == .synced)
+            #expect(base != nil)
+            #expect(base?.fileDigest == "")
+        }
+
+        // Verify zero background tasks were dispatched
+        await engine.waitForBackgroundHydration()
+        let batchCount = await MainActor.run { engine.pendingHydrationBatch.count }
+        let inFlight = await MainActor.run { engine.inFlightHydrations.count }
+        #expect(batchCount == 0)
+        #expect(inFlight == 0)
+    }
 }
 
 private actor PeakWorkerTracker {

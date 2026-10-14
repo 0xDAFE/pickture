@@ -127,12 +127,12 @@ struct StorageVolumeProfileTests {
         )
         #expect(StorageVolumeDetector.profile(for: statfsSmb) == .networkShare)
 
-        // Path fallback: iPadOS FileProvider smbclientd / LiveFiles path
-        let liveFiles = StorageVolumeDetector.VolumeAttributes(
-            path: "/private/var/mobile/Library/LiveFiles/com.apple.filesystems.smbclientd/share",
+        // Path fallback: Standard network mount path (/net/)
+        let netPath = StorageVolumeDetector.VolumeAttributes(
+            path: "/net/smbhost/share",
             volumeIsInternal: true
         )
-        #expect(StorageVolumeDetector.profile(for: liveFiles) == .networkShare)
+        #expect(StorageVolumeDetector.profile(for: netPath) == .networkShare)
 
         // Tier 3: Internal SSD
         let internalSSD = StorageVolumeDetector.VolumeAttributes(
