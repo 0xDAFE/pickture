@@ -109,6 +109,8 @@ final class MediaPipeline {
     let thumbnailQueue: ThumbnailQueueActor
     @ObservationIgnored
     let heavyDecodeLimiter: HeavyDecodeLimiter
+    @ObservationIgnored
+    private var activePersistenceTasks: [String: Task<Void, Never>] = [:]
 
     private(set) var totalCachedBytes: Int64 = 0
     private(set) var cacheSizeLimitBytes: Int64 = MediaCache.defaultQuotaBytes
@@ -218,10 +220,7 @@ final class MediaPipeline {
             await syncCacheMetrics()
             return nil
         }
-        guard let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) else {
-            return nil
-        }
-        return decoded
+        return await decodeAndCache(data: cachedData, forKey: key)
     }
 
     func cachedPreviewImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 2048) async -> CGImage? {
@@ -233,10 +232,7 @@ final class MediaPipeline {
             await syncCacheMetrics()
             return nil
         }
-        guard let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) else {
-            return nil
-        }
-        return decoded
+        return await decodeAndCache(data: cachedData, forKey: key)
     }
 
     func cachedFullRAWImage(for item: MediaItem) async -> CGImage? {
@@ -248,10 +244,15 @@ final class MediaPipeline {
             await syncCacheMetrics()
             return nil
         }
-        guard let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) else {
+        return await decodeAndCache(data: cachedData, forKey: key)
+    }
+
+    private func decodeAndCache(data: Data, forKey key: String) async -> CGImage? {
+        guard let image = await ImageDecoderActor.shared.decode(from: data) else {
             return nil
         }
-        return decoded
+        DecodedImageCache.shared.setImage(image, forKey: key)
+        return image
     }
 
     private func resolveAndCacheImage(from extracted: PreviewExtractionResult, forKey key: String) async -> CGImage? {
@@ -259,19 +260,22 @@ final class MediaPipeline {
             DecodedImageCache.shared.setImage(img, forKey: key)
             return img
         }
-        return await PreviewLoader.decodeCGImageAsync(from: extracted.jpegData, cachingWithKey: key)
+        return await decodeAndCache(data: extracted.jpegData, forKey: key)
     }
 
     private func persistExtractedDataAsync(data: Data, forKey key: String, pixelWidth: Int? = nil, pixelHeight: Int? = nil) {
         let diskCache = self.cache
-        // Asynchronously persist to disk cache off-MainActor on cooperative thread pool at userInitiated priority
-        Task.detached(priority: .userInitiated) { [weak self, diskCache, key, data, pixelWidth, pixelHeight] in
+        activePersistenceTasks[key]?.cancel()
+        let task = Task(priority: .userInitiated) { [weak self, diskCache, key, data, pixelWidth, pixelHeight] in
             guard !Task.isCancelled else { return }
-            guard let (fileName, byteSize) = diskCache.writeDiskFile(data, forKey: key) else { return }
+            await diskCache.storeData(data, forKey: key, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
             guard !Task.isCancelled else { return }
-            await diskCache.recordEntry(key: key, fileName: fileName, byteSize: byteSize, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
             await self?.syncCacheMetrics()
+            await MainActor.run { [weak self] in
+                self?.activePersistenceTasks.removeValue(forKey: key)
+            }
         }
+        activePersistenceTasks[key] = task
     }
 
     func loadThumbnailImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) async -> CGImage? {
@@ -280,7 +284,7 @@ final class MediaPipeline {
             return inMemory
         }
         if let cachedData = await cache.readData(forKey: key),
-           let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) {
+           let decoded = await decodeAndCache(data: cachedData, forKey: key) {
             return decoded
         }
         guard !Task.isCancelled else { return nil }
@@ -328,7 +332,7 @@ final class MediaPipeline {
             return inMemory
         }
         if let cachedData = await cache.readData(forKey: key),
-           let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) {
+           let decoded = await decodeAndCache(data: cachedData, forKey: key) {
             return decoded
         }
         guard !Task.isCancelled else { return nil }
@@ -370,7 +374,7 @@ final class MediaPipeline {
             return inMemory
         }
         if let cachedData = await cache.readData(forKey: key),
-           let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) {
+           let decoded = await decodeAndCache(data: cachedData, forKey: key) {
             return decoded
         }
         guard !Task.isCancelled else { return nil }
@@ -388,6 +392,8 @@ final class MediaPipeline {
 
     func cancelThumbnail(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) {
         let key = thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        activePersistenceTasks[key]?.cancel()
+        activePersistenceTasks.removeValue(forKey: key)
         let queue = thumbnailQueue
         Task {
             await queue.cancel(id: key)
@@ -396,6 +402,8 @@ final class MediaPipeline {
 
     func cancelThumbnailImmediately(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) async {
         let key = thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        activePersistenceTasks[key]?.cancel()
+        activePersistenceTasks.removeValue(forKey: key)
         await thumbnailQueue.cancel(id: key)
     }
 }

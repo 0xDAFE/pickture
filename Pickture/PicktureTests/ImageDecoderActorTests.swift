@@ -59,23 +59,6 @@ struct ImageDecoderActorTests {
         #expect(decoded.height == 100)
     }
 
-    @Test("ImageDecoderActor inserts decoded image into DecodedImageCache when key is provided")
-    func imageDecoderActorCachesDecodedImageImmediately() async throws {
-        DecodedImageCache.shared.clear()
-        let jpegData = try makeSampleJPEGData(width: 80, height: 60)
-        let testKey = "test_cache_key_\(UUID().uuidString)"
-
-        #expect(DecodedImageCache.shared.image(forKey: testKey) == nil)
-
-        let actor = ImageDecoderActor.shared
-        let decoded = try #require(await actor.decode(from: jpegData, cachingWithKey: testKey))
-        #expect(decoded.width == 80)
-
-        let inMemory = DecodedImageCache.shared.image(forKey: testKey)
-        #expect(inMemory != nil)
-        #expect(inMemory?.width == 80)
-    }
-
     @Test("ImageDecoderActor immediately aborts and returns nil when task is cancelled")
     func imageDecoderActorAbortsOnCancellation() async throws {
         let jpegData = try makeSampleJPEGData(width: 300, height: 300)
@@ -88,15 +71,26 @@ struct ImageDecoderActorTests {
         #expect(result == nil)
     }
 
-    @Test("PreviewLoader.decodeCGImageAsync decodes and caches in DecodedImageCache")
-    func previewLoaderDecodeCGImageAsyncCaches() async throws {
-        DecodedImageCache.shared.clear()
-        let jpegData = try makeSampleJPEGData(width: 120, height: 90)
-        let testKey = "preview_loader_async_\(UUID().uuidString)"
+    @Test("MediaCache storeData aborts and cleans up when task is cancelled")
+    func mediaCacheStoreDataAbortsOnCancellation() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("MediaCacheCancel-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        let image = try #require(await PreviewLoader.decodeCGImageAsync(from: jpegData, cachingWithKey: testKey))
-        #expect(image.width == 120)
-        #expect(DecodedImageCache.shared.image(forKey: testKey) != nil)
+        let cache = MediaCache(cacheDirectoryURL: tempDir)
+        let dummyData = try makeSampleJPEGData(width: 60, height: 60)
+        let key = "cancelled_key"
+
+        let task = Task {
+            await Task.yield()
+            await cache.storeData(dummyData, forKey: key)
+        }
+        task.cancel()
+        await task.value
+
+        #expect(await cache.contains(key: key) == false)
+        let read = await cache.readData(forKey: key)
+        #expect(read == nil)
     }
 
     @Test("MediaCache writeDiskFile writes cooperatively and recordEntry stores metadata")

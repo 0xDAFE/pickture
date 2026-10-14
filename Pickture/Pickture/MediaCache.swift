@@ -183,7 +183,13 @@ actor MediaCache {
     }
 
     nonisolated func storeData(_ data: Data, forKey key: String, pixelWidth: Int? = nil, pixelHeight: Int? = nil) async {
+        guard !Task.isCancelled else { return }
         guard let (fileName, byteSize) = writeDiskFile(data, forKey: key) else {
+            return
+        }
+        guard !Task.isCancelled else {
+            let fileURL = cacheDirectoryURL.appendingPathComponent(fileName)
+            try? FileManager.default.removeItem(at: fileURL)
             return
         }
         await recordEntry(key: key, fileName: fileName, byteSize: byteSize, pixelWidth: pixelWidth, pixelHeight: pixelHeight)

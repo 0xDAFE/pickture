@@ -17,12 +17,9 @@ actor ImageDecoderActor {
 
     /// Decompresses an image from raw data off `@MainActor`, respecting cooperative cancellation.
     ///
-    /// - Parameters:
-    ///   - data: Encoded image data (JPEG, HEIC, PNG, etc.).
-    ///   - key: Optional cache key. When provided, the decoded `CGImage` is immediately inserted
-    ///     into `DecodedImageCache.shared` from the background decode path before returning.
+    /// - Parameter data: Encoded image data (JPEG, HEIC, PNG, etc.).
     /// - Returns: The decompressed `CGImage`, or `nil` if decoding failed or the task was cancelled.
-    func decode(from data: Data, cachingWithKey key: String? = nil) -> CGImage? {
+    func decode(from data: Data) -> CGImage? {
         guard !Task.isCancelled else { return nil }
 
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
@@ -50,15 +47,6 @@ actor ImageDecoderActor {
             return nil
         }
 
-        if let key {
-            DecodedImageCache.shared.setImage(decodedImage, forKey: key)
-        }
-
         return decodedImage
-    }
-
-    /// Convenience overload matching the exact spec signature: `func decode(from data: Data) -> CGImage?`
-    func decode(from data: Data) -> CGImage? {
-        decode(from: data, cachingWithKey: nil)
     }
 }

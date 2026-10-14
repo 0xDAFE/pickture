@@ -1091,7 +1091,7 @@ final class CullingSession: CullingInteractionTarget {
 
     func loadThumbnailData(for item: MediaItem, maxPixelSize: Int = 360) async -> Data? {
         let data = await mediaPipeline.loadThumbnailData(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
-        if let data, let image = await PreviewLoader.decodeCGImageAsync(from: data) {
+        if let data, let image = await ImageDecoderActor.shared.decode(from: data) {
             recordThumbnailAspectRatio(image.aspectRatio, for: item, previewSource: previewSource)
         }
         return data
