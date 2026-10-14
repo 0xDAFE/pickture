@@ -358,6 +358,7 @@ struct FilmstripRepresentationControls: View {
 
             if item.hasRAWFile && (session.previewSource == .preferRAW || !item.isMediaPair) {
                 FullRAWActionButton(item: item, session: session)
+                    .id(item.id)
             }
         }
         .animation(.snappy, value: state)
@@ -457,41 +458,39 @@ struct FullRAWActionButton: View {
 
     var body: some View {
         if !session.isFullRAWLoaded(for: item) {
-            if session.isLoadingFullRAW(for: item) {
+            let isLoading = session.isLoadingFullRAW(for: item)
+
+            Button {
+                guard !isLoading else { return }
+                loadTask?.cancel()
+                loadTask = Task {
+                    _ = await session.loadFullRAW(for: item)
+                }
+            } label: {
                 HStack(spacing: 5) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(.white)
-                    Text("Demosaicing RAW…")
-                        .font(.caption.weight(.medium))
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                        Text("Demosaicing RAW…")
+                            .font(.caption.weight(.medium))
+                    } else {
+                        Image(systemName: "camera.aperture")
+                        Text("Load Full RAW")
+                            .font(.caption.weight(.medium))
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(.ultraThinMaterial, in: Capsule())
                 .foregroundStyle(.white)
-            } else {
-                Button {
-                    loadTask?.cancel()
-                    loadTask = Task {
-                        _ = await session.loadFullRAW(for: item)
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "camera.aperture")
-                        Text("Load Full RAW")
-                            .font(.caption.weight(.medium))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .foregroundStyle(.white)
-                }
-                .buttonStyle(.plain)
-                .help("Demosaic full RAW for critical focus inspection (ADR-0005)")
-                .onDisappear {
-                    loadTask?.cancel()
-                    loadTask = nil
-                }
+            }
+            .buttonStyle(.plain)
+            .disabled(isLoading)
+            .help(isLoading ? "Demosaicing RAW…" : "Demosaic full RAW for critical focus inspection (ADR-0005)")
+            .onDisappear {
+                loadTask?.cancel()
+                loadTask = nil
             }
         }
     }

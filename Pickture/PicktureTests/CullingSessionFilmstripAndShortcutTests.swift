@@ -779,4 +779,46 @@ struct CullingSessionFilmstripAndShortcutTests {
         #expect(evictionObservationFired == true)
         #expect(session.previewRepresentation(for: item) == .rawPreview)
     }
+
+    @Test("FullRAWActionButton renders stable Button view across idle and loading states")
+    func fullRAWActionButtonViewStructureStability() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let jpgURL = root.appendingPathComponent("DSC0005.JPG")
+        let rawURL = root.appendingPathComponent("DSC0005.ARW")
+
+        try createTestJPEG(at: jpgURL, width: 320, height: 240, r: 50, g: 100, b: 150)
+        let rawHeaderPrefix = try Data(contentsOf: jpgURL)
+        var rawData = rawHeaderPrefix
+        rawData.append(Data(repeating: 0xBB, count: 2048))
+        try rawData.write(to: rawURL)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+        session.setPreviewSource(.preferRAW)
+
+        let item = try #require(session.items.first)
+        #expect(item.hasRAWFile)
+        #expect(!session.isFullRAWLoaded(for: item))
+        #expect(!session.isLoadingFullRAW(for: item))
+
+        // 1. Idle state produces non-empty button
+        let actionButton = FullRAWActionButton(item: item, session: session)
+        #expect(actionButton.item.id == item.id)
+        _ = actionButton.body
+
+        // 2. Perform full RAW load on session
+        let fullImage = await session.loadFullRAW(for: item)
+        #expect(fullImage != nil)
+        #expect(session.isFullRAWLoaded(for: item))
+        #expect(!session.isLoadingFullRAW(for: item))
+
+        // 3. Loaded state (button disappears from body when full RAW is loaded)
+        let loadedButton = FullRAWActionButton(item: item, session: session)
+        _ = loadedButton.body
+        #expect(session.previewRepresentation(for: item) == .fullRAW)
+    }
 }
+

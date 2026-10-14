@@ -327,7 +327,7 @@ actor PrefetchCoordinator {
     ) {
         guard isIdleWarmingEnabled else { return }
         idleTimerTask?.cancel()
-        idleTimerTask = Task(priority: .utility) { [weak self, idleDelayNanoseconds] in
+        idleTimerTask = Task(priority: .userInitiated) { [weak self, idleDelayNanoseconds] in
             do {
                 try await Task.sleep(nanoseconds: idleDelayNanoseconds)
             } catch {

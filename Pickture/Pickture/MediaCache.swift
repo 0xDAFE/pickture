@@ -133,43 +133,66 @@ actor MediaCache {
         db.updateDimensions(key: key, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
     }
 
-    func storeData(_ data: Data, forKey key: String, pixelWidth: Int? = nil, pixelHeight: Int? = nil) {
-        try? FileManager.default.createDirectory(at: cacheDirectoryURL, withIntermediateDirectories: true)
+    nonisolated func writeDiskFile(_ data: Data, forKey key: String) -> (fileName: String, byteSize: Int64)? {
+        let fileName = Self.safeFileName(forKey: key)
+        let fileURL = cacheDirectoryURL.appendingPathComponent(fileName)
+        do {
+            try FileManager.default.createDirectory(at: cacheDirectoryURL, withIntermediateDirectories: true)
+            try data.write(to: fileURL, options: .atomic)
+            return (fileName, Int64(data.count))
+        } catch {
+            return nil
+        }
+    }
 
-        let byteSize = Int64(data.count)
+    func recordEntry(
+        key: String,
+        fileName: String,
+        byteSize: Int64,
+        pixelWidth: Int? = nil,
+        pixelHeight: Int? = nil
+    ) {
         if let existing = db.entry(forKey: key) {
-            let oldURL = cacheDirectoryURL.appendingPathComponent(existing.fileName)
-            try? FileManager.default.removeItem(at: oldURL)
+            if existing.fileName != fileName {
+                let oldURL = cacheDirectoryURL.appendingPathComponent(existing.fileName)
+                try? FileManager.default.removeItem(at: oldURL)
+            }
             db.remove(key: key)
             totalCachedBytes = max(0, totalCachedBytes - existing.byteSize)
             entryCount = max(0, entryCount - 1)
         }
 
-        let fileName = Self.safeFileName(forKey: key)
-        let fileURL = cacheDirectoryURL.appendingPathComponent(fileName)
-        do {
-            try data.write(to: fileURL, options: .atomic)
-            let seq = nextSequenceNumber()
-            let entry = MediaCacheEntry(
-                key: key,
-                fileName: fileName,
-                byteSize: byteSize,
-                lastAccessedAt: Date(),
-                accessSequence: seq,
-                pixelWidth: pixelWidth,
-                pixelHeight: pixelHeight
-            )
-            db.insertOrReplace(entry: entry)
-            totalCachedBytes += byteSize
-            entryCount += 1
-            pendingAccessUpdates.removeValue(forKey: key)
+        let seq = nextSequenceNumber()
+        let entry = MediaCacheEntry(
+            key: key,
+            fileName: fileName,
+            byteSize: byteSize,
+            lastAccessedAt: Date(),
+            accessSequence: seq,
+            pixelWidth: pixelWidth,
+            pixelHeight: pixelHeight
+        )
+        db.insertOrReplace(entry: entry)
+        totalCachedBytes += byteSize
+        entryCount += 1
+        pendingAccessUpdates.removeValue(forKey: key)
 
-            evictIfNeeded()
-            db.setMetadata(key: "next_sequence", value: String(nextSequence))
-            db.setMetadata(key: "cache_size_limit_bytes", value: String(cacheSizeLimitBytes))
-        } catch {
-            // Ignore transient disk write failures in cache
+        evictIfNeeded()
+        db.setMetadata(key: "next_sequence", value: String(nextSequence))
+        db.setMetadata(key: "cache_size_limit_bytes", value: String(cacheSizeLimitBytes))
+    }
+
+    nonisolated func storeData(_ data: Data, forKey key: String, pixelWidth: Int? = nil, pixelHeight: Int? = nil) async {
+        guard !Task.isCancelled else { return }
+        guard let (fileName, byteSize) = writeDiskFile(data, forKey: key) else {
+            return
         }
+        guard !Task.isCancelled else {
+            let fileURL = cacheDirectoryURL.appendingPathComponent(fileName)
+            try? FileManager.default.removeItem(at: fileURL)
+            return
+        }
+        await recordEntry(key: key, fileName: fileName, byteSize: byteSize, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
     }
 
     func setCacheSizeLimitBytes(_ newLimitBytes: Int64) {
@@ -224,7 +247,7 @@ actor MediaCache {
 
     func scheduleDebouncedPersistIndex(delayNanoseconds: UInt64 = 1_000_000_000) {
         debouncedPersistTask?.cancel()
-        debouncedPersistTask = Task(priority: .utility) { [weak self] in
+        debouncedPersistTask = Task(priority: .userInitiated) { [weak self] in
             try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard !Task.isCancelled, let self else { return }
             await self.finishDebouncedPersist()

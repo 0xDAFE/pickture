@@ -631,10 +631,6 @@ nonisolated enum PreviewLoader {
         return nil
     }
 
-    nonisolated static func decodeCGImageAsync(from data: Data) async -> CGImage? {
-        decodeCGImage(from: data)
-    }
-
     static func encodeToJPEG(cgImage: CGImage, quality: Double = 0.82) -> Data? {
         let mutableData = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
