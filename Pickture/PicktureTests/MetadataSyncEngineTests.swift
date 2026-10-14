@@ -518,6 +518,238 @@ struct MetadataSyncEngineTests {
             #expect(curation == CurationMetadata())
         }
     }
+
+    // MARK: - Hydration Queue, Bounded Concurrency & Debounce Tests (ADR-0013)
+
+    @Test("HydrationQueueActor executes requests in LIFO order and cancels off-screen tasks")
+    func hydrationQueueActorLIFOAndCancellation() async {
+        let queue = HydrationQueueActor(maxConcurrentWorkers: 1)
+        let orderTracker = ExecutionOrderTracker()
+
+        let blockerStarted = AsyncSignal()
+        let blockerRelease = AsyncSignal()
+
+        let blockerTask = Task {
+            await queue.enqueue(id: "blocker") { () -> String? in
+                await blockerStarted.signal()
+                await blockerRelease.wait()
+                return "blocker"
+            }
+        }
+
+        await blockerStarted.wait()
+
+        // Enqueue item 1, then item 2, then item 3
+        let task1 = Task {
+            await queue.enqueue(id: "item1") { () -> String? in
+                await orderTracker.record("item1")
+                return "item1"
+            }
+        }
+        while await queue.pendingCount < 1 {
+            await Task.yield()
+        }
+
+        let task2 = Task {
+            await queue.enqueue(id: "item2") { () -> String? in
+                await orderTracker.record("item2")
+                return "item2"
+            }
+        }
+        while await queue.pendingCount < 2 {
+            await Task.yield()
+        }
+
+        let task3 = Task {
+            await queue.enqueue(id: "item3") { () -> String? in
+                await orderTracker.record("item3")
+                return "item3"
+            }
+        }
+        while await queue.pendingCount < 3 {
+            await Task.yield()
+        }
+
+        // Cancel task2 before worker is released (simulating off-screen flinging)
+        task2.cancel()
+        try? await Task.sleep(nanoseconds: 10_000_000)
+
+        // Release the blocker so queue drains
+        await blockerRelease.signal()
+        _ = await blockerTask.value
+
+        _ = await task3.value
+        _ = await task1.value
+        let task2Result = await task2.value
+
+        // Cancelled task2 must return nil
+        #expect(task2Result == nil)
+
+        // LIFO order: item3 was enqueued last, so it must execute before item1
+        let finalOrder = await orderTracker.order
+        #expect(finalOrder == ["item3", "item1"])
+    }
+
+    @Test("HydrationQueueActor limits concurrent workers according to StorageVolumeProfile")
+    func hydrationQueueActorConcurrencyLimit() async {
+        let profile = StorageVolumeProfile.networkShare
+        let maxWorkers = profile.defaultSidecarHydrationWorkers // 2
+        let queue = HydrationQueueActor(maxConcurrentWorkers: maxWorkers)
+
+        let peakWorkerTracker = PeakWorkerTracker()
+        let releaseSignal = AsyncSignal()
+        let allStartedSignal = AsyncSignal()
+
+        var tasks: [Task<String?, Never>] = []
+        for i in 1...6 {
+            let task = Task {
+                await queue.enqueue(id: "worker_\(i)") { () -> String? in
+                    await peakWorkerTracker.increment()
+                    if await peakWorkerTracker.current == maxWorkers {
+                        await allStartedSignal.signal()
+                    }
+                    await releaseSignal.wait()
+                    await peakWorkerTracker.decrement()
+                    return "worker_\(i)"
+                }
+            }
+            tasks.append(task)
+        }
+
+        await allStartedSignal.wait()
+        let peak = await peakWorkerTracker.peak
+        #expect(peak <= maxWorkers)
+
+        await releaseSignal.signal()
+        for task in tasks {
+            _ = await task.value
+        }
+    }
+
+    @Test("Mass background hydration batches UI updates with 300ms debounce timer")
+    func massBackgroundHydrationBatchesUpdatesWithDebounce() async throws {
+        let root = try makeTemporaryDirectory()
+        defer {
+            DirectoryListingCache.shared.clear(for: root)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let store = MetadataSyncStore(storeDirectoryURL: root)
+        let engine = await MetadataSyncEngine(syncStore: store)
+        await MainActor.run {
+            // Configure 300ms debounce for test
+            engine.hydrationBatchDebounceNanoseconds = 300_000_000
+        }
+
+        var items: [MediaItem] = []
+        for i in 1...6 {
+            let item = try createTestItem(in: root, fileName: "BATCH_\(i).JPG")
+            let xmp = root.appendingPathComponent("BATCH_\(i).xmp")
+            let curation = CurationMetadata(starRating: StarRating(i), pickFlag: .picked)
+            let data = try SidecarCodec.update(xmlData: nil, with: curation)
+            try data.write(to: xmp)
+            items.append(item)
+        }
+
+        await engine.initializeMetadata(for: items, isLazy: true)
+
+        let stateChangeTracker = StateChangeCounter()
+        await MainActor.run {
+            engine.onStateChange = {
+                stateChangeTracker.increment()
+            }
+        }
+
+        // Start background sidecar hydration
+        await engine.startBackgroundSidecarHydration(for: items)
+        await engine.waitForBackgroundHydration()
+
+        // Verify all items are now synced with proper curation
+        for (i, item) in items.enumerated() {
+            let state = await engine.syncState(for: item)
+            let curation = await engine.curationMetadata(for: item)
+            #expect(state == .synced)
+            #expect(curation.starRating == StarRating(i + 1))
+        }
+
+        // Verify onStateChange was batched (significantly fewer turns than 6 individual turns)
+        let notifications = await stateChangeTracker.count
+        #expect(notifications <= 3)
+    }
+
+    @Test("On-demand cell hydrateMetadata resolves immediately and extracts from pending batch")
+    func cellOnDemandHydrationExtractsFromPendingBatch() async throws {
+        let root = try makeTemporaryDirectory()
+        defer {
+            DirectoryListingCache.shared.clear(for: root)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let store = MetadataSyncStore(storeDirectoryURL: root)
+        let engine = await MetadataSyncEngine(syncStore: store)
+
+        let item = try createTestItem(in: root, fileName: "CELL_FAST.JPG")
+        let xmp = root.appendingPathComponent("CELL_FAST.xmp")
+        let expected = CurationMetadata(starRating: 4, pickFlag: .picked, colorLabel: .blue)
+        let data = try SidecarCodec.update(xmlData: nil, with: expected)
+        try data.write(to: xmp)
+
+        await engine.initializeMetadata(for: [item], isLazy: true)
+        #expect(await engine.syncState(for: item) == .loading)
+
+        // Seed pendingHydrationBatch with pre-processed result to simulate background worker finishing
+        let pendingResult = MetadataSyncEngine.HydrationResult(
+            itemID: item.id,
+            metadata: expected,
+            syncState: .synced,
+            baseSnapshot: BaseSnapshot(metadata: expected, fileDigest: "fake"),
+            conflict: nil,
+            discoveredExif: nil
+        )
+        await MainActor.run {
+            engine.recordBatchHydrationResult(pendingResult)
+            #expect(engine.pendingHydrationBatch.count == 1)
+        }
+
+        // Cell becomes visible: calls hydrateMetadata on-demand
+        await engine.hydrateMetadata(for: item)
+
+        // Must extract from batch immediately and apply to MainActor
+        let state = await engine.syncState(for: item)
+        let curation = await engine.curationMetadata(for: item)
+        #expect(state == .synced)
+        #expect(curation == expected)
+
+        let remainingInBatch = await MainActor.run { engine.pendingHydrationBatch.count }
+        #expect(remainingInBatch == 0)
+    }
+}
+
+private actor PeakWorkerTracker {
+    private(set) var current: Int = 0
+    private(set) var peak: Int = 0
+
+    func increment() {
+        current += 1
+        peak = max(peak, current)
+    }
+
+    func decrement() {
+        current -= 1
+    }
+}
+
+private final class StateChangeCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count: Int = 0
+
+    var count: Int {
+        lock.withLock { _count }
+    }
+
+    func increment() {
+        lock.withLock { _count += 1 }
+    }
 }
 
 

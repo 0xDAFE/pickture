@@ -599,7 +599,7 @@ final class CullingSession: CullingInteractionTarget {
     private func applyActiveVolumeProfile() {
         let profile = storageVolumeProfile
         let highSpeed = isHighSpeedLANOverrideEnabled
-        metadataSyncEngine.setStorageVolumeProfile(profile)
+        metadataSyncEngine.setStorageVolumeProfile(profile, isHighSpeedLAN: highSpeed)
         Task {
             await mediaPipeline.applyStorageVolumeProfile(profile, isHighSpeedLAN: highSpeed)
             await prefetchCoordinator.applyStorageVolumeProfile(profile, isHighSpeedLAN: highSpeed)
@@ -607,7 +607,7 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     private func setupMetadataSyncEngineBindings() {
-        metadataSyncEngine.setStorageVolumeProfile(storageVolumeProfile)
+        metadataSyncEngine.setStorageVolumeProfile(storageVolumeProfile, isHighSpeedLAN: isHighSpeedLANOverrideEnabled)
         metadataSyncEngine.itemsProvider = { [weak self] in
             self?.items ?? []
         }
@@ -621,7 +621,11 @@ final class CullingSession: CullingInteractionTarget {
             self?.exifByItemID[itemID]
         }
         metadataSyncEngine.onExifDiscovered = { [weak self] itemID, exif in
-            self?.exifByItemID[itemID] = exif
+            if let existing = self?.exifByItemID[itemID] {
+                self?.exifByItemID[itemID] = exif.supplementing(with: existing)
+            } else {
+                self?.exifByItemID[itemID] = exif
+            }
         }
     }
 

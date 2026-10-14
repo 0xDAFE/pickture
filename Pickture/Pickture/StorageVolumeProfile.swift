@@ -38,6 +38,14 @@ public enum StorageVolumeProfile: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    public var defaultSidecarHydrationWorkers: Int {
+        switch self {
+        case .internalSSD: return 6
+        case .removableMedia: return 3
+        case .networkShare: return 2
+        }
+    }
+
     public var defaultExifPreloadWorkers: Int {
         switch self {
         case .internalSSD: return 6
@@ -114,6 +122,11 @@ public enum StorageVolumeProfile: String, CaseIterable, Codable, Sendable {
     public func effectivePrefetchLookahead(isHighSpeedLAN: Bool) -> Int {
         if self == .networkShare && isHighSpeedLAN { return 6 }
         return defaultLookaheadDepth
+    }
+
+    public func effectiveSidecarHydrationWorkers(isHighSpeedLAN: Bool) -> Int {
+        if self == .networkShare && isHighSpeedLAN { return 4 }
+        return defaultSidecarHydrationWorkers
     }
 }
 
