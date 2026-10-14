@@ -257,6 +257,26 @@ final class MediaPipeline {
         return decoded
     }
 
+    private func resolveAndCacheImage(from extracted: PreviewExtractionResult, forKey key: String) async -> CGImage? {
+        if let img = extracted.image {
+            DecodedImageCache.shared.setImage(img, forKey: key)
+            return img
+        }
+        return await PreviewLoader.decodeCGImageAsync(from: extracted.jpegData, cachingWithKey: key)
+    }
+
+    private func persistExtractedDataAsync(data: Data, forKey key: String, pixelWidth: Int? = nil, pixelHeight: Int? = nil) {
+        let diskCache = self.cache
+        // Asynchronously persist to disk cache off-MainActor on cooperative thread pool at userInitiated priority
+        Task.detached(priority: .userInitiated) { [weak self, diskCache, key, data, pixelWidth, pixelHeight] in
+            guard !Task.isCancelled else { return }
+            guard let (fileName, byteSize) = diskCache.writeDiskFile(data, forKey: key) else { return }
+            guard !Task.isCancelled else { return }
+            await diskCache.recordEntry(key: key, fileName: fileName, byteSize: byteSize, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+            await self?.syncCacheMetrics()
+        }
+    }
+
     func loadThumbnailImage(for item: MediaItem, previewSource: PreviewSource, maxPixelSize: Int = 360) async -> CGImage? {
         let key = thumbnailCacheKey(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
         if let inMemory = DecodedImageCache.shared.image(forKey: key) {
@@ -276,27 +296,11 @@ final class MediaPipeline {
         guard let extracted, !Task.isCancelled else {
             return nil
         }
-        let finalImage: CGImage?
-        if let img = extracted.image {
-            finalImage = img
-            DecodedImageCache.shared.setImage(img, forKey: key)
-        } else {
-            finalImage = await PreviewLoader.decodeCGImageAsync(from: extracted.jpegData, cachingWithKey: key)
-        }
+        let finalImage = await resolveAndCacheImage(from: extracted, forKey: key)
         if let finalImage {
-            DecodedImageCache.shared.setImage(finalImage, forKey: key)
-        }
-        let diskCache = self.cache
-        let dataToStore = extracted.jpegData
-        let pixelWidth = finalImage?.width
-        let pixelHeight = finalImage?.height
-        // Asynchronously persist to disk cache at userInitiated priority without blocking immediate in-memory display
-        Task(priority: .userInitiated) { [weak self, diskCache, key, dataToStore, pixelWidth, pixelHeight] in
-            guard !Task.isCancelled else { return }
-            guard let (fileName, byteSize) = diskCache.writeDiskFile(dataToStore, forKey: key) else { return }
-            guard !Task.isCancelled else { return }
-            await diskCache.recordEntry(key: key, fileName: fileName, byteSize: byteSize, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
-            await self?.syncCacheMetrics()
+            persistExtractedDataAsync(data: extracted.jpegData, forKey: key, pixelWidth: finalImage.width, pixelHeight: finalImage.height)
+        } else {
+            persistExtractedDataAsync(data: extracted.jpegData, forKey: key)
         }
         await syncCacheMetrics()
         return finalImage
@@ -316,16 +320,7 @@ final class MediaPipeline {
         guard let extracted, !Task.isCancelled else {
             return nil
         }
-        let finalImage: CGImage?
-        if let img = extracted.image {
-            finalImage = img
-            DecodedImageCache.shared.setImage(img, forKey: key)
-        } else {
-            finalImage = await PreviewLoader.decodeCGImageAsync(from: extracted.jpegData, cachingWithKey: key)
-        }
-        if let finalImage {
-            DecodedImageCache.shared.setImage(finalImage, forKey: key)
-        }
+        let finalImage = await resolveAndCacheImage(from: extracted, forKey: key)
         await cache.storeData(extracted.jpegData, forKey: key, pixelWidth: finalImage?.width, pixelHeight: finalImage?.height)
         await syncCacheMetrics()
         return extracted.jpegData
@@ -349,26 +344,8 @@ final class MediaPipeline {
         guard let extracted, !Task.isCancelled else {
             return nil
         }
-        let finalImage: CGImage?
-        if let img = extracted.image {
-            finalImage = img
-            DecodedImageCache.shared.setImage(img, forKey: key)
-        } else {
-            finalImage = await PreviewLoader.decodeCGImageAsync(from: extracted.jpegData, cachingWithKey: key)
-        }
-        if let finalImage {
-            DecodedImageCache.shared.setImage(finalImage, forKey: key)
-        }
-        let diskCache = self.cache
-        let dataToStore = extracted.jpegData
-        // Asynchronously persist to disk cache at userInitiated priority without blocking immediate in-memory display
-        Task(priority: .userInitiated) { [weak self, diskCache, key, dataToStore] in
-            guard !Task.isCancelled else { return }
-            guard let (fileName, byteSize) = diskCache.writeDiskFile(dataToStore, forKey: key) else { return }
-            guard !Task.isCancelled else { return }
-            await diskCache.recordEntry(key: key, fileName: fileName, byteSize: byteSize)
-            await self?.syncCacheMetrics()
-        }
+        let finalImage = await resolveAndCacheImage(from: extracted, forKey: key)
+        persistExtractedDataAsync(data: extracted.jpegData, forKey: key)
         await syncCacheMetrics()
         return finalImage
     }
@@ -386,16 +363,7 @@ final class MediaPipeline {
         guard let extracted, !Task.isCancelled else {
             return nil
         }
-        let finalImage: CGImage?
-        if let img = extracted.image {
-            finalImage = img
-            DecodedImageCache.shared.setImage(img, forKey: key)
-        } else {
-            finalImage = await PreviewLoader.decodeCGImageAsync(from: extracted.jpegData, cachingWithKey: key)
-        }
-        if let finalImage {
-            DecodedImageCache.shared.setImage(finalImage, forKey: key)
-        }
+        _ = await resolveAndCacheImage(from: extracted, forKey: key)
         await cache.storeData(extracted.jpegData, forKey: key)
         await syncCacheMetrics()
         return extracted.jpegData
@@ -419,16 +387,7 @@ final class MediaPipeline {
         }
         guard let result, !Task.isCancelled else { return nil }
         DecodedImageCache.shared.setImage(result.image, forKey: key)
-        let diskCache = self.cache
-        let dataToStore = result.data
-        // Asynchronously persist to disk cache at userInitiated priority without blocking immediate in-memory display
-        Task(priority: .userInitiated) { [weak self, diskCache, key, dataToStore] in
-            guard !Task.isCancelled else { return }
-            guard let (fileName, byteSize) = diskCache.writeDiskFile(dataToStore, forKey: key) else { return }
-            guard !Task.isCancelled else { return }
-            await diskCache.recordEntry(key: key, fileName: fileName, byteSize: byteSize)
-            await self?.syncCacheMetrics()
-        }
+        persistExtractedDataAsync(data: result.data, forKey: key)
         await syncCacheMetrics()
         return result.image
     }
