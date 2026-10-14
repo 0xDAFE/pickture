@@ -221,7 +221,6 @@ final class MediaPipeline {
         guard let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) else {
             return nil
         }
-        DecodedImageCache.shared.setImage(decoded, forKey: key)
         return decoded
     }
 
@@ -237,7 +236,6 @@ final class MediaPipeline {
         guard let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) else {
             return nil
         }
-        DecodedImageCache.shared.setImage(decoded, forKey: key)
         return decoded
     }
 
@@ -253,7 +251,6 @@ final class MediaPipeline {
         guard let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) else {
             return nil
         }
-        DecodedImageCache.shared.setImage(decoded, forKey: key)
         return decoded
     }
 
@@ -284,7 +281,6 @@ final class MediaPipeline {
         }
         if let cachedData = await cache.readData(forKey: key),
            let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) {
-            DecodedImageCache.shared.setImage(decoded, forKey: key)
             return decoded
         }
         guard !Task.isCancelled else { return nil }
@@ -333,7 +329,6 @@ final class MediaPipeline {
         }
         if let cachedData = await cache.readData(forKey: key),
            let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) {
-            DecodedImageCache.shared.setImage(decoded, forKey: key)
             return decoded
         }
         guard !Task.isCancelled else { return nil }
@@ -376,7 +371,6 @@ final class MediaPipeline {
         }
         if let cachedData = await cache.readData(forKey: key),
            let decoded = await PreviewLoader.decodeCGImageAsync(from: cachedData, cachingWithKey: key) {
-            DecodedImageCache.shared.setImage(decoded, forKey: key)
             return decoded
         }
         guard !Task.isCancelled else { return nil }

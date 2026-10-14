@@ -182,11 +182,11 @@ actor MediaCache {
         db.setMetadata(key: "cache_size_limit_bytes", value: String(cacheSizeLimitBytes))
     }
 
-    func storeData(_ data: Data, forKey key: String, pixelWidth: Int? = nil, pixelHeight: Int? = nil) {
+    nonisolated func storeData(_ data: Data, forKey key: String, pixelWidth: Int? = nil, pixelHeight: Int? = nil) async {
         guard let (fileName, byteSize) = writeDiskFile(data, forKey: key) else {
             return
         }
-        recordEntry(key: key, fileName: fileName, byteSize: byteSize, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        await recordEntry(key: key, fileName: fileName, byteSize: byteSize, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
     }
 
     func setCacheSizeLimitBytes(_ newLimitBytes: Int64) {
