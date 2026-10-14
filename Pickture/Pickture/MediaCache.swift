@@ -34,13 +34,14 @@ nonisolated struct MediaCacheEntry: Codable, Hashable, Sendable {
     }
 }
 
-@MainActor
-final class MediaCache {
+/// Thread-safe background cache actor managing thumbnail/preview disk storage,
+/// SHA-256 key hashing, indexed LRU byte-quota eviction, and SQLite index interactions off @MainActor.
+actor MediaCache {
     nonisolated static let minUserQuotaBytes: Int64 = 250 * 1_024 * 1_024       // 250 MB
     nonisolated static let maxUserQuotaBytes: Int64 = 20 * 1_024 * 1_024 * 1_024 // 20 GB
     nonisolated static let defaultQuotaBytes: Int64 = 2 * 1_024 * 1_024 * 1_024  // 2 GB
 
-    static let quotaPresetsBytes: [(label: String, bytes: Int64)] = [
+    nonisolated static let quotaPresetsBytes: [(label: String, bytes: Int64)] = [
         ("250 MB", 250 * 1_024 * 1_024),
         ("500 MB", 500 * 1_024 * 1_024),
         ("1 GB", 1 * 1_024 * 1_024 * 1_024),
@@ -50,8 +51,8 @@ final class MediaCache {
         ("20 GB", 20 * 1_024 * 1_024 * 1_024)
     ]
 
-    let cacheDirectoryURL: URL
-    let indexFileURL: URL
+    nonisolated let cacheDirectoryURL: URL
+    nonisolated let indexFileURL: URL
     private let db: SQLiteMediaCacheIndex
 
     private(set) var cacheSizeLimitBytes: Int64
@@ -120,11 +121,11 @@ final class MediaCache {
         return data
     }
 
-    nonisolated func batchAspectRatios(keys: [String]) -> [String: CGFloat] {
+    func batchAspectRatios(keys: [String]) -> [String: CGFloat] {
         db.batchAspectRatios(keys: keys)
     }
 
-    nonisolated func aspectRatio(forKey key: String) -> CGFloat? {
+    func aspectRatio(forKey key: String) -> CGFloat? {
         db.aspectRatio(forKey: key)
     }
 
@@ -191,6 +192,10 @@ final class MediaCache {
         flushIndexImmediately()
     }
 
+    func metrics() -> (totalBytes: Int64, limitBytes: Int64, count: Int) {
+        (totalCachedBytes, cacheSizeLimitBytes, entryCount)
+    }
+
     private func evictIfNeeded() {
         flushPendingAccessUpdates()
         let limit = cacheSizeLimitBytes
@@ -221,13 +226,15 @@ final class MediaCache {
         debouncedPersistTask?.cancel()
         debouncedPersistTask = Task(priority: .utility) { [weak self] in
             try? await Task.sleep(nanoseconds: delayNanoseconds)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                guard let self, !Task.isCancelled else { return }
-                self.debouncedPersistTask = nil
-                self.persistIndex()
-            }
+            guard !Task.isCancelled, let self else { return }
+            await self.finishDebouncedPersist()
         }
+    }
+
+    private func finishDebouncedPersist() {
+        guard !Task.isCancelled else { return }
+        self.debouncedPersistTask = nil
+        self.persistIndex()
     }
 
     func persistIndex() {

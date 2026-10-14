@@ -180,8 +180,8 @@ struct CullingSequenceAndZeroIOTests {
         let key1 = session.mediaPipeline.thumbnailCacheKey(for: item1, previewSource: .preferRaster)
         let key2 = session.mediaPipeline.thumbnailCacheKey(for: item2, previewSource: .preferRaster)
         let dummyData = Data(repeating: 0x01, count: 64)
-        session.mediaCache.storeData(dummyData, forKey: key1, pixelWidth: 4000, pixelHeight: 2000)
-        session.mediaCache.storeData(dummyData, forKey: key2, pixelWidth: 1000, pixelHeight: 1000)
+        await session.mediaCache.storeData(dummyData, forKey: key1, pixelWidth: 4000, pixelHeight: 2000)
+        await session.mediaCache.storeData(dummyData, forKey: key2, pixelWidth: 1000, pixelHeight: 1000)
 
         // Before warming, in-memory cache has fallback 3:2
         #expect(abs(session.thumbnailAspectRatio(for: item1) - 1.5) < 0.001)

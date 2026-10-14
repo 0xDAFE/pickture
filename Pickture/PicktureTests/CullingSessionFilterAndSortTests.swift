@@ -95,7 +95,7 @@ struct CullingSessionFilterAndSortTests {
     // MARK: - Slice 1: ExifMetadata Extraction & Caching
 
     @Test("ExifMetadata is populated from .xmp Sidecar tags first")
-    func exifMetadataPopulatedFromXMPFirst() throws {
+    func exifMetadataPopulatedFromXMPFirst() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -127,6 +127,7 @@ struct CullingSessionFilterAndSortTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         #expect(session.items.count == 1)
         let item = try #require(session.items.first)
@@ -177,6 +178,7 @@ struct CullingSessionFilterAndSortTests {
 
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
         await session.waitForBackgroundExifPreloading()
 
         let item = try #require(session.items.first)
@@ -222,7 +224,9 @@ struct CullingSessionFilterAndSortTests {
         #expect(exif1.lensModel == "RF 85mm F1.2L USM")
 
         // Verify stored in MetadataSyncStore
-        let record = try #require(session1.metadataSyncStore.record(for: item1.id))
+        await session1.waitForPendingStoreWrites()
+        let rec1 = await session1.metadataSyncStore.record(for: item1.id)
+        let record = try #require(rec1)
         #expect(record.exif?.cameraModel == "Canon EOS R5")
         #expect(record.exif?.lensModel == "RF 85mm F1.2L USM")
 
@@ -232,7 +236,8 @@ struct CullingSessionFilterAndSortTests {
         let item2 = try #require(session2.items.first)
 
         // Read without extracting again — verified from persistent store
-        let cachedRecord = try #require(session2.metadataSyncStore.record(for: item2.id))
+        let rec2 = await session2.metadataSyncStore.record(for: item2.id)
+        let cachedRecord = try #require(rec2)
         #expect(cachedRecord.exif?.cameraModel == "Canon EOS R5")
         #expect(cachedRecord.exif?.lensModel == "RF 85mm F1.2L USM")
         #expect(session2.exifMetadata(for: item2).cameraModel == "Canon EOS R5")
@@ -419,7 +424,7 @@ struct CullingSessionFilterAndSortTests {
     }
 
     @Test("FilterCriteria filters by SyncState with logical OR within category")
-    func filterCriteriaSyncStateORWithin() throws {
+    func filterCriteriaSyncStateORWithin() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -429,6 +434,7 @@ struct CullingSessionFilterAndSortTests {
         let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let s1 = try #require(session.items.first { $0.baseName == "S1" })
         let s2 = try #require(session.items.first { $0.baseName == "S2" })

@@ -12,6 +12,7 @@ import Testing
 import UniformTypeIdentifiers
 @testable import Pickture
 
+@Suite("CullingSession Discovery and Cache Tests", .serialized)
 @MainActor
 struct CullingSessionDiscoveryAndCacheTests {
 
@@ -304,11 +305,11 @@ struct CullingSessionDiscoveryAndCacheTests {
         let data2 = try #require(await session.loadThumbnailData(for: item2))
         #expect(!data1.isEmpty)
         #expect(!data2.isEmpty)
-        #expect(session.isThumbnailCached(for: item1) == true)
-        #expect(session.isThumbnailCached(for: item2) == true)
+        #expect(await session.isThumbnailCached(for: item1) == true)
+        #expect(await session.isThumbnailCached(for: item2) == true)
 
         let twoItemsByteLimit = Int64(data1.count + data2.count)
-        session.setCacheSizeLimitBytes(twoItemsByteLimit)
+        await session.setCacheSizeLimitBytes(twoItemsByteLimit)
         #expect(session.mediaCacheTotalBytes == twoItemsByteLimit)
 
         // Touch item1 so item1 becomes most-recently-used and item2 becomes least-recently-used
@@ -318,9 +319,9 @@ struct CullingSessionDiscoveryAndCacheTests {
         let data3 = try #require(await session.loadThumbnailData(for: item3))
         #expect(!data3.isEmpty)
         #expect(session.mediaCacheTotalBytes <= twoItemsByteLimit)
-        #expect(session.isThumbnailCached(for: item1) == true)
-        #expect(session.isThumbnailCached(for: item2) == false)
-        #expect(session.isThumbnailCached(for: item3) == true)
+        #expect(await session.isThumbnailCached(for: item1) == true)
+        #expect(await session.isThumbnailCached(for: item2) == false)
+        #expect(await session.isThumbnailCached(for: item3) == true)
     }
 
     @Test("clearMediaCache purges all cached thumbnails without deleting pending edits in MetadataSyncStore")
@@ -339,7 +340,7 @@ struct CullingSessionDiscoveryAndCacheTests {
         let thumbData = try #require(await session.loadThumbnailData(for: item))
         #expect(!thumbData.isEmpty)
         #expect(session.mediaCacheTotalBytes > 0)
-        #expect(session.isThumbnailCached(for: item) == true)
+        #expect(await session.isThumbnailCached(for: item) == true)
 
         // Record an unsynchronized pending edit in MetadataSyncStore
         let pendingMetadata = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green)
@@ -348,16 +349,17 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(session.syncState(for: item) == .pendingWrite)
 
         // Clear MediaCache explicitly (Settings -> Clear Cache)
-        session.clearMediaCache()
+        await session.clearMediaCache()
 
         // Verify MediaCache is completely empty
         #expect(session.mediaCacheTotalBytes == 0)
-        #expect(session.isThumbnailCached(for: item) == false)
+        #expect(await session.isThumbnailCached(for: item) == false)
 
         // Verify MetadataSyncStore still holds the pending edit, including across a new CullingSession restart
         #expect(session.curationMetadata(for: item) == pendingMetadata)
         #expect(session.syncState(for: item) == .pendingWrite)
 
+        await session.waitForPendingStoreWrites()
         let restartedSession = CullingSession(storageRootURL: storeURL)
         try restartedSession.openFolder(at: root)
         let restartedItem = try #require(restartedSession.items.first)
@@ -459,12 +461,12 @@ struct CullingSessionDiscoveryAndCacheTests {
         #expect(pairedDNGItem.preferredFile(for: session.previewSource).fileExtension.uppercased() == "DNG")
         let cachedPairedRAWThumb = try #require(await session.loadThumbnailData(for: pairedDNGItem))
         #expect(!cachedPairedRAWThumb.isEmpty)
-        #expect(session.isThumbnailCached(for: pairedDNGItem) == true)
+        #expect(await session.isThumbnailCached(for: pairedDNGItem) == true)
 
         let unembeddedDNGItem = try #require(session.items.first { $0.baseName == "DSC1000_UNEMBEDDED" })
         let cachedFullDecodeThumb = try #require(await session.loadThumbnailData(for: unembeddedDNGItem))
         #expect(!cachedFullDecodeThumb.isEmpty)
-        #expect(session.isThumbnailCached(for: unembeddedDNGItem) == true)
+        #expect(await session.isThumbnailCached(for: unembeddedDNGItem) == true)
 
         // 4. Verify user quota clamping (250 MB – 20 GB)
         session.setUserConfiguredCacheSizeLimitBytes(10 * 1_024 * 1_024) // below 250 MB
@@ -823,7 +825,7 @@ struct CullingSessionDiscoveryAndCacheTests {
     }
 
     @Test("MediaCache readData updates LRU in memory without writing to disk synchronously on every read")
-    func mediaCacheReadDataDoesNotWriteToDiskSynchronously() throws {
+    func mediaCacheReadDataDoesNotWriteToDiskSynchronously() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -838,18 +840,18 @@ struct CullingSessionDiscoveryAndCacheTests {
         let data2 = Data(repeating: 0xBB, count: 100)
         let data3 = Data(repeating: 0xCC, count: 100)
 
-        cache.storeData(data1, forKey: key1)
-        cache.storeData(data2, forKey: key2)
-        cache.flushIndexImmediately()
+        await cache.storeData(data1, forKey: key1)
+        await cache.storeData(data2, forKey: key2)
+        await cache.flushIndexImmediately()
 
-        #expect(cache.contains(key: key1) == true)
-        #expect(cache.contains(key: key2) == true)
+        #expect(await cache.contains(key: key1) == true)
+        #expect(await cache.contains(key: key2) == true)
 
         let indexURL = cache.indexFileURL
         let diskIndexDataBefore = try Data(contentsOf: indexURL)
 
         // Read key1: moves key1 to most recently used, leaving key2 as least recently used
-        let readResult = cache.readData(forKey: key1)
+        let readResult = await cache.readData(forKey: key1)
         #expect(readResult == data1)
 
         // Verify that disk index was NOT written synchronously during readData:
@@ -860,13 +862,13 @@ struct CullingSessionDiscoveryAndCacheTests {
         // Store third item: exceeding 250-byte quota triggers LRU eviction.
         // Because key1 was read, key2 is the least recently used and MUST be evicted,
         // while key1 and key3 remain!
-        cache.storeData(data3, forKey: key3)
-        #expect(cache.contains(key: key1) == true)
-        #expect(cache.contains(key: key2) == false)
-        #expect(cache.contains(key: key3) == true)
+        await cache.storeData(data3, forKey: key3)
+        #expect(await cache.contains(key: key1) == true)
+        #expect(await cache.contains(key: key2) == false)
+        #expect(await cache.contains(key: key3) == true)
 
         // After flushing immediately, disk reflects updated index
-        cache.flushIndexImmediately()
+        await cache.flushIndexImmediately()
         let diskIndexDataFlushed = try Data(contentsOf: indexURL)
         #expect(diskIndexDataFlushed != diskIndexDataBefore)
     }

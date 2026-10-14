@@ -30,6 +30,31 @@ public enum StorageVolumeProfile: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    public var defaultSidecarWriteWorkers: Int {
+        switch self {
+        case .internalSSD: return 4
+        case .removableMedia: return 2
+        case .networkShare: return 1
+        }
+    }
+
+    public var defaultExifPreloadWorkers: Int {
+        switch self {
+        case .internalSSD: return 6
+        case .removableMedia: return 4
+        case .networkShare: return 2
+        }
+    }
+
+    public var exifPreloadWorkers: Int {
+        defaultExifPreloadWorkers
+    }
+
+    public func effectiveExifPreloadWorkers(isHighSpeedLAN: Bool) -> Int {
+        if self == .networkShare && isHighSpeedLAN { return 4 }
+        return defaultExifPreloadWorkers
+    }
+
     public var defaultPrefetchWorkers: (baseline: Int, max: Int) {
         switch self {
         case .internalSSD: return (baseline: 2, max: 6)

@@ -9,6 +9,10 @@ nonisolated enum SidecarCodec {
     // MARK: - Sidecar Path Discovery & Targets
 
     static func resolveSidecarReadURL(for item: MediaItem) -> URL? {
+        resolveSidecarReadURLSync(for: item)
+    }
+
+    private static func resolveSidecarReadURLSync(for item: MediaItem) -> URL? {
         let fm = FileManager.default
         let dir = item.directoryURL.standardizedFileURL
 
@@ -88,8 +92,16 @@ nonisolated enum SidecarCodec {
 
     // MARK: - Safe Disk I/O & Invalidation Helpers
 
+    static func readData(from url: URL) async -> Data? {
+        try? Data(contentsOf: url)
+    }
+
     static func readData(from url: URL) -> Data? {
         try? Data(contentsOf: url)
+    }
+
+    static func resolveSidecarReadURL(for item: MediaItem) async -> URL? {
+        resolveSidecarReadURLSync(for: item)
     }
 
     // MARK: - XMP Parsing
@@ -107,7 +119,7 @@ nonisolated enum SidecarCodec {
         let fm = FileManager.default
         var actualWritten: [URL] = []
         for url in targets {
-            let existingData = readData(from: url)
+            let existingData = try? Data(contentsOf: url)
             let updatedData = try update(xmlData: existingData, with: curation)
             let dir = url.deletingLastPathComponent()
             if !fm.fileExists(atPath: dir.path) {
@@ -121,56 +133,54 @@ nonisolated enum SidecarCodec {
 
     @discardableResult
     static func writeCoordinatedWithRetry(data: Data, to url: URL) async throws -> URL {
-        try await Task.detached(priority: .utility) {
-            let coordinator = NSFileCoordinator(filePresenter: nil)
-            let fm = FileManager.default
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        let fm = FileManager.default
 
-            struct AttemptResult {
-                var coordError: NSError?
-                var writeError: Error?
+        struct AttemptResult {
+            var coordError: NSError?
+            var writeError: Error?
 
-                var error: Error? {
-                    coordError ?? writeError
+            var error: Error? {
+                coordError ?? writeError
+            }
+        }
+
+        func attemptWrite(useReplacing: Bool) -> AttemptResult {
+            var result = AttemptResult()
+            let options: NSFileCoordinator.WritingOptions = useReplacing ? [.forReplacing] : []
+            coordinator.coordinate(writingItemAt: url, options: options, error: &result.coordError) { targetURL in
+                do {
+                    try data.write(to: targetURL, options: [])
+                } catch {
+                    result.writeError = error
                 }
             }
+            return result
+        }
 
-            func attemptWrite(useReplacing: Bool) -> AttemptResult {
-                var result = AttemptResult()
-                let options: NSFileCoordinator.WritingOptions = useReplacing ? [.forReplacing] : []
-                coordinator.coordinate(writingItemAt: url, options: options, error: &result.coordError) { targetURL in
-                    do {
-                        try data.write(to: targetURL, options: [])
-                    } catch {
-                        result.writeError = error
-                    }
+        let initialExists = fm.fileExists(atPath: url.path)
+        var lastAttempt = attemptWrite(useReplacing: !initialExists)
+
+        if lastAttempt.error == nil {
+            return url
+        }
+
+        let error = lastAttempt.error!
+        if isStaleOrMissingFileError(error) {
+            // Progressive backoff with .forReplacing
+            let retryDelays: [UInt64] = [50_000_000, 150_000_000]
+            for delay in retryDelays {
+                try? await Task.sleep(nanoseconds: delay)
+                let retryAttempt = attemptWrite(useReplacing: true)
+                if retryAttempt.error == nil {
+                    return url
                 }
-                return result
+                lastAttempt = retryAttempt
             }
+        }
 
-            let initialExists = fm.fileExists(atPath: url.path)
-            var lastAttempt = attemptWrite(useReplacing: !initialExists)
-
-            if lastAttempt.error == nil {
-                return url
-            }
-
-            let error = lastAttempt.error!
-            if isStaleOrMissingFileError(error) {
-                // Progressive backoff with .forReplacing
-                let retryDelays: [UInt64] = [50_000_000, 150_000_000]
-                for delay in retryDelays {
-                    try? await Task.sleep(nanoseconds: delay)
-                    let retryAttempt = attemptWrite(useReplacing: true)
-                    if retryAttempt.error == nil {
-                        return url
-                    }
-                    lastAttempt = retryAttempt
-                }
-            }
-
-            let finalError = lastAttempt.error ?? error
-            throw finalError
-        }.value
+        let finalError = lastAttempt.error ?? error
+        throw finalError
     }
 
     static func hasPOSIXErrorCode(_ error: Error, code: Int) -> Bool {
@@ -1007,37 +1017,7 @@ final class XMPDocumentTree {
     }
 
     private static func parseDate(_ string: String) -> Date? {
-        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return nil }
-
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
-        if let d = isoFormatter.date(from: trimmed) {
-            return d
-        }
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds, .withDashSeparatorInDate, .withColonSeparatorInTime]
-        if let d = isoFormatter.date(from: trimmed) {
-            return d
-        }
-
-        let customFormatter = DateFormatter()
-        customFormatter.locale = Locale(identifier: "en_US_POSIX")
-        customFormatter.timeZone = TimeZone(secondsFromGMT: 0)
-
-        let formats = [
-            "yyyy:MM:dd HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm:ssZ",
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-            "yyyy-MM-dd"
-        ]
-        for f in formats {
-            customFormatter.dateFormat = f
-            if let d = customFormatter.date(from: trimmed) {
-                return d
-            }
-        }
-        return nil
+        ExifHeaderExtractor.parseDate(string)
     }
 }
 

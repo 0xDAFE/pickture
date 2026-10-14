@@ -115,7 +115,9 @@ struct CullingSessionSafeCloseAndNavigationTests {
         #expect(session.isAccessingFolder == false)
 
         // Verify mutations remain intact in durable MetadataSyncStore journal on disk
-        let persistedRecord = try #require(session.metadataSyncStore.record(for: item.id))
+        await session.waitForPendingStoreWrites()
+        let storeRecord = await session.metadataSyncStore.record(for: item.id)
+        let persistedRecord = try #require(storeRecord)
         #expect(persistedRecord.syncState == .pendingWrite)
         #expect(persistedRecord.metadata.starRating == 5)
         #expect(persistedRecord.metadata.pickFlag == .picked)

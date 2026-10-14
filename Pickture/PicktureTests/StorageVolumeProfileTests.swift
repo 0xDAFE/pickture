@@ -22,6 +22,8 @@ struct StorageVolumeProfileTests {
         #expect(ssd.prefetchMinWorkers == 2)
         #expect(ssd.prefetchMaxWorkers == 6)
         #expect(ssd.prefetchLookaheadDepth == 8)
+        #expect(ssd.defaultSidecarWriteWorkers == 4)
+        #expect(ssd.defaultExifPreloadWorkers == 6)
 
         let removable = StorageVolumeProfile.removableMedia
         #expect(removable.maxConcurrentThumbnailGenerations == 3)
@@ -29,6 +31,8 @@ struct StorageVolumeProfileTests {
         #expect(removable.prefetchMinWorkers == 2)
         #expect(removable.prefetchMaxWorkers == 3)
         #expect(removable.prefetchLookaheadDepth == 4)
+        #expect(removable.defaultSidecarWriteWorkers == 2)
+        #expect(removable.defaultExifPreloadWorkers == 4)
 
         let network = StorageVolumeProfile.networkShare
         #expect(network.maxConcurrentThumbnailGenerations == 2)
@@ -36,6 +40,8 @@ struct StorageVolumeProfileTests {
         #expect(network.prefetchMinWorkers == 1)
         #expect(network.prefetchMaxWorkers == 2)
         #expect(network.prefetchLookaheadDepth == 3)
+        #expect(network.defaultSidecarWriteWorkers == 1)
+        #expect(network.defaultExifPreloadWorkers == 2)
     }
 
     @Test("High-Speed LAN override expands network share limits while leaving local SSD unchanged")
@@ -46,11 +52,13 @@ struct StorageVolumeProfileTests {
         #expect(network.effectivePrefetchMinWorkers(isHighSpeedLAN: true) == 2)
         #expect(network.effectivePrefetchMaxWorkers(isHighSpeedLAN: true) == 4)
         #expect(network.effectivePrefetchLookahead(isHighSpeedLAN: true) == 6)
+        #expect(network.effectiveExifPreloadWorkers(isHighSpeedLAN: true) == 4)
 
         // Internal SSD is unaffected by high speed LAN toggle
         let ssd = StorageVolumeProfile.internalSSD
         #expect(ssd.effectiveThumbnailWorkers(isHighSpeedLAN: true) == 6)
         #expect(ssd.effectiveHeavyDecodes(isHighSpeedLAN: true) == 4)
+        #expect(ssd.effectiveExifPreloadWorkers(isHighSpeedLAN: true) == 6)
     }
 
     // MARK: - StorageVolumeDetector

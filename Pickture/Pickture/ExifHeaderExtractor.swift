@@ -31,26 +31,73 @@ enum ExifHeaderExtractor {
     }
 
     /// Asynchronously extracts ExifMetadata in batch off the caller's actor context,
-    /// supporting pause/resume checks during active culling navigation and streaming progress.
+    /// using a bounded TaskGroup worker pool that dynamically scales based on StorageVolumeProfile,
+    /// while supporting pause/resume checks during active culling navigation and streaming progress.
     nonisolated static func extractBatch(
         for items: [MediaItem],
+        volumeProfile: StorageVolumeProfile = .internalSSD,
         isPaused: @escaping @Sendable () async -> Bool = { false },
         onProgress: (@Sendable (Int, String, ExifMetadata) async -> Void)? = nil
     ) async -> [(String, ExifMetadata)] {
-        var results: [(String, ExifMetadata)] = []
+        await extractBatchInternal(
+            for: items,
+            volumeProfile: volumeProfile,
+            isPaused: isPaused,
+            extractItem: { extractHeaderExif(for: $0) },
+            onProgress: onProgress
+        )
+    }
+
+    internal nonisolated static func extractBatchInternal(
+        for items: [MediaItem],
+        volumeProfile: StorageVolumeProfile = .internalSSD,
+        isPaused: @escaping @Sendable () async -> Bool = { false },
+        extractItem: @escaping @Sendable (MediaItem) async -> ExifMetadata,
+        onProgress: (@Sendable (Int, String, ExifMetadata) async -> Void)? = nil
+    ) async -> [(String, ExifMetadata)] {
+        guard !items.isEmpty else { return [] }
+
+        var results: [(String, ExifMetadata)?] = Array(repeating: nil, count: items.count)
+        let maxWorkers = max(1, volumeProfile.defaultExifPreloadWorkers)
+        var nextIndex = 0
         var processed = 0
-        for item in items {
-            if Task.isCancelled { break }
-            while await isPaused() && !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 100_000_000)
+
+        await withTaskGroup(of: (Int, String, ExifMetadata)?.self) { group in
+            func enqueueNextWorker(into group: inout TaskGroup<(Int, String, ExifMetadata)?>) {
+                guard !Task.isCancelled, nextIndex < items.count else { return }
+                let index = nextIndex
+                let item = items[index]
+                nextIndex += 1
+                group.addTask {
+                    while await isPaused() && !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                    }
+                    if Task.isCancelled { return nil }
+                    let exif = await extractItem(item)
+                    return (index, item.id, exif)
+                }
             }
-            if Task.isCancelled { break }
-            let exif = extractHeaderExif(for: item)
-            results.append((item.id, exif))
-            processed += 1
-            await onProgress?(processed, item.id, exif)
+
+            let initialCount = min(maxWorkers, items.count)
+            while nextIndex < initialCount {
+                enqueueNextWorker(into: &group)
+            }
+
+            for await taskResult in group {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    break
+                }
+                if let (index, itemID, exif) = taskResult {
+                    results[index] = (itemID, exif)
+                    processed += 1
+                    await onProgress?(processed, itemID, exif)
+                }
+                enqueueNextWorker(into: &group)
+            }
         }
-        return results
+
+        return results.compactMap { $0 }
     }
 
     /// Header-only extraction from a single file URL using CGImageSourceCopyPropertiesAtIndex
@@ -156,39 +203,151 @@ enum ExifHeaderExtractor {
         )
     }
 
-    private nonisolated static func parseDate(_ string: String) -> Date? {
+    nonisolated static func parseDate(_ string: String) -> Date? {
+        ExifDateParser.parse(string)
+    }
+}
+
+/// Thread-safe cached date parsers for EXIF and ISO-8601 metadata strings.
+/// Eliminates per-call heap allocation of `DateFormatter` and `ISO8601DateFormatter`.
+enum ExifDateParser {
+    private static let lock = NSLock()
+
+    // 1. Thread-safe cached ISO8601DateFormatter instances (read operations are thread-safe)
+    private static let iso8601InternetFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
+        return f
+    }()
+
+    private static let iso8601FractionalFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds, .withDashSeparatorInDate, .withColonSeparatorInTime]
+        return f
+    }()
+
+    // 2. Pre-configured dedicated DateFormatter instances for EXIF and fallback patterns
+    private static let exifDateTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return f
+    }()
+
+    private static let exifDateTimeTZFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy:MM:dd HH:mm:ssXXX"
+        return f
+    }()
+
+    private static let exifDateOnlyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy:MM:dd"
+        return f
+    }()
+
+    private static let isoNoTZFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        return f
+    }()
+
+    private static let isoZFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+        return f
+    }()
+
+    private static let isoXXXFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ssXXX"
+        return f
+    }()
+
+    private static let spaceDateTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+
+    private static let dateOnlyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    static func parse(_ string: String) -> Date? {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return nil }
+        guard !trimmed.isEmpty else { return nil }
 
-        // Standard ISO8601
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
-        if let d = isoFormatter.date(from: trimmed) {
-            return d
+        // Fast path 1: Modern Swift Foundation ISO-8601 parse strategy
+        if let date = try? Date(trimmed, strategy: .iso8601) {
+            return date
         }
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds, .withDashSeparatorInDate, .withColonSeparatorInTime]
-        if let d = isoFormatter.date(from: trimmed) {
-            return d
+        if let date = try? Date(trimmed, strategy: .iso8601.year().month().day().time(includingFractionalSeconds: true)) {
+            return date
         }
 
-        // EXIF Date format yyyy:MM:dd HH:mm:ss
-        let customFormatter = DateFormatter()
-        customFormatter.locale = Locale(identifier: "en_US_POSIX")
-        customFormatter.timeZone = TimeZone(secondsFromGMT: 0)
-        let formats = [
-            "yyyy:MM:dd HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm:ssZ",
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-            "yyyy-MM-dd HH:mm:ss",
-            "yyyy-MM-dd"
-        ]
-        for f in formats {
-            customFormatter.dateFormat = f
-            if let d = customFormatter.date(from: trimmed) {
-                return d
+        // Fast path 2: Standard EXIF colon date format: "yyyy:MM:dd HH:mm:ss"
+        if trimmed.count >= 10 {
+            let fifthCharIndex = trimmed.index(trimmed.startIndex, offsetBy: 4)
+            if trimmed[fifthCharIndex] == ":" {
+                lock.lock()
+                defer { lock.unlock() }
+                if let d = exifDateTimeFormatter.date(from: trimmed) {
+                    return d
+                }
+                if let d = exifDateTimeTZFormatter.date(from: trimmed) {
+                    return d
+                }
+                if let d = exifDateOnlyFormatter.date(from: trimmed) {
+                    return d
+                }
             }
         }
+
+        // Fast path 3: Cached ISO8601DateFormatter
+        if let d = iso8601InternetFormatter.date(from: trimmed) {
+            return d
+        }
+        if let d = iso8601FractionalFormatter.date(from: trimmed) {
+            return d
+        }
+
+        // Fast path 4: Fallback ISO and standard formatters
+        lock.lock()
+        defer { lock.unlock() }
+        if let d = isoNoTZFormatter.date(from: trimmed) {
+            return d
+        }
+        if let d = isoZFormatter.date(from: trimmed) {
+            return d
+        }
+        if let d = isoXXXFormatter.date(from: trimmed) {
+            return d
+        }
+        if let d = spaceDateTimeFormatter.date(from: trimmed) {
+            return d
+        }
+        if let d = dateOnlyFormatter.date(from: trimmed) {
+            return d
+        }
+
         return nil
     }
 }

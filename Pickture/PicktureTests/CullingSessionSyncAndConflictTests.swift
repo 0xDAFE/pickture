@@ -15,7 +15,7 @@ struct CullingSessionSyncAndConflictTests {
     // MARK: - Slice 1: Optimistic Curation & BaseSnapshot Persistence
 
     @Test("Assigning StarRating, PickFlag, or ColorLabel updates UI state immediately and persists PendingWrite with BaseSnapshot in MetadataSyncStore")
-    func optimisticCurationUpdatesUIAndPersistsPendingWriteWithBaseSnapshot() throws {
+    func optimisticCurationUpdatesUIAndPersistsPendingWriteWithBaseSnapshot() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -33,6 +33,7 @@ struct CullingSessionSyncAndConflictTests {
         session.isSyncSuspended = true
 
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
         #expect(session.items.count == 1)
 
         let item = try #require(session.items.first)
@@ -47,6 +48,7 @@ struct CullingSessionSyncAndConflictTests {
         session.setStarRating(5, for: item)
         session.setPickFlag(.picked, for: item)
         session.setColorLabel(.green, for: item)
+        await session.waitForPendingStoreWrites()
 
         let expectedOptimistic = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green)
         #expect(session.curationMetadata(for: item) == expectedOptimistic)
@@ -54,7 +56,8 @@ struct CullingSessionSyncAndConflictTests {
         #expect(session.pendingWritesCount == 1)
 
         // Verify MetadataSyncStore holds the pending write alongside the item's BaseSnapshot
-        let record = try #require(session.metadataSyncStore.record(for: item.id))
+        let storeRecord = await session.metadataSyncStore.record(for: item.id)
+        let record = try #require(storeRecord)
         #expect(record.syncState == .pendingWrite)
         #expect(record.metadata == expectedOptimistic)
         #expect(record.baseSnapshot?.metadata == initialMetadata)
@@ -64,7 +67,7 @@ struct CullingSessionSyncAndConflictTests {
     // MARK: - Slice 2: Durability Across App Restarts & Cache Purge Isolation
 
     @Test("MetadataSyncStore survives simulated app restarts and is unaffected by MediaCache quota changes or clearMediaCache")
-    func metadataSyncStoreSurvivesRestartsAndCachePurges() throws {
+    func metadataSyncStoreSurvivesRestartsAndCachePurges() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -81,6 +84,7 @@ struct CullingSessionSyncAndConflictTests {
         let session1 = CullingSession(storageRootURL: storeRoot)
         session1.isSyncSuspended = true
         try session1.openFolder(at: root)
+        await session1.waitForBackgroundHydration()
 
         let item1 = try #require(session1.items.first)
         session1.setStarRating(4, for: item1)
@@ -92,17 +96,20 @@ struct CullingSessionSyncAndConflictTests {
         #expect(session1.syncState(for: item1) == .pendingWrite)
 
         // Clear MediaCache and adjust cache limit
-        session1.clearMediaCache()
+        await session1.clearMediaCache()
         session1.setUserConfiguredCacheSizeLimitBytes(MediaCache.minUserQuotaBytes)
 
         #expect(session1.mediaCacheTotalBytes == 0)
         #expect(session1.curationMetadata(for: item1) == pendingExpected)
         #expect(session1.syncState(for: item1) == .pendingWrite)
 
+        await session1.waitForPendingStoreWrites()
+
         // Session 2: simulate cold app restart with a brand new CullingSession
         let session2 = CullingSession(storageRootURL: storeRoot)
         session2.isSyncSuspended = true
         try session2.openFolder(at: root)
+        await session2.waitForBackgroundHydration()
 
         let item2 = try #require(session2.items.first)
         #expect(session2.syncState(for: item2) == .pendingWrite)
@@ -127,6 +134,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         #expect(session.syncState(for: item) == .synced)
@@ -190,6 +198,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         #expect(session.syncState(for: item) == .synced)
@@ -247,6 +256,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         session.setStarRating(5, for: item) // local = 5 stars, unflagged, none
@@ -314,6 +324,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item1 = try #require(session.items.first { $0.baseName == "BATCH_1" })
         let item2 = try #require(session.items.first { $0.baseName == "BATCH_2" })
@@ -394,6 +405,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         let curation = CurationMetadata(starRating: 5, pickFlag: .picked, colorLabel: .green)
@@ -446,6 +458,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item1 = try #require(session.items.first { $0.baseName == "REENTRANT_1" })
         let item2 = try #require(session.items.first { $0.baseName == "REENTRANT_2" })
@@ -508,6 +521,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         #expect(session.syncState(for: item) == .synced)
@@ -552,6 +566,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         #expect(session.syncState(for: item) == .synced)
@@ -563,6 +578,7 @@ struct CullingSessionSyncAndConflictTests {
 
         // Refresh folder in Pickture
         try await session.refreshFolder()
+        await session.waitForBackgroundHydration()
 
         let refreshedItem = try #require(session.items.first)
         // Expected: sidecar is gone, so curation should be reset to default / empty CurationMetadata(),
@@ -589,6 +605,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
         session.setStarRating(5, for: item) // pending mutation
@@ -630,6 +647,7 @@ struct CullingSessionSyncAndConflictTests {
         let session = CullingSession(storageRootURL: storeRoot)
         session.isSyncSuspended = true
         try session.openFolder(at: root)
+        await session.waitForBackgroundHydration()
 
         let item = try #require(session.items.first)
 
@@ -659,7 +677,7 @@ struct CullingSessionSyncAndConflictTests {
     }
 
     @Test("SyncError items preserve local mutations on reload and evaluate conflicts if external XMP appears")
-    func syncErrorPreservesMutationsAndDetectsConflictOnReload() throws {
+    func syncErrorPreservesMutationsAndDetectsConflictOnReload() async throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -674,22 +692,25 @@ struct CullingSessionSyncAndConflictTests {
         try initialXMP.write(to: xmpURL)
 
         let session1 = CullingSession(storageRootURL: storeRoot)
+        session1.isSyncSuspended = true
         try session1.openFolder(at: root)
+        await session1.waitForBackgroundHydration()
 
         let item1 = try #require(session1.items.first)
         session1.setStarRating(5, for: item1)
         session1.setPickFlag(.picked, for: item1)
+        await session1.waitForPendingStoreWrites()
 
         // Delete the XMP on disk to simulate external deletion / ESTALE condition
         try FileManager.default.removeItem(at: xmpURL)
 
         // Mark syncState as .syncError in store
-        let syncStore = MetadataSyncStore(storeDirectoryURL: storeRoot)
-        syncStore.updateSyncState(.syncError, for: item1.id)
+        await session1.metadataSyncStore.updateSyncState(.syncError, for: item1.id)
 
         // Case 1: Re-open folder with deleted XMP while in syncError -> local mutations must NOT be erased
         let session2 = CullingSession(storageRootURL: storeRoot)
         try session2.openFolder(at: root)
+        await session2.waitForBackgroundHydration()
 
         let item2 = try #require(session2.items.first)
         #expect(session2.curationMetadata(for: item2).starRating == 5)
@@ -703,6 +724,7 @@ struct CullingSessionSyncAndConflictTests {
         // Reopen folder again: must detect conflict with the newly appeared external XMP!
         let session3 = CullingSession(storageRootURL: storeRoot)
         try session3.openFolder(at: root)
+        await session3.waitForBackgroundHydration()
 
         let item3 = try #require(session3.items.first)
         #expect(session3.syncState(for: item3) == .conflicted)

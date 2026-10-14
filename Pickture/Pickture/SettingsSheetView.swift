@@ -6,6 +6,7 @@ struct SettingsSheetView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        @Bindable var session = session
         NavigationStack {
             Form {
                 Section {
@@ -54,7 +55,9 @@ struct SettingsSheetView: View {
                     }
 
                     Button(role: .destructive) {
-                        session.clearMediaCache()
+                        Task {
+                            await session.clearMediaCache()
+                        }
                     } label: {
                         Label("Clear Cache", systemImage: "trash")
                     }
@@ -140,6 +143,24 @@ struct SettingsSheetView: View {
 
                     Toggle("Subfolder Mode", isOn: $session.isRecursiveSubfolderMode)
                 }
+
+                Section {
+                    Button(role: .destructive) {
+                        if session.pendingWritesCount > 0 {
+                            session.isResetSyncStoreAlertPresented = true
+                        } else {
+                            Task {
+                                await session.resetMetadataSyncStore()
+                            }
+                        }
+                    } label: {
+                        Label("Reset Metadata Sync Store", systemImage: "arrow.counterclockwise")
+                    }
+                } header: {
+                    Text("Advanced / Troubleshooting")
+                } footer: {
+                    Text("Purges the internal SQLite metadata sync database without deleting sidecars (.xmp) or media files on disk. If unwritten mutations exist, a confirmation warning will be shown.")
+                }
             }
             .formStyle(.grouped)
             .navigationTitle("Pickture Settings")
@@ -151,6 +172,23 @@ struct SettingsSheetView: View {
                         }
                     }
                 }
+            }
+            .confirmationDialog(
+                "Reset Metadata Sync Store?",
+                isPresented: $session.isResetSyncStoreAlertPresented,
+                titleVisibility: .visible
+            ) {
+                Button("Reset Sync Store", role: .destructive) {
+                    session.isResetSyncStoreAlertPresented = false
+                    Task {
+                        await session.resetMetadataSyncStore()
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    session.isResetSyncStoreAlertPresented = false
+                }
+            } message: {
+                Text("You have \(session.pendingWritesCount) unwritten rating(s) or flag(s) that have not yet synced to sidecars. Resetting will discard these unwritten changes.")
             }
         }
         .frame(minWidth: 440, minHeight: 380)
