@@ -117,42 +117,157 @@ public enum StorageVolumeProfile: String, CaseIterable, Codable, Sendable {
     }
 }
 
-/// Automatically inspects storage volume attributes (`volumeIsInternalKey`, `volumeIsLocalKey`)
-/// to determine the appropriate StorageVolumeProfile.
+#if canImport(Darwin)
+import Darwin
+#endif
+
+/// Automatically inspects storage volume attributes (`volumeIsInternalKey`, `volumeIsLocalKey`, etc.)
+/// and Darwin statfs to determine the appropriate StorageVolumeProfile.
 public struct StorageVolumeDetector {
+
+    public struct VolumeAttributes: Sendable {
+        public var path: String
+        public var volumeIsLocal: Bool?
+        public var volumeIsInternal: Bool?
+        public var volumeIsRemovable: Bool?
+        public var volumeIsEjectable: Bool?
+        public var volumeTypeName: String?
+        public var volumeURLForRemounting: URL?
+        public var volumeMountFromLocation: String?
+        public var statfsIsLocal: Bool?
+        public var statfsFSTypeName: String?
+
+        public init(
+            path: String,
+            volumeIsLocal: Bool? = nil,
+            volumeIsInternal: Bool? = nil,
+            volumeIsRemovable: Bool? = nil,
+            volumeIsEjectable: Bool? = nil,
+            volumeTypeName: String? = nil,
+            volumeURLForRemounting: URL? = nil,
+            volumeMountFromLocation: String? = nil,
+            statfsIsLocal: Bool? = nil,
+            statfsFSTypeName: String? = nil
+        ) {
+            self.path = path
+            self.volumeIsLocal = volumeIsLocal
+            self.volumeIsInternal = volumeIsInternal
+            self.volumeIsRemovable = volumeIsRemovable
+            self.volumeIsEjectable = volumeIsEjectable
+            self.volumeTypeName = volumeTypeName
+            self.volumeURLForRemounting = volumeURLForRemounting
+            self.volumeMountFromLocation = volumeMountFromLocation
+            self.statfsIsLocal = statfsIsLocal
+            self.statfsFSTypeName = statfsFSTypeName
+        }
+    }
+
+    public static func profile(for attributes: VolumeAttributes) -> StorageVolumeProfile {
+        // Tier 1: Foundation URLResourceKey checks
+        if let isLocal = attributes.volumeIsLocal, !isLocal {
+            return .networkShare
+        }
+        if attributes.volumeURLForRemounting != nil {
+            return .networkShare
+        }
+        if let typeName = attributes.volumeTypeName?.lowercased() {
+            if typeName == "smbfs" || typeName == "nfs" || typeName == "webdav" || typeName == "afpfs" || typeName.contains("smb") {
+                return .networkShare
+            }
+        }
+        if let mountLocation = attributes.volumeMountFromLocation?.lowercased() {
+            if mountLocation.hasPrefix("//") || mountLocation.contains("smb:") || mountLocation.contains("nfs:") || mountLocation.contains("afp:") {
+                return .networkShare
+            }
+        }
+
+        // Tier 2: Darwin POSIX statfs checks
+        if let statfsLocal = attributes.statfsIsLocal, !statfsLocal {
+            return .networkShare
+        }
+        if let fsName = attributes.statfsFSTypeName?.lowercased() {
+            if fsName == "smbfs" || fsName == "nfs" || fsName == "webdav" || fsName == "afpfs" || fsName.contains("smb") {
+                return .networkShare
+            }
+        }
+
+        // Fallback: Path substrings (e.g. iPadOS FileProvider smbclientd or LiveFiles)
+        let pathLower = attributes.path.lowercased()
+        if pathLower.contains("smbclientd") || pathLower.contains("livefiles") || pathLower.hasPrefix("/net/") || (pathLower.hasPrefix("/volumes/") && pathLower.contains("smb")) {
+            return .networkShare
+        }
+
+        // Tier 3: Local hardware classification
+        if let isInternal = attributes.volumeIsInternal, isInternal {
+            return .internalSSD
+        }
+        if let isRemovable = attributes.volumeIsRemovable, isRemovable {
+            return .removableMedia
+        }
+        if let isEjectable = attributes.volumeIsEjectable, isEjectable {
+            return .removableMedia
+        }
+        if let isLocal = attributes.volumeIsLocal, isLocal {
+            if attributes.path.hasPrefix("/Volumes/") {
+                return .removableMedia
+            }
+            return .internalSSD
+        }
+
+        if attributes.path.hasPrefix("/Volumes/") {
+            return .removableMedia
+        }
+        return .internalSSD
+    }
+
     public static func profile(for url: URL) -> StorageVolumeProfile {
         detectProfile(for: url)
     }
 
     public static func detectProfile(for url: URL) -> StorageVolumeProfile {
+        let attrs = queryAttributes(for: url)
+        return profile(for: attrs)
+    }
+
+    public static func queryAttributes(for url: URL) -> VolumeAttributes {
         let standardized = url.standardizedFileURL
-        do {
-            let values = try standardized.resourceValues(forKeys: [
-                .volumeIsInternalKey,
-                .volumeIsLocalKey
-            ])
-            if let isLocal = values.volumeIsLocal, !isLocal {
-                return .networkShare
-            }
-            if let isInternal = values.volumeIsInternal, isInternal {
-                return .internalSSD
-            }
-            if let isLocal = values.volumeIsLocal, isLocal {
-                return .removableMedia
-            }
-        } catch {
-            // Fallback heuristics
+        var attrs = VolumeAttributes(path: standardized.path)
+
+        // Query Foundation resource keys
+        if let values = try? standardized.resourceValues(forKeys: [
+            .volumeIsInternalKey,
+            .volumeIsLocalKey,
+            .volumeIsRemovableKey,
+            .volumeIsEjectableKey,
+            .volumeTypeNameKey,
+            .volumeURLForRemountingKey,
+            .volumeMountFromLocationKey
+        ]) {
+            attrs.volumeIsLocal = values.volumeIsLocal
+            attrs.volumeIsInternal = values.volumeIsInternal
+            attrs.volumeIsRemovable = values.volumeIsRemovable
+            attrs.volumeIsEjectable = values.volumeIsEjectable
+            attrs.volumeTypeName = values.volumeTypeName
+            attrs.volumeURLForRemounting = values.volumeURLForRemounting
+            attrs.volumeMountFromLocation = values.volumeMountFromLocation
         }
 
-        let path = standardized.path
-        if path.hasPrefix("/net/") || (path.hasPrefix("/Volumes/") && path.lowercased().contains("smb")) {
-            return .networkShare
-        } else if path.hasPrefix("/Volumes/") {
-            return .removableMedia
+        // Query Darwin statfs
+        #if canImport(Darwin)
+        var stat = statfs()
+        if standardized.path.withCString({ statfs($0, &stat) }) == 0 {
+            attrs.statfsIsLocal = (stat.f_flags & UInt32(MNT_LOCAL)) != 0
+            let fsTypeName = withUnsafePointer(to: &stat.f_fstypename) { ptr in
+                String(cString: UnsafeRawPointer(ptr).assumingMemoryBound(to: CChar.self))
+            }
+            attrs.statfsFSTypeName = fsTypeName
         }
-        return .internalSSD
+        #endif
+
+        return attrs
     }
 }
+
 
 /// Thread-safe in-memory cache for session-duration directory file listings (ADR-0009).
 /// Avoids repetitive contentsOfDirectory round-trips over network shares during sidecar resolution.

@@ -71,6 +71,82 @@ struct StorageVolumeProfileTests {
         #expect(profile != .networkShare)
     }
 
+    @Test("StorageVolumeDetector multi-tier classification detects networkShare via Foundation, Darwin VFS, and path fallbacks")
+    func storageVolumeDetectorMultiTierClassification() {
+        // Tier 1: Foundation volumeIsLocal == false
+        let nonLocal = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeIsLocal: false
+        )
+        #expect(StorageVolumeDetector.profile(for: nonLocal) == .networkShare)
+
+        // Tier 1: Foundation volumeURLForRemounting != nil
+        let remountable = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeIsLocal: true,
+            volumeURLForRemounting: URL(string: "smb://nas.local/photos")
+        )
+        #expect(StorageVolumeDetector.profile(for: remountable) == .networkShare)
+
+        // Tier 1: Foundation volumeTypeName == "smbfs" or "nfs" or "webdav"
+        let smbType = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeTypeName: "smbfs"
+        )
+        #expect(StorageVolumeDetector.profile(for: smbType) == .networkShare)
+
+        let nfsType = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeTypeName: "nfs"
+        )
+        #expect(StorageVolumeDetector.profile(for: nfsType) == .networkShare)
+
+        // Tier 1: Foundation volumeMountFromLocation
+        let mountLoc = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            volumeMountFromLocation: "//user@server/share"
+        )
+        #expect(StorageVolumeDetector.profile(for: mountLoc) == .networkShare)
+
+        // Tier 2: Darwin statfs (f_flags & MNT_LOCAL) == 0
+        let statfsRemote = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            statfsIsLocal: false
+        )
+        #expect(StorageVolumeDetector.profile(for: statfsRemote) == .networkShare)
+
+        // Tier 2: Darwin statfs f_fstypename == "smbfs"
+        let statfsSmb = StorageVolumeDetector.VolumeAttributes(
+            path: "/some/path",
+            statfsFSTypeName: "smbfs"
+        )
+        #expect(StorageVolumeDetector.profile(for: statfsSmb) == .networkShare)
+
+        // Path fallback: iPadOS FileProvider smbclientd / LiveFiles path
+        let liveFiles = StorageVolumeDetector.VolumeAttributes(
+            path: "/private/var/mobile/Library/LiveFiles/com.apple.filesystems.smbclientd/share",
+            volumeIsInternal: true
+        )
+        #expect(StorageVolumeDetector.profile(for: liveFiles) == .networkShare)
+
+        // Tier 3: Internal SSD
+        let internalSSD = StorageVolumeDetector.VolumeAttributes(
+            path: "/System/Volumes/Data",
+            volumeIsLocal: true,
+            volumeIsInternal: true
+        )
+        #expect(StorageVolumeDetector.profile(for: internalSSD) == .internalSSD)
+
+        // Tier 3: Removable media
+        let removable = StorageVolumeDetector.VolumeAttributes(
+            path: "/Volumes/EOS_DIGITAL",
+            volumeIsLocal: true,
+            volumeIsRemovable: true
+        )
+        #expect(StorageVolumeDetector.profile(for: removable) == .removableMedia)
+    }
+
+
     // MARK: - DirectoryListingCache (ADR-0009)
 
     @Test("DirectoryListingCache stores, retrieves, and clears directory listings")
