@@ -297,27 +297,37 @@ struct StorageVolumeProfileTests {
 
     @Test("Background EXIF extraction loop respects pause state during active navigation")
     func backgroundExifExtractionPausesDuringNavigation() async {
-        var isPaused = false
-        var count = 0
+        actor State {
+            var isPaused = false
+            var count = 0
+
+            func setPaused(_ value: Bool) { isPaused = value }
+            func getPaused() -> Bool { isPaused }
+            func setCount(_ value: Int) { count = value }
+            func getCount() -> Int { count }
+        }
+        let state = State()
 
         let task = Task.detached {
             for i in 0..<20 {
-                while isPaused {
+                while await state.getPaused() {
                     try? await Task.sleep(nanoseconds: 10_000_000)
                 }
-                count = i + 1
+                await state.setCount(i + 1)
                 try? await Task.sleep(nanoseconds: 5_000_000)
             }
         }
 
         try? await Task.sleep(nanoseconds: 15_000_000)
-        isPaused = true
-        let snapshotCount = count
+        await state.setPaused(true)
+        let snapshotCount = await state.getCount()
         try? await Task.sleep(nanoseconds: 30_000_000)
-        #expect(count == snapshotCount, "Extraction should remain paused while navigation is active")
+        let currentCount = await state.getCount()
+        #expect(currentCount == snapshotCount, "Extraction should remain paused while navigation is active")
 
-        isPaused = false
+        await state.setPaused(false)
         _ = await task.result
-        #expect(count == 20)
+        let finalCount = await state.getCount()
+        #expect(finalCount == 20)
     }
 }

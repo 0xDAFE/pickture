@@ -1269,7 +1269,7 @@ final class MetadataSyncEngine {
         }
 
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { @MainActor in
+            group.addTask {
                 await self.flushPendingWrites()
             }
             group.addTask {

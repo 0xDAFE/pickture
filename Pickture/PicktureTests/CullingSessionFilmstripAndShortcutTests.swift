@@ -751,32 +751,39 @@ struct CullingSessionFilmstripAndShortcutTests {
 
         let item = try #require(session.items.first)
 
-        var observationFired = false
+        final class ObservationFlag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var fired = false
+            func markFired() { lock.withLock { fired = true } }
+            var isFired: Bool { lock.withLock { fired } }
+        }
+
+        let observationFlag = ObservationFlag()
         withObservationTracking {
             _ = session.previewRepresentation(for: item)
         } onChange: {
-            observationFired = true
+            observationFlag.markFired()
         }
 
-        #expect(!observationFired)
+        #expect(!observationFlag.isFired)
         #expect(session.previewRepresentation(for: item) == .rawPreview)
 
         _ = await session.loadFullRAW(for: item)
 
-        #expect(observationFired == true)
+        #expect(observationFlag.isFired == true)
         #expect(session.previewRepresentation(for: item) == .fullRAW)
 
-        var evictionObservationFired = false
+        let evictionFlag = ObservationFlag()
         withObservationTracking {
             _ = session.previewRepresentation(for: item)
         } onChange: {
-            evictionObservationFired = true
+            evictionFlag.markFired()
         }
 
-        #expect(!evictionObservationFired)
+        #expect(!evictionFlag.isFired)
         await session.clearMediaCache()
 
-        #expect(evictionObservationFired == true)
+        #expect(evictionFlag.isFired == true)
         #expect(session.previewRepresentation(for: item) == .rawPreview)
     }
 

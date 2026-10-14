@@ -167,15 +167,8 @@ nonisolated enum PreviewLoader {
             return embedded
         }
 
-        if let source, CGImageSourceGetCount(source) > 0 {
-            if let fallback = extractFullDecodeFallback(from: source, url: url, isRaw: isRaw, maxPixelSize: maxPixelSize) {
-                return fallback
-            }
-        } else if isRaw {
-            if let tiffFallbackJPEG = extractTIFFHintFullDecode(from: url, maxPixelSize: maxPixelSize) {
-                let decoded = decodeCGImage(from: tiffFallbackJPEG)
-                return PreviewExtractionResult(image: decoded, jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
-            }
+        if let fallback = extractFullDecodeFallback(from: url, isRaw: isRaw, maxPixelSize: maxPixelSize) {
+            return fallback
         }
 
         return nil
@@ -202,31 +195,27 @@ nonisolated enum PreviewLoader {
 
         guard !Task.isCancelled else { return nil }
 
-        if let source, CGImageSourceGetCount(source) > 0 {
-            return await HeavyDecodeLimiter.shared.withPermit {
-                guard !Task.isCancelled else { return nil }
-                return extractFullDecodeFallback(from: source, url: url, isRaw: isRaw, maxPixelSize: maxPixelSize)
-            }
-        } else if isRaw {
-            return await HeavyDecodeLimiter.shared.withPermit {
-                guard !Task.isCancelled else { return nil }
-                if let tiffFallbackJPEG = extractTIFFHintFullDecode(from: url, maxPixelSize: maxPixelSize) {
-                    let decoded = decodeCGImage(from: tiffFallbackJPEG)
-                    return PreviewExtractionResult(image: decoded, jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
-                }
-                return nil
-            }
+        return await HeavyDecodeLimiter.shared.withPermit {
+            guard !Task.isCancelled else { return nil }
+            return extractFullDecodeFallback(from: url, isRaw: isRaw, maxPixelSize: maxPixelSize)
         }
-
-        return nil
     }
 
     private static func extractFullDecodeFallback(
-        from source: CGImageSource,
-        url: URL,
+        from url: URL,
         isRaw: Bool,
         maxPixelSize: Int
     ) -> PreviewExtractionResult? {
+        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary),
+              CGImageSourceGetCount(source) > 0 else {
+            if isRaw, let tiffFallbackJPEG = extractTIFFHintFullDecode(from: url, maxPixelSize: maxPixelSize) {
+                let decoded = decodeCGImage(from: tiffFallbackJPEG)
+                return PreviewExtractionResult(image: decoded, jpegData: tiffFallbackJPEG, strategy: .fullDecodeFallback)
+            }
+            return nil
+        }
+
         let fallbackOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -697,7 +686,7 @@ nonisolated enum PreviewLoader {
 
 
 extension CGImage {
-    var aspectRatio: CGFloat {
+    nonisolated var aspectRatio: CGFloat {
         CGFloat(width) / CGFloat(max(1, height))
     }
 }

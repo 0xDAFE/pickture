@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-enum ExifHeaderExtractor {
+nonisolated enum ExifHeaderExtractor {
     /// Extracts ExifMetadata for a MediaItem by reading headers only (CGImageSourceCopyPropertiesAtIndex),
     /// preferring the smaller raster file in a MediaPair before falling back to RAW header bytes.
     nonisolated static func extractHeaderExif(for item: MediaItem) -> ExifMetadata {
@@ -210,17 +210,17 @@ enum ExifHeaderExtractor {
 
 /// Thread-safe cached date parsers for EXIF and ISO-8601 metadata strings.
 /// Eliminates per-call heap allocation of `DateFormatter` and `ISO8601DateFormatter`.
-enum ExifDateParser {
+nonisolated enum ExifDateParser {
     private static let lock = NSLock()
 
     // 1. Thread-safe cached ISO8601DateFormatter instances (read operations are thread-safe)
-    private static let iso8601InternetFormatter: ISO8601DateFormatter = {
+    private nonisolated(unsafe) static let iso8601InternetFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
         return f
     }()
 
-    private static let iso8601FractionalFormatter: ISO8601DateFormatter = {
+    private nonisolated(unsafe) static let iso8601FractionalFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds, .withDashSeparatorInDate, .withColonSeparatorInTime]
         return f

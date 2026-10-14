@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-public struct RAWPreviewExtraction: Sendable {
+public nonisolated struct RAWPreviewExtraction: Sendable {
     public let cgImage: CGImage
     public let jpegData: Data
 
@@ -18,7 +18,7 @@ public struct RAWPreviewExtraction: Sendable {
 /// Instead of streaming entire 40–85 MB RAW containers over the network to demosaic,
 /// this parser reads container headers, locates embedded JPEG preview stream byte ranges,
 /// reads only the JPEG slice via `FileHandle.seek`, and decodes directly via ImageIO.
-public enum RAWPreviewExtractor {
+public nonisolated enum RAWPreviewExtractor {
     public static let tiffInitialBufferSize = 131_072 // 128 KB upfront buffer
     public static let cr3InitialBufferSize = 131_072  // 128 KB upfront buffer
     public static let rafInitialBufferSize = 160      // 160 bytes upfront buffer
@@ -354,7 +354,7 @@ public enum RAWPreviewExtractor {
 
     // MARK: - TIFF Stream Reader & Types
 
-    internal struct TIFFHeaderParseResult: Sendable {
+    nonisolated internal struct TIFFHeaderParseResult: Sendable {
         public let candidates: [(offset: UInt32, length: UInt32)]
         public let orientation: CGImagePropertyOrientation?
         public let headerReadCount: Int
@@ -370,7 +370,7 @@ public enum RAWPreviewExtractor {
         }
     }
 
-    internal final class TIFFStreamReader {
+    nonisolated internal final class TIFFStreamReader {
         let handle: FileHandle
         let initialBuffer: Data
         private var targetedBuffer: (offset: UInt64, data: Data)? = nil
