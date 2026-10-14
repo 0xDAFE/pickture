@@ -9,6 +9,10 @@ nonisolated enum SidecarCodec {
     // MARK: - Sidecar Path Discovery & Targets
 
     static func resolveSidecarReadURL(for item: MediaItem) -> URL? {
+        resolveSidecarReadURLSync(for: item)
+    }
+
+    private static func resolveSidecarReadURLSync(for item: MediaItem) -> URL? {
         let fm = FileManager.default
         let dir = item.directoryURL.standardizedFileURL
 
@@ -89,9 +93,7 @@ nonisolated enum SidecarCodec {
     // MARK: - Safe Disk I/O & Invalidation Helpers
 
     static func readData(from url: URL) async -> Data? {
-        await Task.detached(priority: .utility) {
-            try? Data(contentsOf: url)
-        }.value
+        try? Data(contentsOf: url)
     }
 
     static func readData(from url: URL) -> Data? {
@@ -99,9 +101,7 @@ nonisolated enum SidecarCodec {
     }
 
     static func resolveSidecarReadURL(for item: MediaItem) async -> URL? {
-        await Task.detached(priority: .utility) {
-            resolveSidecarReadURL(for: item)
-        }.value
+        resolveSidecarReadURLSync(for: item)
     }
 
     // MARK: - XMP Parsing
@@ -115,76 +115,72 @@ nonisolated enum SidecarCodec {
 
     @discardableResult
     static func write(curation: CurationMetadata, for item: MediaItem) async throws -> [URL] {
-        try await Task.detached(priority: .utility) {
-            let targets = resolveSidecarWriteURLs(for: item)
-            let fm = FileManager.default
-            var actualWritten: [URL] = []
-            for url in targets {
-                let existingData = try? Data(contentsOf: url)
-                let updatedData = try update(xmlData: existingData, with: curation)
-                let dir = url.deletingLastPathComponent()
-                if !fm.fileExists(atPath: dir.path) {
-                    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-                }
-                let writtenURL = try await writeCoordinatedWithRetry(data: updatedData, to: url)
-                actualWritten.append(writtenURL)
+        let targets = resolveSidecarWriteURLs(for: item)
+        let fm = FileManager.default
+        var actualWritten: [URL] = []
+        for url in targets {
+            let existingData = try? Data(contentsOf: url)
+            let updatedData = try update(xmlData: existingData, with: curation)
+            let dir = url.deletingLastPathComponent()
+            if !fm.fileExists(atPath: dir.path) {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
-            return actualWritten
-        }.value
+            let writtenURL = try await writeCoordinatedWithRetry(data: updatedData, to: url)
+            actualWritten.append(writtenURL)
+        }
+        return actualWritten
     }
 
     @discardableResult
     static func writeCoordinatedWithRetry(data: Data, to url: URL) async throws -> URL {
-        try await Task.detached(priority: .utility) {
-            let coordinator = NSFileCoordinator(filePresenter: nil)
-            let fm = FileManager.default
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        let fm = FileManager.default
 
-            struct AttemptResult {
-                var coordError: NSError?
-                var writeError: Error?
+        struct AttemptResult {
+            var coordError: NSError?
+            var writeError: Error?
 
-                var error: Error? {
-                    coordError ?? writeError
+            var error: Error? {
+                coordError ?? writeError
+            }
+        }
+
+        func attemptWrite(useReplacing: Bool) -> AttemptResult {
+            var result = AttemptResult()
+            let options: NSFileCoordinator.WritingOptions = useReplacing ? [.forReplacing] : []
+            coordinator.coordinate(writingItemAt: url, options: options, error: &result.coordError) { targetURL in
+                do {
+                    try data.write(to: targetURL, options: [])
+                } catch {
+                    result.writeError = error
                 }
             }
+            return result
+        }
 
-            func attemptWrite(useReplacing: Bool) -> AttemptResult {
-                var result = AttemptResult()
-                let options: NSFileCoordinator.WritingOptions = useReplacing ? [.forReplacing] : []
-                coordinator.coordinate(writingItemAt: url, options: options, error: &result.coordError) { targetURL in
-                    do {
-                        try data.write(to: targetURL, options: [])
-                    } catch {
-                        result.writeError = error
-                    }
+        let initialExists = fm.fileExists(atPath: url.path)
+        var lastAttempt = attemptWrite(useReplacing: !initialExists)
+
+        if lastAttempt.error == nil {
+            return url
+        }
+
+        let error = lastAttempt.error!
+        if isStaleOrMissingFileError(error) {
+            // Progressive backoff with .forReplacing
+            let retryDelays: [UInt64] = [50_000_000, 150_000_000]
+            for delay in retryDelays {
+                try? await Task.sleep(nanoseconds: delay)
+                let retryAttempt = attemptWrite(useReplacing: true)
+                if retryAttempt.error == nil {
+                    return url
                 }
-                return result
+                lastAttempt = retryAttempt
             }
+        }
 
-            let initialExists = fm.fileExists(atPath: url.path)
-            var lastAttempt = attemptWrite(useReplacing: !initialExists)
-
-            if lastAttempt.error == nil {
-                return url
-            }
-
-            let error = lastAttempt.error!
-            if isStaleOrMissingFileError(error) {
-                // Progressive backoff with .forReplacing
-                let retryDelays: [UInt64] = [50_000_000, 150_000_000]
-                for delay in retryDelays {
-                    try? await Task.sleep(nanoseconds: delay)
-                    let retryAttempt = attemptWrite(useReplacing: true)
-                    if retryAttempt.error == nil {
-                        return url
-                    }
-                    lastAttempt = retryAttempt
-                }
-            }
-
-            let finalError = lastAttempt.error ?? error
-            throw finalError
-        }.value
+        let finalError = lastAttempt.error ?? error
+        throw finalError
     }
 
     static func hasPOSIXErrorCode(_ error: Error, code: Int) -> Bool {

@@ -4,9 +4,9 @@ struct SettingsSheetView: View {
     @Bindable var session: CullingSession
     var showsDismissButton: Bool = true
     @Environment(\.dismiss) private var dismiss
-    @State private var isShowingResetConfirmation: Bool = false
 
     var body: some View {
+        @Bindable var session = session
         NavigationStack {
             Form {
                 Section {
@@ -147,7 +147,6 @@ struct SettingsSheetView: View {
                 Section {
                     Button(role: .destructive) {
                         if session.pendingWritesCount > 0 {
-                            isShowingResetConfirmation = true
                             session.isResetSyncStoreAlertPresented = true
                         } else {
                             Task {
@@ -176,7 +175,7 @@ struct SettingsSheetView: View {
             }
             .confirmationDialog(
                 "Reset Metadata Sync Store?",
-                isPresented: $isShowingResetConfirmation,
+                isPresented: $session.isResetSyncStoreAlertPresented,
                 titleVisibility: .visible
             ) {
                 Button("Reset Sync Store", role: .destructive) {
@@ -190,14 +189,6 @@ struct SettingsSheetView: View {
                 }
             } message: {
                 Text("You have \(session.pendingWritesCount) unwritten rating(s) or flag(s) that have not yet synced to sidecars. Resetting will discard these unwritten changes.")
-            }
-            .onChange(of: isShowingResetConfirmation) { _, newValue in
-                session.isResetSyncStoreAlertPresented = newValue
-            }
-            .onChange(of: session.isResetSyncStoreAlertPresented) { _, newValue in
-                if isShowingResetConfirmation != newValue {
-                    isShowingResetConfirmation = newValue
-                }
             }
         }
         .frame(minWidth: 440, minHeight: 380)

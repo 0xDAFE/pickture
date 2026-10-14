@@ -63,8 +63,8 @@ enum ExifHeaderExtractor {
         var processed = 0
 
         await withTaskGroup(of: (Int, String, ExifMetadata)?.self) { group in
-            let initialCount = min(maxWorkers, items.count)
-            while nextIndex < initialCount {
+            func enqueueNextWorker(into group: inout TaskGroup<(Int, String, ExifMetadata)?>) {
+                guard !Task.isCancelled, nextIndex < items.count else { return }
                 let index = nextIndex
                 let item = items[index]
                 nextIndex += 1
@@ -78,6 +78,11 @@ enum ExifHeaderExtractor {
                 }
             }
 
+            let initialCount = min(maxWorkers, items.count)
+            while nextIndex < initialCount {
+                enqueueNextWorker(into: &group)
+            }
+
             for await taskResult in group {
                 if Task.isCancelled {
                     group.cancelAll()
@@ -88,19 +93,7 @@ enum ExifHeaderExtractor {
                     processed += 1
                     await onProgress?(processed, itemID, exif)
                 }
-                if !Task.isCancelled && nextIndex < items.count {
-                    let index = nextIndex
-                    let item = items[index]
-                    nextIndex += 1
-                    group.addTask {
-                        while await isPaused() && !Task.isCancelled {
-                            try? await Task.sleep(nanoseconds: 50_000_000)
-                        }
-                        if Task.isCancelled { return nil }
-                        let exif = await extractItem(item)
-                        return (index, item.id, exif)
-                    }
-                }
+                enqueueNextWorker(into: &group)
             }
         }
 

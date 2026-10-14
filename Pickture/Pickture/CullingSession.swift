@@ -666,6 +666,10 @@ final class CullingSession: CullingInteractionTarget {
 
     /// Resets the persistent SQLite MetadataSyncStore and re-hydrates in-memory state.
     func resetMetadataSyncStore() async {
+        backgroundExifTask?.cancel()
+        _ = await backgroundExifTask?.value
+        backgroundExifTask = nil
+        isExifPreloading = false
         await metadataSyncEngine.resetMetadataSyncStore()
         refreshDerivedCounts()
         recomputeCullingSequence(force: true)
@@ -1003,7 +1007,7 @@ final class CullingSession: CullingInteractionTarget {
         navigationIdleTask?.cancel()
         navigationIdleTask = nil
         DirectoryListingCache.shared.clear()
-        Task { [mediaPipeline] in
+        Task { @concurrent [mediaPipeline] in
             await mediaPipeline.flushIndexImmediately()
         }
         isDiscovering = false

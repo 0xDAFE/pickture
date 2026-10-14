@@ -31,6 +31,21 @@ nonisolated struct MetadataSyncRecord: Codable, Hashable, Sendable {
     }
 }
 
+/// In-memory cache for synchronous, zero-I/O metadata record lookups across actor boundaries.
+///
+/// **Concurrency Safety Invariant**:
+/// - `RecordCache` is marked `@unchecked Sendable` because it protects its internal mutable
+///   state (`records: [String: MetadataSyncRecord]`) via an internal `NSLock` synchronization primitive.
+/// - All read and write accesses (`get`, `getAll`, `set`, `setAll`, `updateIfExists`, `removeAll`)
+///   are strictly guarded by `lock.withLock { ... }`, preventing data races across concurrent callers.
+/// - The contained `MetadataSyncRecord` value instances are immutable snapshot copies at the point
+///   of reading and writing, ensuring no aliased mutable memory escapes lock protection.
+///
+/// **Follow-Up Removal Plan**:
+/// - Once the Swift standard library / Foundation stabilizes non-blocking synchronous reader actors
+///   or synchronized types (e.g. `OSAllocatedUnfairLock` or `Synchronization.Mutex` when minimum deployment
+///   targets permit), migrate `RecordCache` to `Mutex<[String: MetadataSyncRecord]>` to replace
+///   `@unchecked Sendable` with standard library compile-time concurrency checking.
 private final class RecordCache: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [String: MetadataSyncRecord] = [:]
@@ -435,11 +450,15 @@ actor MetadataSyncStore {
         }
     }
 
-    func markSynced(for itemID: String, baseSnapshot: BaseSnapshot) {
-        let now = Date()
+    private func upsertSyncedRecord(
+        itemID: String,
+        metadata: CurationMetadata,
+        baseSnapshot: BaseSnapshot,
+        now: Date = Date()
+    ) {
         let existing = cache.get(itemID)
 
-        let metaJSON = Self.encodeJSON(baseSnapshot.metadata) ?? "{}"
+        let metaJSON = Self.encodeJSON(metadata) ?? "{}"
         let baseJSON = Self.encodeJSON(baseSnapshot) ?? "{}"
 
         let sql = """
@@ -462,7 +481,7 @@ actor MetadataSyncStore {
 
         let updated = MetadataSyncRecord(
             itemID: itemID,
-            metadata: baseSnapshot.metadata,
+            metadata: metadata,
             baseSnapshot: baseSnapshot,
             exif: existing?.exif,
             syncState: .synced,
@@ -470,6 +489,10 @@ actor MetadataSyncStore {
             updatedAt: now
         )
         cache.set(itemID, record: updated)
+    }
+
+    func markSynced(for itemID: String, baseSnapshot: BaseSnapshot) {
+        upsertSyncedRecord(itemID: itemID, metadata: baseSnapshot.metadata, baseSnapshot: baseSnapshot)
     }
 
     func recordConflict(_ conflict: MetadataConflict, for itemID: String) {
@@ -519,40 +542,7 @@ actor MetadataSyncStore {
     }
 
     func resolveConflict(for itemID: String, resolvedMetadata: CurationMetadata, newBaseSnapshot: BaseSnapshot) {
-        let now = Date()
-        let existing = cache.get(itemID)
-
-        let metaJSON = Self.encodeJSON(resolvedMetadata) ?? "{}"
-        let baseJSON = Self.encodeJSON(newBaseSnapshot) ?? "{}"
-
-        let sql = """
-        INSERT INTO sync_records (item_id, metadata, base_snapshot, exif, sync_state, conflict, updated_at)
-        VALUES (?1, ?2, ?3, NULL, 'synced', NULL, ?4)
-        ON CONFLICT(item_id) DO UPDATE SET
-            metadata = excluded.metadata,
-            base_snapshot = excluded.base_snapshot,
-            sync_state = 'synced',
-            conflict = NULL,
-            updated_at = excluded.updated_at;
-        """
-
-        executeStatement(sql, params: [
-            .text(itemID),
-            .text(metaJSON),
-            .text(baseJSON),
-            .real(now.timeIntervalSince1970)
-        ])
-
-        let updated = MetadataSyncRecord(
-            itemID: itemID,
-            metadata: resolvedMetadata,
-            baseSnapshot: newBaseSnapshot,
-            exif: existing?.exif,
-            syncState: .synced,
-            conflict: nil,
-            updatedAt: now
-        )
-        cache.set(itemID, record: updated)
+        upsertSyncedRecord(itemID: itemID, metadata: resolvedMetadata, baseSnapshot: newBaseSnapshot)
     }
 
     func reset() {
