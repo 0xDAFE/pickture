@@ -83,8 +83,17 @@ nonisolated private final class RecordCache: @unchecked Sendable {
 actor MetadataSyncStore {
     let storeDirectoryURL: URL
     let databaseURL: URL
-    /// - Note: Concurrency Safety Invariant: Marked `nonisolated(unsafe)` solely to allow `sqlite3_close_v2`
-    ///   cleanup during actor `deinit`. All mutations and statement executions occur strictly within actor-isolated methods.
+    /// **Concurrency Safety Invariant**:
+    /// - Marked `nonisolated(unsafe)` solely to allow `sqlite3_close_v2(db)` cleanup during actor `deinit`.
+    /// - In Swift 6 (SE-0371), actor `deinit` is nonisolated, and accessing a property with non-Sendable type
+    ///   `OpaquePointer?` without `nonisolated(unsafe)` produces a compile error.
+    /// - All reads, mutations, and statement executions on `db` occur strictly within actor-isolated methods
+    ///   or during synchronous initialization, ensuring no concurrent access occurs during the actor's lifetime.
+    ///
+    /// **Follow-Up Removal Plan**:
+    /// - When Swift Concurrency introduces isolated deinitializers or standard library wrappers for C opaque pointers
+    ///   (such as a synchronized pointer wrapper or Sendable `OpaquePointer` conformance), replace `nonisolated(unsafe)`
+    ///   with an isolated `deinit` or managed pointer type.
     private nonisolated(unsafe) var db: OpaquePointer?
 
     nonisolated private let cache = RecordCache()

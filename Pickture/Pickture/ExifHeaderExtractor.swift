@@ -213,7 +213,17 @@ nonisolated enum ExifHeaderExtractor {
 nonisolated enum ExifDateParser {
     private static let lock = NSLock()
 
-    // 1. Thread-safe cached ISO8601DateFormatter instances (read operations are thread-safe)
+    // 1. Thread-safe cached ISO8601DateFormatter instances.
+    //
+    // **Concurrency Safety Invariant**:
+    // - Marked `nonisolated(unsafe)` because `ISO8601DateFormatter` is not yet marked `Sendable` in Foundation,
+    //   even though Apple documentation guarantees that date parsing operations (`date(from:)`) are thread-safe
+    //   when the formatter's configuration is not mutated after initialization.
+    // - These instances are configured once during static initialization and their properties are never mutated.
+    //
+    // **Follow-Up Removal Plan**:
+    // - Remove `nonisolated(unsafe)` once Foundation marks `ISO8601DateFormatter` as `Sendable` or once all
+    //   call sites migrate exclusively to Swift's native `Date(string, strategy: .iso8601)` parsing.
     private nonisolated(unsafe) static let iso8601InternetFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]

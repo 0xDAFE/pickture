@@ -751,6 +751,14 @@ struct CullingSessionFilmstripAndShortcutTests {
 
         let item = try #require(session.items.first)
 
+        /// **Concurrency Safety Invariant**:
+        /// - Marked `@unchecked Sendable` because it encapsulates synchronous state (`fired`)
+        ///   guarded by an internal `NSLock`.
+        /// - `withObservationTracking(apply:onChange:)` calls `onChange` when tracked properties change,
+        ///   requiring thread-safe mutation across observation contexts.
+        ///
+        /// **Follow-Up Removal Plan**:
+        /// - Migrate to `Mutex<Bool>` when minimum deployment targets include the Swift 6 `Synchronization` library.
         final class ObservationFlag: @unchecked Sendable {
             private let lock = NSLock()
             private var fired = false

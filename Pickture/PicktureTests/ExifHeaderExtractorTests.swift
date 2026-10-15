@@ -246,7 +246,6 @@ struct ExifHeaderExtractorTests {
         actor PauseState {
             var isPaused: Bool = false
             func setPaused(_ value: Bool) { isPaused = value }
-            func getPaused() -> Bool { isPaused }
         }
 
         let state = PauseState()
@@ -255,7 +254,6 @@ struct ExifHeaderExtractorTests {
         actor Counter {
             var count = 0
             func increment() { count += 1 }
-            func get() -> Int { count }
         }
         let counter = Counter()
 
@@ -264,7 +262,7 @@ struct ExifHeaderExtractorTests {
                 for: items,
                 volumeProfile: .networkShare,
                 isPaused: {
-                    await state.getPaused()
+                    await state.isPaused
                 },
                 extractItem: { _ in
                     try? await Task.sleep(nanoseconds: 10_000_000)
@@ -280,11 +278,11 @@ struct ExifHeaderExtractorTests {
 
         // Wait a bit while paused
         try? await Task.sleep(nanoseconds: 40_000_000)
-        let countWhilePaused = await counter.get()
+        let countWhilePaused = await counter.count
 
         // Wait another interval: should still not make progress while paused
         try? await Task.sleep(nanoseconds: 40_000_000)
-        let countAfterPause = await counter.get()
+        let countAfterPause = await counter.count
         #expect(countWhilePaused == countAfterPause, "No new items should be processed while isPaused is true")
 
         // Resume
