@@ -22,6 +22,55 @@ struct RAWPreviewExtractionTests {
     }
 
 
+    @Test("Full RAW extraction for vertical RAW preserves opaque alphaInfo without AlphaLast")
+    func fullRAWExtractionPreservesOpaqueAlphaInfo() async throws {
+        guard let dir = findRepoTestFilesDir() else { return }
+        let arwURL = dir.appendingPathComponent("5947067782.ARW")
+        guard FileManager.default.fileExists(atPath: arwURL.path) else { return }
+
+        let result = try #require(PreviewLoader.extractFullRAW(from: arwURL))
+        #expect(result.image.height > result.image.width)
+        #expect(result.image.alphaInfo == .noneSkipLast || result.image.alphaInfo == .none)
+        #expect(result.data.count > 0)
+    }
+
+    @Test("applyOrientation preserves opacity for opaque images and transparency for images with alpha")
+    func applyOrientationPreservesAlphaModes() {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+
+        // 1. Opaque image with noneSkipLast
+        let opaqueCtx = CGContext(
+            data: nil,
+            width: 10,
+            height: 20,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        )!
+        let opaqueImage = opaqueCtx.makeImage()!
+        let rotatedOpaque = PreviewLoader.applyOrientation(cgImage: opaqueImage, orientation: .right)
+        #expect(rotatedOpaque.width == 20)
+        #expect(rotatedOpaque.height == 10)
+        #expect(rotatedOpaque.alphaInfo == .noneSkipLast || rotatedOpaque.alphaInfo == .none)
+
+        // 2. Transparent image with premultipliedLast
+        let alphaCtx = CGContext(
+            data: nil,
+            width: 10,
+            height: 20,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        let alphaImage = alphaCtx.makeImage()!
+        let rotatedAlpha = PreviewLoader.applyOrientation(cgImage: alphaImage, orientation: .right)
+        #expect(rotatedAlpha.width == 20)
+        #expect(rotatedAlpha.height == 10)
+        #expect(rotatedAlpha.alphaInfo == .premultipliedLast)
+    }
+
     @Test("Extracts high-resolution embedded preview from Sony .ARW via byte-range read")
     func extractSonyARWPreview() async throws {
         guard let dir = findRepoTestFilesDir() else { return }

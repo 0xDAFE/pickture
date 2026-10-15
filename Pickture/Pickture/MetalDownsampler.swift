@@ -81,7 +81,7 @@ public enum MetalDownsampler {
     }
 
     private static func cpuDownsample(cgImage: CGImage, targetWidth: Int, targetHeight: Int) -> CGImage {
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colorSpace = cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
         guard let context = CGContext(
             data: nil,
             width: targetWidth,
@@ -89,7 +89,7 @@ public enum MetalDownsampler {
             bitsPerComponent: 8,
             bytesPerRow: 0,
             space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            bitmapInfo: cgImage.opaqueOrPremultipliedAlphaInfo.rawValue
         ) else {
             return cgImage
         }
