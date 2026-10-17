@@ -161,7 +161,7 @@ struct ContentView: View {
                             )
                         }
                     }
-                    .coordinateSpace(name: CullingLayoutCalculator.workspaceCoordinateSpaceName)
+                    .coordinateSpace(.named(CullingLayoutCalculator.workspaceCoordinateSpaceName))
                 }
             }
         }

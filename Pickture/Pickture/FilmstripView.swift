@@ -21,6 +21,7 @@ struct FilmstripView: View {
     @State private var committedHeroOffset: CGSize = .zero
     @State private var isCommittingToGrid: Bool = false
     @State private var isExpandingFromGrid: Bool = false
+    @State private var hasTriggeredInitialExpand: Bool = false
 
     private var effectiveChromeOpacity: Double {
         if isCommittingToGrid || isExpandingFromGrid {
@@ -97,9 +98,6 @@ struct FilmstripView: View {
                     .opacity(effectiveChromeOpacity)
                 }
             }
-        }
-        .onAppear {
-            triggerExpandFromGridIfNeeded()
         }
         .onChange(of: session.selectedItemID) { _, _ in
             if pageDragOffset != 0 {
@@ -237,12 +235,14 @@ struct FilmstripView: View {
                 .onAppear {
                     mainCanvasSize = geo.size
                     canvasWorkspaceRect = workspaceFrame
+                    triggerExpandFromGridIfNeeded(workspaceFrame: workspaceFrame)
                 }
                 .onChange(of: geo.size) { _, newSize in
                     mainCanvasSize = newSize
                 }
                 .onChange(of: workspaceFrame) { _, newFrame in
                     canvasWorkspaceRect = newFrame
+                    triggerExpandFromGridIfNeeded(workspaceFrame: newFrame)
                 }
             }
         } else {
@@ -443,25 +443,34 @@ struct FilmstripView: View {
         }
     }
 
-    private func triggerExpandFromGridIfNeeded() {
-        guard let item = session.selectedItem,
+    private func triggerExpandFromGridIfNeeded(workspaceFrame: CGRect) {
+        guard !hasTriggeredInitialExpand,
+              let item = session.selectedItem,
               let cellRect = targetGridCellRect,
               cellRect.width > 0, cellRect.height > 0,
-              canvasWorkspaceRect.width > 0, canvasWorkspaceRect.height > 0 else {
+              workspaceFrame.width > 0, workspaceFrame.height > 0 else {
             return
         }
-        let startTransform = computeTargetGridTransform(for: item, workspaceFrame: canvasWorkspaceRect)
-        isExpandingFromGrid = true
-        isHeroTransitionActive?.wrappedValue = true
-        committedHeroScale = startTransform.scale
-        committedHeroOffset = startTransform.offset
+        hasTriggeredInitialExpand = true
+        let startTransform = computeTargetGridTransform(for: item, workspaceFrame: workspaceFrame)
+        var tx = Transaction(animation: nil)
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            isExpandingFromGrid = true
+            isHeroTransitionActive?.wrappedValue = true
+            committedHeroScale = startTransform.scale
+            committedHeroOffset = startTransform.offset
+        }
 
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-            isExpandingFromGrid = false
-            committedHeroScale = 1.0
-            committedHeroOffset = .zero
-        } completion: {
-            isHeroTransitionActive?.wrappedValue = false
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                isExpandingFromGrid = false
+                committedHeroScale = 1.0
+                committedHeroOffset = .zero
+            } completion: {
+                isHeroTransitionActive?.wrappedValue = false
+            }
         }
     }
 
@@ -826,14 +835,19 @@ struct FilmstripScrubber: View {
     #endif
 }
 
+@MainActor
+private final class ScrollVelocityTracker {
+    var lastTime: TimeInterval = 0.0
+    var currentVelocity: CGFloat = 0.0
+    var isCurrentlyScrolling: Bool = false
+    var isHighVelocity: Bool = false
+}
+
 private struct ScrubberScrollPhaseAndVelocityModifier: ViewModifier {
     let isHorizontal: Bool
     let onScrollStateChanged: (Bool, CGFloat) -> Void
 
-    @State private var lastOffset: CGFloat = 0.0
-    @State private var lastTime: TimeInterval = 0.0
-    @State private var currentVelocity: CGFloat = 0.0
-    @State private var isCurrentlyScrolling: Bool = false
+    @State private var tracker = ScrollVelocityTracker()
 
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
@@ -843,28 +857,49 @@ private struct ScrubberScrollPhaseAndVelocityModifier: ViewModifier {
                     isHorizontal ? geo.contentOffset.x : geo.contentOffset.y
                 } action: { oldOffset, newOffset in
                     let now = ProcessInfo.processInfo.systemUptime
-                    let dt = now - lastTime
-                    if dt > 0.002 && dt < 0.5 {
-                        let v = abs(newOffset - oldOffset) / CGFloat(dt)
-                        currentVelocity = v
-                        if isCurrentlyScrolling {
-                            onScrollStateChanged(true, v)
-                        }
+                    let dt = now - tracker.lastTime
+                    tracker.lastTime = now
+                    guard dt > 0.002 && dt < 0.5 else { return }
+                    let v = abs(newOffset - oldOffset) / CGFloat(dt)
+                    tracker.currentVelocity = v
+                    guard tracker.isCurrentlyScrolling else { return }
+                    let highVelocity = v >= CullingSession.highVelocityScrubThresholdPointsPerSecond
+                    if highVelocity != tracker.isHighVelocity {
+                        tracker.isHighVelocity = highVelocity
+                        onScrollStateChanged(true, v)
                     }
-                    lastOffset = newOffset
-                    lastTime = now
                 }
                 .onScrollPhaseChange { _, newPhase in
                     let scrolling = newPhase.isScrolling
-                    isCurrentlyScrolling = scrolling
+                    tracker.isCurrentlyScrolling = scrolling
                     if !scrolling {
-                        currentVelocity = 0.0
+                        tracker.currentVelocity = 0.0
+                        tracker.isHighVelocity = false
                     }
-                    onScrollStateChanged(scrolling, scrolling ? currentVelocity : 0.0)
+                    onScrollStateChanged(scrolling, scrolling ? tracker.currentVelocity : 0.0)
                 }
         } else {
             content
                 .scrollTargetBehavior(.viewAligned)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { value in
+                            let delta = isHorizontal ? value.translation.width : value.translation.height
+                            let predicted = isHorizontal ? value.predictedEndTranslation.width : value.predictedEndTranslation.height
+                            let velocity = abs(predicted - delta) * 8.0
+                            let highVelocity = velocity >= CullingSession.highVelocityScrubThresholdPointsPerSecond
+                            if !tracker.isCurrentlyScrolling || highVelocity != tracker.isHighVelocity {
+                                tracker.isCurrentlyScrolling = true
+                                tracker.isHighVelocity = highVelocity
+                                onScrollStateChanged(true, velocity)
+                            }
+                        }
+                        .onEnded { _ in
+                            tracker.isCurrentlyScrolling = false
+                            tracker.isHighVelocity = false
+                            onScrollStateChanged(false, 0.0)
+                        }
+                )
         }
     }
 }
@@ -1099,6 +1134,62 @@ struct SwipeActionBadgeView: View {
     }
 }
 
+// MARK: - Shared Swipe Curation Overlay & Gesture Completion
+
+private struct SwipeCurationOverlayView: View {
+    let session: CullingSession
+    let swipeTranslation: CGFloat
+    let threshold: CGFloat
+
+    var body: some View {
+        if swipeTranslation > 20 {
+            let progress = min(1.0, (swipeTranslation - 20) / max(1.0, threshold - 20))
+            SwipeActionBadgeView(action: session.swipeRightAction, direction: .right)
+                .opacity(Double(progress))
+                .scaleEffect(0.85 + 0.15 * progress)
+                .padding(.top, 40)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        } else if swipeTranslation < -20 {
+            let progress = min(1.0, (-swipeTranslation - 20) / max(1.0, threshold - 20))
+            SwipeActionBadgeView(action: session.swipeLeftAction, direction: .left)
+                .opacity(Double(progress))
+                .scaleEffect(0.85 + 0.15 * progress)
+                .padding(.top, 40)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+    }
+}
+
+@MainActor
+private func completeSwipeCurationGesture(
+    translationWidth: CGFloat,
+    threshold: CGFloat,
+    containerWidth: CGFloat,
+    item: MediaItem,
+    session: CullingSession,
+    swipeTranslation: Binding<CGFloat>
+) {
+    if translationWidth >= threshold {
+        withAnimation(.easeOut(duration: 0.2)) {
+            swipeTranslation.wrappedValue = containerWidth + 100
+        } completion: {
+            swipeTranslation.wrappedValue = 0
+        }
+        session.executeSwipe(.right, for: item)
+    } else if translationWidth <= -threshold {
+        withAnimation(.easeOut(duration: 0.2)) {
+            swipeTranslation.wrappedValue = -containerWidth - 100
+        } completion: {
+            swipeTranslation.wrappedValue = 0
+        }
+        session.executeSwipe(.left, for: item)
+    } else {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+            swipeTranslation.wrappedValue = 0
+        }
+    }
+}
+
 // MARK: - Active Drag Gesture Mode
 
 private enum CanvasDragMode {
@@ -1200,21 +1291,11 @@ struct FilmstripImageCanvasView: View {
 
                 // Overlay action badge when swiping horizontally at 1.0x zoom in SwipeMode
                 if isSwipeActive {
-                    if swipeTranslation > 20 {
-                        let progress = min(1.0, (swipeTranslation - 20) / max(1.0, threshold - 20))
-                        SwipeActionBadgeView(action: session.swipeRightAction, direction: .right)
-                            .opacity(Double(progress))
-                            .scaleEffect(0.85 + 0.15 * progress)
-                            .padding(.top, 40)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    } else if swipeTranslation < -20 {
-                        let progress = min(1.0, (-swipeTranslation - 20) / max(1.0, threshold - 20))
-                        SwipeActionBadgeView(action: session.swipeLeftAction, direction: .left)
-                            .opacity(Double(progress))
-                            .scaleEffect(0.85 + 0.15 * progress)
-                            .padding(.top, 40)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    }
+                    SwipeCurationOverlayView(
+                        session: session,
+                        swipeTranslation: swipeTranslation,
+                        threshold: threshold
+                    )
                 }
             }
             .contentShape(Rectangle())
@@ -1304,6 +1385,7 @@ struct FilmstripImageCanvasView: View {
                                 )
                                 liveClampedPanOffset = nil
                             }
+                            onHeroGestureEnded?()
                         }
                     }
             )
@@ -1395,25 +1477,14 @@ struct FilmstripImageCanvasView: View {
                             onHeroGestureEnded?()
 
                         case .swipeCuration:
-                            if value.translation.width >= threshold {
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    swipeTranslation = geo.size.width + 100
-                                } completion: {
-                                    swipeTranslation = 0
-                                }
-                                session.executeSwipe(.right, for: item)
-                            } else if value.translation.width <= -threshold {
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    swipeTranslation = -geo.size.width - 100
-                                } completion: {
-                                    swipeTranslation = 0
-                                }
-                                session.executeSwipe(.left, for: item)
-                            } else {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                                    swipeTranslation = 0
-                                }
-                            }
+                            completeSwipeCurationGesture(
+                                translationWidth: value.translation.width,
+                                threshold: threshold,
+                                containerWidth: geo.size.width,
+                                item: item,
+                                session: session,
+                                swipeTranslation: $swipeTranslation
+                            )
 
                         case .horizontalPaging:
                             let committedDirection = CullingLayoutCalculator.shouldCommitPageTurn(
@@ -1509,21 +1580,11 @@ struct FilmstripVideoCanvasView: View {
                 )
 
                 if isSwipeActive, let session {
-                    if swipeTranslation > 20 {
-                        let progress = min(1.0, (swipeTranslation - 20) / max(1.0, threshold - 20))
-                        SwipeActionBadgeView(action: session.swipeRightAction, direction: .right)
-                            .opacity(Double(progress))
-                            .scaleEffect(0.85 + 0.15 * progress)
-                            .padding(.top, 40)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    } else if swipeTranslation < -20 {
-                        let progress = min(1.0, (-swipeTranslation - 20) / max(1.0, threshold - 20))
-                        SwipeActionBadgeView(action: session.swipeLeftAction, direction: .left)
-                            .opacity(Double(progress))
-                            .scaleEffect(0.85 + 0.15 * progress)
-                            .padding(.top, 40)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    }
+                    SwipeCurationOverlayView(
+                        session: session,
+                        swipeTranslation: swipeTranslation,
+                        threshold: threshold
+                    )
                 }
             }
             .contentShape(Rectangle())
@@ -1549,13 +1610,13 @@ struct FilmstripVideoCanvasView: View {
                         if value.magnification < 1.0 {
                             player?.pause()
                             onHeroGestureChanged?(value.magnification, .zero, .zero)
+                        } else {
+                            onHeroGestureChanged?(1.0, .zero, .zero)
                         }
                     }
-                    .onEnded { value in
+                    .onEnded { _ in
                         guard isCurrentPage else { return }
-                        if value.magnification < 1.0 {
-                            onHeroGestureEnded?()
-                        }
+                        onHeroGestureEnded?()
                     }
             )
             .simultaneousGesture(
@@ -1604,25 +1665,14 @@ struct FilmstripVideoCanvasView: View {
 
                         case .swipeCuration:
                             guard let item else { return }
-                            if value.translation.width >= threshold {
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    swipeTranslation = geo.size.width + 100
-                                } completion: {
-                                    swipeTranslation = 0
-                                }
-                                session.executeSwipe(.right, for: item)
-                            } else if value.translation.width <= -threshold {
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    swipeTranslation = -geo.size.width - 100
-                                } completion: {
-                                    swipeTranslation = 0
-                                }
-                                session.executeSwipe(.left, for: item)
-                            } else {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                                    swipeTranslation = 0
-                                }
-                            }
+                            completeSwipeCurationGesture(
+                                translationWidth: value.translation.width,
+                                threshold: threshold,
+                                containerWidth: geo.size.width,
+                                item: item,
+                                session: session,
+                                swipeTranslation: $swipeTranslation
+                            )
 
                         case .horizontalPaging:
                             let committedDirection = CullingLayoutCalculator.shouldCommitPageTurn(

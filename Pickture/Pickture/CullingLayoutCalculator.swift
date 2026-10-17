@@ -148,15 +148,7 @@ enum CullingLayoutCalculator {
             && dragTranslation.height > abs(dragTranslation.width) * 1.15
 
         guard isPinchingOut || isVerticalPullDominant else {
-            return HeroGridTransitionMetrics(
-                isActive: false,
-                progress: 0.0,
-                chromeOpacity: 1.0,
-                backdropOpacity: 0.92,
-                interactiveScale: 1.0,
-                interactiveOffset: .zero,
-                shouldCommit: false
-            )
+            return .inactive
         }
 
         let pinchProgress: CGFloat = isPinchingOut

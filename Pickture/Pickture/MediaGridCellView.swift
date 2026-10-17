@@ -197,8 +197,14 @@ struct MediaGridCellView: View, Equatable {
                         .onAppear {
                             onSelectedStageFrameChange?(frame)
                         }
-                        .onChange(of: frame) { _, newFrame in
-                            onSelectedStageFrameChange?(newFrame)
+                        .onChange(of: frame) { oldFrame, newFrame in
+                            let dx = abs(newFrame.minX - oldFrame.minX)
+                            let dy = abs(newFrame.minY - oldFrame.minY)
+                            let dw = abs(newFrame.width - oldFrame.width)
+                            let dh = abs(newFrame.height - oldFrame.height)
+                            if dx > 0.5 || dy > 0.5 || dw > 0.5 || dh > 0.5 {
+                                onSelectedStageFrameChange?(newFrame)
+                            }
                         }
                 }
             }
