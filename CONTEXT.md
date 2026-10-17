@@ -79,12 +79,16 @@ _Avoid_: Edit command, Rating event
 A named set of keyboard bindings mapping keys to `CurationAction`s and navigation commands, including built-in `Lightroom` and `CaptureOne` presets as well as a user-customized profile.
 _Avoid_: Keymap, Hotkey preset
 
+**FilmstripScrubber**:
+The interactive thumbnail ribbon in the Filmstrip view (docked along the bottom or right edge) that anchors the active `MediaItem` at its center playhead and supports continuous touch scrubbing across the `CullingSequence`.
+_Avoid_: Bottom bar, Thumbnail dock, Carousel
+
 **SwipeMode**:
-An on-the-go culling mode inside the Filmstrip view where left and right swipe gestures execute user-configured `CurationAction`s and automatically advance to the next `MediaItem`.
+An opt-in culling mode inside the Filmstrip view where horizontal swipe gestures on the main viewport execute user-configured `CurationAction`s and advance to the next `MediaItem`, overriding the default horizontal paging gesture used to browse through the `CullingSequence`.
 _Avoid_: Card view, Tinder mode, Quick cull
 
 **BorderTapNavigation**:
-A user-toggleable touch interaction in the Filmstrip view that maps taps in the left and right outer border zones of the main viewport to Previous / Next `MediaItem` navigation, which can be disabled to prevent accidental navigation from thumb grip.
+A user-toggleable touch interaction in the Filmstrip view that maps taps in the left and right outer border zones of the main viewport to instant Previous / Next `MediaItem` cuts, which can be disabled to prevent accidental navigation from thumb grip.
 _Avoid_: Edge swipe, Margin tap
 
 ### Synchronization & Conflicts
