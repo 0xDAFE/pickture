@@ -1,7 +1,7 @@
 import Foundation
 import SQLite3
 
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+nonisolated private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 nonisolated struct MetadataSyncRecord: Codable, Hashable, Sendable {
     var itemID: String
@@ -46,7 +46,7 @@ nonisolated struct MetadataSyncRecord: Codable, Hashable, Sendable {
 ///   or synchronized types (e.g. `OSAllocatedUnfairLock` or `Synchronization.Mutex` when minimum deployment
 ///   targets permit), migrate `RecordCache` to `Mutex<[String: MetadataSyncRecord]>` to replace
 ///   `@unchecked Sendable` with standard library compile-time concurrency checking.
-private final class RecordCache: @unchecked Sendable {
+nonisolated private final class RecordCache: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [String: MetadataSyncRecord] = [:]
 
@@ -83,7 +83,18 @@ private final class RecordCache: @unchecked Sendable {
 actor MetadataSyncStore {
     let storeDirectoryURL: URL
     let databaseURL: URL
-    private var db: OpaquePointer?
+    /// **Concurrency Safety Invariant**:
+    /// - Marked `nonisolated(unsafe)` solely to allow `sqlite3_close_v2(db)` cleanup during actor `deinit`.
+    /// - In Swift 6 (SE-0371), actor `deinit` is nonisolated, and accessing a property with non-Sendable type
+    ///   `OpaquePointer?` without `nonisolated(unsafe)` produces a compile error.
+    /// - All reads, mutations, and statement executions on `db` occur strictly within actor-isolated methods
+    ///   or during synchronous initialization, ensuring no concurrent access occurs during the actor's lifetime.
+    ///
+    /// **Follow-Up Removal Plan**:
+    /// - When Swift Concurrency introduces isolated deinitializers or standard library wrappers for C opaque pointers
+    ///   (such as a synchronized pointer wrapper or Sendable `OpaquePointer` conformance), replace `nonisolated(unsafe)`
+    ///   with an isolated `deinit` or managed pointer type.
+    private nonisolated(unsafe) var db: OpaquePointer?
 
     nonisolated private let cache = RecordCache()
 
@@ -100,16 +111,46 @@ actor MetadataSyncStore {
 
         try? FileManager.default.createDirectory(at: standardized, withIntermediateDirectories: true)
 
-        if sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
-            let errorMsg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
+        var rawDB: OpaquePointer?
+        if sqlite3_open_v2(databaseURL.path, &rawDB, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
+            let errorMsg = rawDB.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
             print("Failed to open SQLite sync store at \(databaseURL.path): \(errorMsg)")
         }
 
         // Requirement 1: WAL mode, PRAGMA synchronous = NORMAL, single-row ACID transactions
-        execute("PRAGMA journal_mode = WAL;")
-        execute("PRAGMA synchronous = NORMAL;")
+        Self.configureDatabase(rawDB)
+        Self.createSchema(rawDB)
 
-        execute("""
+        let initialRecords = Self.loadInitialRecords(from: rawDB)
+        cache.setAll(initialRecords)
+
+        self.db = rawDB
+    }
+
+    deinit {
+        if let db {
+            sqlite3_close_v2(db)
+        }
+    }
+
+    private static func execute(sql: String, on db: OpaquePointer?) {
+        guard let db else { return }
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        if sqlite3_exec(db, sql, nil, nil, &errorMessage) != SQLITE_OK {
+            if let errorMessage {
+                print("SQLite exec error (\(sql)): \(String(cString: errorMessage))")
+                sqlite3_free(errorMessage)
+            }
+        }
+    }
+
+    private static func configureDatabase(_ db: OpaquePointer?) {
+        execute(sql: "PRAGMA journal_mode = WAL;", on: db)
+        execute(sql: "PRAGMA synchronous = NORMAL;", on: db)
+    }
+
+    private static func createSchema(_ db: OpaquePointer?) {
+        execute(sql: """
         CREATE TABLE IF NOT EXISTS sync_records (
             item_id TEXT PRIMARY KEY,
             metadata TEXT NOT NULL,
@@ -119,26 +160,11 @@ actor MetadataSyncStore {
             conflict TEXT,
             updated_at REAL NOT NULL
         );
-        """)
-
-        loadInitialRecords()
-    }
-
-    deinit {
-        if let db {
-            sqlite3_close_v2(db)
-        }
+        """, on: db)
     }
 
     private func execute(_ sql: String) {
-        guard let db else { return }
-        var errorMessage: UnsafeMutablePointer<CChar>?
-        if sqlite3_exec(db, sql, nil, nil, &errorMessage) != SQLITE_OK {
-            if let errorMessage {
-                print("SQLite exec error (\(sql)): \(String(cString: errorMessage))")
-                sqlite3_free(errorMessage)
-            }
-        }
+        Self.execute(sql: sql, on: db)
     }
 
     private enum SQLParam {
@@ -227,20 +253,20 @@ actor MetadataSyncStore {
         )
     }
 
-    private func loadInitialRecords() {
-        guard let db else { return }
+    private static func loadInitialRecords(from db: OpaquePointer?) -> [String: MetadataSyncRecord] {
+        guard let db else { return [:] }
         let sql = "SELECT item_id, metadata, base_snapshot, exif, sync_state, conflict, updated_at FROM sync_records;"
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [:] }
         defer { sqlite3_finalize(stmt) }
 
         var loaded: [String: MetadataSyncRecord] = [:]
         while sqlite3_step(stmt) == SQLITE_ROW {
-            if let record = Self.parseRecord(from: stmt!) {
+            if let record = parseRecord(from: stmt!) {
                 loaded[record.itemID] = record
             }
         }
-        cache.setAll(loaded)
+        return loaded
     }
 
     private static func encodeJSON<T: Encodable>(_ value: T) -> String? {

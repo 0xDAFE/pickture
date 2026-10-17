@@ -88,7 +88,7 @@ struct MetadataSyncStoreSQLiteTests {
         let storeRoot = root.appendingPathComponent("SyncStore", isDirectory: true)
         let store = MetadataSyncStore(storeDirectoryURL: storeRoot)
 
-        #expect(Thread.isMainThread)
+        MainActor.preconditionIsolated()
 
         // Stage write and check thread within actor
         await store.stagePendingWrite(CurationMetadata(starRating: 4), for: "ITEM_MAIN")

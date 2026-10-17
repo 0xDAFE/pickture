@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-private final class CGImageBox: NSObject {
+nonisolated private final class CGImageBox: NSObject {
     let image: CGImage
 
     init(image: CGImage) {
@@ -18,7 +18,7 @@ private final class CGImageBox: NSObject {
 /// - Note: Concurrency Safety Invariant: Marked `@unchecked Sendable` because the underlying storage
 ///   is `NSCache<NSString, CGImageBox>`, which is internally synchronized and thread-safe for concurrent
 ///   read and write operations across arbitrary background and cooperative threads.
-public final class DecodedImageCache: @unchecked Sendable {
+public nonisolated final class DecodedImageCache: @unchecked Sendable {
     public static let shared = DecodedImageCache()
 
     private let cache = NSCache<NSString, CGImageBox>()

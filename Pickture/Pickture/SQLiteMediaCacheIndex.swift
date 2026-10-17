@@ -1,7 +1,7 @@
 import Foundation
 import SQLite3
 
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+nonisolated private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 /// Fast, thread-safe SQLite-backed database indexing MediaCache entries and LRU sequences.
 /// Supports 50,000+ entries without memory or I/O spikes.
@@ -10,7 +10,7 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 ///   is opened with `SQLITE_OPEN_FULLMUTEX` (serialized multi-thread mode) and all retained prepared `sqlite3_stmt`
 ///   pointers are guarded by an internal `NSLock`. This eliminates statement recompilation churn on every query
 ///   and guarantees thread-safe statement reuse and resets across concurrent callers.
-final class SQLiteMediaCacheIndex: @unchecked Sendable {
+nonisolated final class SQLiteMediaCacheIndex: @unchecked Sendable {
     private var db: OpaquePointer?
     let databaseURL: URL
     private let lock = NSLock()
@@ -95,7 +95,7 @@ final class SQLiteMediaCacheIndex: @unchecked Sendable {
     }
 
     private func prepareStatements() {
-        guard let db else { return }
+        guard db != nil else { return }
         prepareStatement(
             sql: "SELECT value FROM metadata WHERE key = ? LIMIT 1;",
             dest: &stmtGetMetadata

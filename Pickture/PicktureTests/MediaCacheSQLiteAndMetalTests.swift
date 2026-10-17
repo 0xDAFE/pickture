@@ -289,7 +289,8 @@ struct MediaCacheSQLiteAndMetalTests {
         await withTaskGroup(of: Void.self) { group in
             for i in 1...30 {
                 group.addTask {
-                    #expect(!Thread.isMainThread, "MediaCache calls should run off @MainActor")
+                    let isMainThread = { Thread.isMainThread }()
+                    #expect(!isMainThread, "MediaCache calls should run off @MainActor")
                     let dummyData = Data(repeating: UInt8(i % 255), count: 200)
                     let key = "concurrent_item_\(i)"
                     await cache.storeData(dummyData, forKey: key, pixelWidth: 1600, pixelHeight: 1200)

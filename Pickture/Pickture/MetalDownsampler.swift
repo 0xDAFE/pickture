@@ -4,7 +4,7 @@ import Foundation
 import Metal
 
 /// GPU-accelerated image downsampler utilizing Metal-backed CIContext and high-quality Lanczos or Bicubic scaling.
-public enum MetalDownsampler {
+public nonisolated enum MetalDownsampler {
     /// Resampling algorithm used for GPU downsampling.
     public enum Algorithm: Sendable, Equatable {
         /// 3-lobed Lanczos windowed sinc filter offering optimal edge preservation.

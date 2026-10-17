@@ -1,7 +1,7 @@
 import Foundation
 
 /// Storage medium profile governing decoder concurrency, worker limits, and prefetch depth.
-public enum StorageVolumeProfile: String, CaseIterable, Codable, Sendable {
+public nonisolated enum StorageVolumeProfile: String, CaseIterable, Codable, Sendable {
     case internalSSD
     case removableMedia
     case networkShare
@@ -136,9 +136,9 @@ import Darwin
 
 /// Automatically inspects storage volume attributes (`volumeIsInternalKey`, `volumeIsLocalKey`, etc.)
 /// and Darwin statfs to determine the appropriate StorageVolumeProfile.
-public struct StorageVolumeDetector {
+public nonisolated struct StorageVolumeDetector {
 
-    public struct VolumeAttributes: Sendable {
+    public nonisolated struct VolumeAttributes: Sendable {
         public var path: String
         public var volumeIsLocal: Bool?
         public var volumeIsInternal: Bool?
@@ -288,7 +288,7 @@ public struct StorageVolumeDetector {
 ///
 /// - Note: Concurrency Safety Invariant: Marked `@unchecked Sendable` because all mutations, lookups,
 ///   and clear operations on `listings` are protected by an internal `NSLock`.
-public final class DirectoryListingCache: @unchecked Sendable {
+public nonisolated final class DirectoryListingCache: @unchecked Sendable {
     public static let shared = DirectoryListingCache()
 
     private let lock = NSLock()

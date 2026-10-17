@@ -307,7 +307,7 @@ nonisolated enum SidecarCodec {
 
 // MARK: - Internal Lossless XMP AST, Tree & Parser
 
-enum XMPChild {
+nonisolated enum XMPChild {
     case element(XMPNode)
     case text(String)
     case comment(String)
@@ -315,7 +315,7 @@ enum XMPChild {
     case processingInstruction(target: String, data: String?)
 }
 
-enum XMPPreambleItem {
+nonisolated enum XMPPreambleItem {
     case xmlDeclaration(String)
     case processingInstruction(target: String, data: String?)
     case comment(String)
@@ -338,7 +338,7 @@ enum XMPPreambleItem {
     }
 }
 
-final class XMPNode {
+nonisolated final class XMPNode {
     var name: String
     var attributes: [String: String]
     var attributeOrder: [String]
@@ -597,7 +597,7 @@ final class XMPNode {
     }
 }
 
-final class XMPDocumentTree {
+nonisolated final class XMPDocumentTree {
     var root: XMPNode?
     var preamble: [XMPPreambleItem] = []
     var postamble: [XMPPreambleItem] = []
@@ -1043,7 +1043,7 @@ final class XMPDocumentTree {
     }
 }
 
-final class XMPTreeParser: NSObject, XMLParserDelegate {
+nonisolated final class XMPTreeParser: NSObject, XMLParserDelegate {
     private var stack: [XMPNode] = []
     private var root: XMPNode?
     private var preamble: [XMPPreambleItem] = []

@@ -246,27 +246,27 @@ struct ExifHeaderExtractorTests {
         actor PauseState {
             var isPaused: Bool = false
             func setPaused(_ value: Bool) { isPaused = value }
-            func getPaused() -> Bool { isPaused }
         }
 
         let state = PauseState()
         let items = (0..<6).map { makeDummyItem(id: "pause_test_\($0)") }
 
-        var completedCount = 0
-        let lock = NSLock()
+        actor Counter {
+            var count = 0
+            func increment() { count += 1 }
+        }
+        let counter = Counter()
 
         let task = Task.detached {
             await ExifHeaderExtractor.extractBatchInternal(
                 for: items,
                 volumeProfile: .networkShare,
                 isPaused: {
-                    await state.getPaused()
+                    await state.isPaused
                 },
                 extractItem: { _ in
                     try? await Task.sleep(nanoseconds: 10_000_000)
-                    lock.lock()
-                    completedCount += 1
-                    lock.unlock()
+                    await counter.increment()
                     return ExifMetadata()
                 }
             )
@@ -278,15 +278,11 @@ struct ExifHeaderExtractorTests {
 
         // Wait a bit while paused
         try? await Task.sleep(nanoseconds: 40_000_000)
-        lock.lock()
-        let countWhilePaused = completedCount
-        lock.unlock()
+        let countWhilePaused = await counter.count
 
         // Wait another interval: should still not make progress while paused
         try? await Task.sleep(nanoseconds: 40_000_000)
-        lock.lock()
-        let countAfterPause = completedCount
-        lock.unlock()
+        let countAfterPause = await counter.count
         #expect(countWhilePaused == countAfterPause, "No new items should be processed while isPaused is true")
 
         // Resume
@@ -300,8 +296,16 @@ struct ExifHeaderExtractorTests {
     @Test("extractBatch streams progress monotonically and preserves input item ordering")
     func extractBatchStreamingProgress() async {
         let items = (0..<5).map { makeDummyItem(id: "stream_item_\($0)") }
-        var progressCounts: [Int] = []
-        var progressIDs: [String] = []
+        actor ProgressCollector {
+            var counts: [Int] = []
+            var ids: [String] = []
+
+            func record(count: Int, id: String) {
+                counts.append(count)
+                ids.append(id)
+            }
+        }
+        let collector = ProgressCollector()
 
         let results = await ExifHeaderExtractor.extractBatchInternal(
             for: items,
@@ -310,10 +314,12 @@ struct ExifHeaderExtractorTests {
                 ExifMetadata(cameraModel: "Model-\(item.id)")
             },
             onProgress: { count, id, exif in
-                progressCounts.append(count)
-                progressIDs.append(id)
+                await collector.record(count: count, id: id)
             }
         )
+
+        let progressCounts = await collector.counts
+        let progressIDs = await collector.ids
 
         #expect(results.count == 5)
         #expect(progressCounts == [1, 2, 3, 4, 5])
