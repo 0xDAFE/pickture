@@ -20,6 +20,8 @@ struct ContentView: View {
     @State private var isSettingsPresented = false
     @State private var isCloseConfirmationPresented = false
     @State private var pendingWritesCountForClose = 0
+    @State private var selectedGridCellStageRect: CGRect? = nil
+    @State private var isHeroTransitionActive = false
 
     init(session: CullingSession) {
         self.session = session
@@ -140,10 +142,26 @@ struct ContentView: View {
 
                 if session.visibleItems.isEmpty {
                     noMatchingItemsView
-                } else if session.viewMode == .grid {
-                    GridContentView(session: session)
                 } else {
-                    FilmstripView(session: session)
+                    ZStack {
+                        GridContentView(
+                            session: session,
+                            selectedCellStageRect: $selectedGridCellStageRect,
+                            isHeroTransitionActive: isHeroTransitionActive
+                        )
+                        .opacity(session.viewMode == .grid ? 1.0 : (isHeroTransitionActive ? 1.0 : 0.001))
+                        .allowsHitTesting(session.viewMode == .grid)
+                        .accessibilityHidden(session.viewMode != .grid)
+
+                        if session.viewMode == .filmstrip {
+                            FilmstripView(
+                                session: session,
+                                targetGridCellRect: selectedGridCellStageRect,
+                                isHeroTransitionActive: $isHeroTransitionActive
+                            )
+                        }
+                    }
+                    .coordinateSpace(name: CullingLayoutCalculator.workspaceCoordinateSpaceName)
                 }
             }
         }

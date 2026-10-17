@@ -6,6 +6,7 @@ import Testing
 import UniformTypeIdentifiers
 @testable import Pickture
 
+@Suite("CullingSession Filmstrip and Shortcut Tests", .serialized)
 @MainActor
 struct CullingSessionFilmstripAndShortcutTests {
 
@@ -835,5 +836,320 @@ struct CullingSessionFilmstripAndShortcutTests {
         _ = loadedButton.body
         #expect(session.previewRepresentation(for: item) == .fullRAW)
     }
+
+    // MARK: - Slice 6: FilmstripScrubber Expanding Ribbon Metrics & Playhead Insets (#72)
+
+    @Test("FilmstripScrubber dock span, active/inactive tile sizes, breathing margins, and center playhead insets match spec")
+    func filmstripScrubberLayoutMetricsAndPlayheadInsets() {
+        // Dock container spans: Bottom = 92pt, Right = 128pt
+        #expect(CullingLayoutCalculator.scrubberDockSpan(for: .bottom) == 92.0)
+        #expect(CullingLayoutCalculator.scrubberDockSpan(for: .right) == 128.0)
+        #expect(CullingLayoutCalculator.scrubberInterTileSpacing == 2.0)
+        #expect(CullingLayoutCalculator.scrubberActiveTileBreathingMargin == 8.0)
+
+        // Inactive tiles: 40x72 in bottom dock, 112x44 in right dock
+        let inactiveBottom = CullingLayoutCalculator.scrubberTileSize(
+            isSelected: false,
+            aspectRatio: 1.5,
+            dockPosition: .bottom
+        )
+        #expect(inactiveBottom == CGSize(width: 40.0, height: 72.0))
+
+        let inactiveRight = CullingLayoutCalculator.scrubberTileSize(
+            isSelected: false,
+            aspectRatio: 1.5,
+            dockPosition: .right
+        )
+        #expect(inactiveRight == CGSize(width: 112.0, height: 44.0))
+
+        // Active center tile: true aspect ratio width (48-128pt x 72pt in bottom, 112pt x 64-150pt in right)
+        let activeBottom3x2 = CullingLayoutCalculator.scrubberTileSize(
+            isSelected: true,
+            aspectRatio: 1.5,
+            dockPosition: .bottom
+        )
+        #expect(activeBottom3x2 == CGSize(width: 108.0, height: 72.0))
+
+        let activeRight3x2 = CullingLayoutCalculator.scrubberTileSize(
+            isSelected: true,
+            aspectRatio: 1.5,
+            dockPosition: .right
+        )
+        #expect(activeRight3x2 == CGSize(width: 112.0, height: 75.0))
+
+        // Half-viewport inset: max(0, (scrubberSpan - activeTileSpan) / 2)
+        #expect(CullingLayoutCalculator.scrubberHalfViewportInset(scrubberSpan: 800.0, activeTileSpan: 108.0) == 346.0)
+        #expect(CullingLayoutCalculator.scrubberHalfViewportInset(scrubberSpan: 80.0, activeTileSpan: 108.0) == 0.0)
+    }
+
+    // MARK: - Slice 7: True Fitted Aspect-Rect Panning, Edge-Pan Handoff & Point-Anchored Double-Tap Zoom (#72)
+
+    @Test("Zoomed panning clamps to actual fitted aspect rect rather than container bounds and hands off horizontal overflow into paging")
+    func fittedAspectRectPanClampingAndContinuousEdgePanHandoff() {
+        let containerSize = CGSize(width: 1000.0, height: 600.0)
+
+        // 2:3 portrait image inside 1000x600 container fits to 400x600 (pillarboxed with 300pt bars on each side)
+        let fittedPortrait = CullingLayoutCalculator.fittedImageSize(
+            aspectRatio: 2.0 / 3.0,
+            in: containerSize
+        )
+        #expect( abs(fittedPortrait.width - 400.0) < 0.5 )
+        #expect( abs(fittedPortrait.height - 600.0) < 0.5 )
+
+        // At 2.0x scale, maxPanX is clamped to fitted width (400 * (2 - 1) / 2 = 200pt), NOT container width (500pt)
+        let maxPan = CullingLayoutCalculator.maxPanOffset(fittedSize: fittedPortrait, scale: 2.0)
+        #expect( abs(maxPan.width - 200.0) < 0.5 )
+        #expect( abs(maxPan.height - 300.0) < 0.5 )
+
+        // Dragging within fitted pan bounds (-150pt) stays 100% in panOffset with 0 pageDragOffset
+        let insideResult = CullingLayoutCalculator.resolveZoomPanAndPageHandoff(
+            currentPanOffset: .zero,
+            dragTranslation: CGSize(width: -150.0, height: 100.0),
+            fittedSize: fittedPortrait,
+            scale: 2.0,
+            hasPrevious: true,
+            hasNext: true
+        )
+        #expect( abs(insideResult.clampedPanOffset.width - (-150.0)) < 0.5 )
+        #expect( abs(insideResult.clampedPanOffset.height - 100.0) < 0.5 )
+        #expect( insideResult.pageDragOffset == 0.0 )
+
+        // Dragging past the right image edge (-260pt total when maxPan.width is 200pt) clamps pan at -200pt and hands off -60pt to pageDragOffset
+        let handoffNext = CullingLayoutCalculator.resolveZoomPanAndPageHandoff(
+            currentPanOffset: CGSize(width: -180.0, height: 0.0),
+            dragTranslation: CGSize(width: -80.0, height: 0.0),
+            fittedSize: fittedPortrait,
+            scale: 2.0,
+            hasPrevious: true,
+            hasNext: true
+        )
+        #expect( abs(handoffNext.clampedPanOffset.width - (-200.0)) < 0.5 )
+        #expect( abs(handoffNext.pageDragOffset - (-60.0)) < 0.5 )
+
+        // At the last item (hasNext == false), dragging past the right edge applies rubber-band resistance (< 60pt magnitude)
+        let rubberBandEnd = CullingLayoutCalculator.resolveZoomPanAndPageHandoff(
+            currentPanOffset: CGSize(width: -200.0, height: 0.0),
+            dragTranslation: CGSize(width: -100.0, height: 0.0),
+            fittedSize: fittedPortrait,
+            scale: 2.0,
+            hasPrevious: true,
+            hasNext: false
+        )
+        #expect( abs(rubberBandEnd.clampedPanOffset.width - (-200.0)) < 0.5 )
+        #expect( rubberBandEnd.pageDragOffset < 0.0 && rubberBandEnd.pageDragOffset > -100.0 )
+    }
+
+    @Test("Double-tap zoom toggles between 1.0x and 2.5x anchored to the tapped point within fitted bounds")
+    func pointAnchoredDoubleTapZoomCalculation() {
+        let containerSize = CGSize(width: 1000.0, height: 800.0)
+        let fittedSize = CGSize(width: 800.0, height: 600.0)
+
+        // Double-tapping at top-left quadrant (300, 250) from 1.0x zooms to 2.5x and shifts pan toward (+300, +225)
+        let zoomIn = CullingLayoutCalculator.resolveDoubleTapZoom(
+            currentScale: 1.0,
+            tapLocation: CGPoint(x: 300.0, y: 250.0),
+            containerSize: containerSize,
+            fittedSize: fittedSize
+        )
+        #expect(zoomIn.scale == 2.5)
+        #expect(zoomIn.panOffset == CGSize(width: 300.0, height: 225.0))
+
+        // Double-tapping while zoomed in (> 1.0x) resets to 1.0x and .zero panOffset
+        let zoomOut = CullingLayoutCalculator.resolveDoubleTapZoom(
+            currentScale: 2.5,
+            tapLocation: CGPoint(x: 300.0, y: 250.0),
+            containerSize: containerSize,
+            fittedSize: fittedSize
+        )
+        #expect(zoomOut.scale == 1.0)
+        #expect(zoomOut.panOffset == .zero)
+    }
+
+    // MARK: - Slice 8: Velocity-Throttled Scrubbing & Vertical Pull-to-Grid Configuration (#72)
+
+    @Test("allowVerticalPullToGridInSwipeMode configuration flag controls 1-finger vertical pull-to-Grid in SwipeMode")
+    func verticalPullToGridConfigurationInSwipeMode() {
+        let session = CullingSession()
+
+        // Default: SwipeMode is off, allowVerticalPullToGridInSwipeMode is false -> pull-to-Grid is allowed
+        #expect(session.isSwipeModeEnabled == false)
+        #expect(session.allowVerticalPullToGridInSwipeMode == false)
+        #expect(session.isVerticalPullToGridAllowed == true)
+
+        // Enable SwipeMode -> 1-finger vertical pull-to-Grid is disabled by default
+        session.setSwipeMode(true)
+        #expect(session.isVerticalPullToGridAllowed == false)
+
+        // Enable allowVerticalPullToGridInSwipeMode -> 1-finger vertical pull-to-Grid is allowed even in SwipeMode
+        session.allowVerticalPullToGridInSwipeMode = true
+        #expect(session.interactionController.allowVerticalPullToGridInSwipeMode == true)
+        #expect(session.isVerticalPullToGridAllowed == true)
+    }
+
+    @Test("High-velocity scrubbing suppresses full-resolution preview decodes until velocity drops or scrubbing settles")
+    func velocityThrottledScrubbingSuppressesFullDecodeUntilSettled() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let img1URL = root.appendingPathComponent("IMG001.JPG")
+        let img2URL = root.appendingPathComponent("IMG002.JPG")
+        try createTestJPEG(at: img1URL, width: 640, height: 480, r: 120, g: 80, b: 200)
+        try createTestJPEG(at: img2URL, width: 640, height: 480, r: 200, g: 120, b: 80)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+
+        let item1 = session.items[0]
+        let item2 = session.items[1]
+
+        // Warm thumbnail for item2 so it's available in memory during fast scrubbing
+        let thumb2 = await session.loadThumbnailImage(for: item2, maxPixelSize: 360)
+        #expect(thumb2 != nil)
+        #expect(session.inMemoryThumbnailImage(for: item2, maxPixelSize: 360) != nil)
+        #expect(session.inMemoryPreviewImage(for: item2, maxPixelSize: 2048) == nil)
+
+        // Begin high-velocity scrubbing
+        session.updateScrubState(isScrubbing: true, velocityPointsPerSecond: 1200.0)
+        #expect(session.isScrubbing == true)
+        #expect(session.isHighVelocityScrubbing == true)
+
+        // Selecting item2 updates selection immediately, but loadPreviewImage is suppressed while high-velocity scrubbing
+        session.selectedItemID = item2.id
+        #expect(session.selectedItem?.id == item2.id)
+        let suppressedPreview = await session.loadPreviewImage(for: item2, maxPixelSize: 2048)
+        #expect(suppressedPreview == nil)
+        #expect(session.inMemoryThumbnailImage(for: item2, maxPixelSize: 360) != nil)
+
+        // Once scrub velocity drops below threshold / settles to idle, full-resolution preview decode succeeds
+        session.updateScrubState(isScrubbing: false, velocityPointsPerSecond: 0.0)
+        #expect(session.isScrubbing == false)
+        #expect(session.isHighVelocityScrubbing == false)
+
+        let settledPreview = await session.loadPreviewImage(for: item2, maxPixelSize: 2048)
+        #expect(settledPreview != nil)
+        #expect(session.inMemoryPreviewImage(for: item2, maxPixelSize: 2048) != nil)
+        _ = item1
+    }
+
+    // MARK: - Slice 9: 3-Page Carousel Neighbors, Stationary HUD Midpoint & Scrubber Interpolation (#72)
+
+    @Test("Adjacent items in CullingSequence and stationary HUD midpoint switching resolve previous, current, and next items")
+    func threePageCarouselAdjacentItemsAndHUDMidpointResolution() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for i in 1...3 {
+            let url = root.appendingPathComponent("IMG00\(i).JPG")
+            try createTestJPEG(at: url, width: 320, height: 240)
+        }
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+
+        let item0 = session.items[0]
+        let item1 = session.items[1]
+        let item2 = session.items[2]
+
+        // At item0: previous is nil, current is item0, next is item1
+        session.selectedItemID = item0.id
+        let adj0 = session.adjacentItems(for: item0.id)
+        #expect(adj0.previous == nil)
+        #expect(adj0.current?.id == item0.id)
+        #expect(adj0.next?.id == item1.id)
+
+        // At item1: previous is item0, current is item1, next is item2
+        session.selectedItemID = item1.id
+        let adj1 = session.adjacentItems(for: item1.id)
+        #expect(adj1.previous?.id == item0.id)
+        #expect(adj1.current?.id == item1.id)
+        #expect(adj1.next?.id == item2.id)
+
+        // Stationary HUD item stays on item1 before midpoint, and switches to item2 or item0 past midpoint (width = 1000 -> midpoint = 500)
+        #expect(session.displayedHUDItem(pageDragOffset: -200.0, containerWidth: 1000.0)?.id == item1.id)
+        #expect(session.displayedHUDItem(pageDragOffset: -550.0, containerWidth: 1000.0)?.id == item2.id)
+        #expect(session.displayedHUDItem(pageDragOffset: 550.0, containerWidth: 1000.0)?.id == item0.id)
+
+        // Scrubber playhead interpolation offset scales continuously with main-canvas swipe progress
+        let interpZero = CullingLayoutCalculator.scrubberDragInterpolationOffset(
+            pageDragOffset: 0.0,
+            pageStride: 1016.0,
+            activeTileSpan: 108.0,
+            dockPosition: .bottom
+        )
+        #expect(interpZero == 0.0)
+
+        let interpHalfNext = CullingLayoutCalculator.scrubberDragInterpolationOffset(
+            pageDragOffset: -508.0,
+            pageStride: 1016.0,
+            activeTileSpan: 108.0,
+            dockPosition: .bottom
+        )
+        // Expected full step in bottom dock = (108 / 2) + 8 (margin) + 2 (spacing) + (40 / 2) = 84pt; half step = -42pt
+        #expect(abs(interpHalfNext - (-42.0)) < 0.5)
+    }
+
+    // MARK: - Slice 10: Interactive Hero Transition to Grid Choreography & Thresholds (#72)
+
+    @Test("Hero transition to Grid computes chrome fade, finger-tracked scale/offset toward target Grid cell, and commit thresholds")
+    func interactiveHeroTransitionToGridChoreographyAndThresholds() {
+        let canvasRect = CGRect(x: 0.0, y: 0.0, width: 1000.0, height: 800.0)
+        let targetCellRect = CGRect(x: 120.0, y: 240.0, width: 200.0, height: 150.0)
+
+        // 1. Pinching below 1.0x (e.g., 0.85x) enters interactive transition but does NOT commit on release without velocity
+        let partialPinch = CullingLayoutCalculator.resolveHeroGridTransition(
+            rawScale: 0.85,
+            dragTranslation: .zero,
+            predictedEndTranslation: .zero,
+            canvasRect: canvasRect,
+            targetGridCellRect: targetCellRect,
+            isVerticalPullAllowed: true
+        )
+        #expect(partialPinch.isActive == true)
+        #expect(partialPinch.progress > 0.0 && partialPinch.progress < 1.0)
+        #expect(partialPinch.chromeOpacity < 1.0 && partialPinch.chromeOpacity > 0.0)
+        #expect(partialPinch.backdropOpacity < 0.92 && partialPinch.backdropOpacity > 0.0)
+        #expect(partialPinch.shouldCommit == false)
+
+        // 2. Pinching below ~0.75x threshold (e.g., 0.70x) commits to Grid on release
+        let commitPinch = CullingLayoutCalculator.resolveHeroGridTransition(
+            rawScale: 0.70,
+            dragTranslation: CGSize(width: -40.0, height: 30.0),
+            predictedEndTranslation: CGSize(width: -40.0, height: 30.0),
+            canvasRect: canvasRect,
+            targetGridCellRect: targetCellRect,
+            isVerticalPullAllowed: true
+        )
+        #expect(commitPinch.isActive == true)
+        #expect(commitPinch.shouldCommit == true)
+
+        // 3. 1-finger vertical pull-down at 1.0x when allowed enters transition and commits past threshold
+        let commitVerticalPull = CullingLayoutCalculator.resolveHeroGridTransition(
+            rawScale: 1.0,
+            dragTranslation: CGSize(width: 10.0, height: 140.0),
+            predictedEndTranslation: CGSize(width: 15.0, height: 220.0),
+            canvasRect: canvasRect,
+            targetGridCellRect: targetCellRect,
+            isVerticalPullAllowed: true
+        )
+        #expect(commitVerticalPull.isActive == true)
+        #expect(commitVerticalPull.shouldCommit == true)
+        #expect(commitVerticalPull.interactiveScale < 1.0)
+
+        // 4. 1-finger vertical pull-down at 1.0x when isVerticalPullAllowed == false (SwipeMode default) does NOT activate
+        let disallowedVerticalPull = CullingLayoutCalculator.resolveHeroGridTransition(
+            rawScale: 1.0,
+            dragTranslation: CGSize(width: 10.0, height: 140.0),
+            predictedEndTranslation: CGSize(width: 15.0, height: 220.0),
+            canvasRect: canvasRect,
+            targetGridCellRect: targetCellRect,
+            isVerticalPullAllowed: false
+        )
+        #expect(disallowedVerticalPull.isActive == false)
+        #expect(disallowedVerticalPull.shouldCommit == false)
+    }
 }
+
+
 

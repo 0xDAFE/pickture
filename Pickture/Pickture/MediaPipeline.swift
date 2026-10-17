@@ -111,6 +111,8 @@ final class MediaPipeline {
     let heavyDecodeLimiter: HeavyDecodeLimiter
     @ObservationIgnored
     private var activePersistenceTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored
+    private var insertedMemoryCacheKeys: Set<String> = []
 
     private(set) var totalCachedBytes: Int64 = 0
     private(set) var cacheSizeLimitBytes: Int64 = MediaCache.defaultQuotaBytes
@@ -167,7 +169,10 @@ final class MediaPipeline {
     }
 
     func clearCache() async {
-        DecodedImageCache.shared.clear()
+        for key in insertedMemoryCacheKeys {
+            DecodedImageCache.shared.removeImage(forKey: key)
+        }
+        insertedMemoryCacheKeys.removeAll()
         await cache.clear()
         self.totalCachedBytes = 0
     }
@@ -252,12 +257,14 @@ final class MediaPipeline {
             return nil
         }
         DecodedImageCache.shared.setImage(image, forKey: key)
+        insertedMemoryCacheKeys.insert(key)
         return image
     }
 
     private func resolveAndCacheImage(from extracted: PreviewExtractionResult, forKey key: String) async -> CGImage? {
         if let img = extracted.image {
             DecodedImageCache.shared.setImage(img, forKey: key)
+            insertedMemoryCacheKeys.insert(key)
             return img
         }
         return await decodeAndCache(data: extracted.jpegData, forKey: key)
@@ -385,6 +392,7 @@ final class MediaPipeline {
         }
         guard let result, !Task.isCancelled else { return nil }
         DecodedImageCache.shared.setImage(result.image, forKey: key)
+        insertedMemoryCacheKeys.insert(key)
         persistExtractedDataAsync(data: result.data, forKey: key)
         await syncCacheMetrics()
         return result.image

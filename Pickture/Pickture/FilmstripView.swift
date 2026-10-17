@@ -4,15 +4,59 @@ import SwiftUI
 #if canImport(AppKit)
 import AppKit
 #endif
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct FilmstripView: View {
     let session: CullingSession
+    var targetGridCellRect: CGRect? = nil
+    var isHeroTransitionActive: Binding<Bool>? = nil
+
+    @State private var pageDragOffset: CGFloat = 0.0
+    @State private var mainCanvasSize: CGSize = CGSize(width: 1000.0, height: 800.0)
+    @State private var canvasWorkspaceRect: CGRect = .zero
+    @State private var heroMetrics: HeroGridTransitionMetrics = .inactive
+    @State private var committedHeroScale: CGFloat = 1.0
+    @State private var committedHeroOffset: CGSize = .zero
+    @State private var isCommittingToGrid: Bool = false
+    @State private var isExpandingFromGrid: Bool = false
+
+    private var effectiveChromeOpacity: Double {
+        if isCommittingToGrid || isExpandingFromGrid {
+            return 0.0
+        }
+        return heroMetrics.chromeOpacity
+    }
+
+    private var effectiveBackdropOpacity: Double {
+        if isCommittingToGrid || isExpandingFromGrid {
+            return 0.0
+        }
+        return heroMetrics.backdropOpacity
+    }
+
+    private var effectiveHeroScale: CGFloat {
+        if isCommittingToGrid || isExpandingFromGrid {
+            return committedHeroScale
+        }
+        return heroMetrics.interactiveScale
+    }
+
+    private var effectiveHeroOffset: CGSize {
+        if isCommittingToGrid || isExpandingFromGrid {
+            return committedHeroOffset
+        }
+        return heroMetrics.interactiveOffset
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             if session.conflictedItemsCount > 0 {
                 conflictAlertBanner
+                    .opacity(effectiveChromeOpacity)
                 Divider()
+                    .opacity(effectiveChromeOpacity)
             }
 
             switch session.filmstripDockPosition {
@@ -22,10 +66,17 @@ struct FilmstripView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     Divider()
+                        .opacity(effectiveChromeOpacity)
 
-                    thumbnailStrip(position: .bottom)
-                        .frame(height: 138)
-                        .background(.bar)
+                    FilmstripScrubber(
+                        session: session,
+                        dockPosition: .bottom,
+                        pageDragOffset: pageDragOffset,
+                        mainCanvasWidth: mainCanvasSize.width
+                    )
+                    .frame(height: CullingLayoutCalculator.scrubberDockSpan(for: .bottom))
+                    .background(.bar)
+                    .opacity(effectiveChromeOpacity)
                 }
             case .right:
                 HStack(spacing: 0) {
@@ -33,11 +84,26 @@ struct FilmstripView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     Divider()
+                        .opacity(effectiveChromeOpacity)
 
-                    thumbnailStrip(position: .right)
-                        .frame(width: 144)
-                        .background(.bar)
+                    FilmstripScrubber(
+                        session: session,
+                        dockPosition: .right,
+                        pageDragOffset: pageDragOffset,
+                        mainCanvasWidth: mainCanvasSize.width
+                    )
+                    .frame(width: CullingLayoutCalculator.scrubberDockSpan(for: .right))
+                    .background(.bar)
+                    .opacity(effectiveChromeOpacity)
                 }
+            }
+        }
+        .onAppear {
+            triggerExpandFromGridIfNeeded()
+        }
+        .onChange(of: session.selectedItemID) { _, _ in
+            if pageDragOffset != 0 {
+                pageDragOffset = 0
             }
         }
     }
@@ -49,67 +115,92 @@ struct FilmstripView: View {
         if let currentItem = session.selectedItem {
             GeometryReader { geo in
                 let zoneWidth = CullingLayoutCalculator.borderTapZoneWidth(for: geo.size.width)
+                let neighbors = session.adjacentItems(for: currentItem.id)
+                let hudItem = session.displayedHUDItem(pageDragOffset: pageDragOffset, containerWidth: geo.size.width) ?? currentItem
+                let pageStride = max(1.0, geo.size.width + CullingLayoutCalculator.filmstripInterPageGutter)
+                let workspaceFrame = geo.frame(in: .named(CullingLayoutCalculator.workspaceCoordinateSpaceName))
 
                 ZStack {
-                    Color.black.opacity(0.92)
+                    Color.black.opacity(effectiveBackdropOpacity)
                         .ignoresSafeArea()
 
-                    if currentItem.kind == .video {
-                        FilmstripVideoCanvasView(url: currentItem.primaryFile.url, item: currentItem, session: session)
-                            .id(currentItem.id)
-                    } else {
-                        FilmstripImageCanvasView(item: currentItem, session: session)
-                            .id("\(currentItem.id)-\(session.previewSource.rawValue)")
-                    }
+                    // 3-Page Live Carousel (previous, current, next) separated by 16pt black gutter
+                    ZStack {
+                        if !session.isSwipeModeEnabled || pageDragOffset != 0 {
+                            if let previousItem = neighbors.previous {
+                                carouselPageView(
+                                    for: previousItem,
+                                    isCurrentPage: false,
+                                    containerSize: geo.size,
+                                    workspaceFrame: workspaceFrame,
+                                    neighbors: neighbors
+                                )
+                                .frame(width: geo.size.width, height: geo.size.height)
+                                .clipped()
+                                .offset(x: -pageStride + pageDragOffset)
+                            }
 
-                    // BorderTapNavigation Edge Tap Zones (applies across both image and video)
+                            if let nextItem = neighbors.next {
+                                carouselPageView(
+                                    for: nextItem,
+                                    isCurrentPage: false,
+                                    containerSize: geo.size,
+                                    workspaceFrame: workspaceFrame,
+                                    neighbors: neighbors
+                                )
+                                .frame(width: geo.size.width, height: geo.size.height)
+                                .clipped()
+                                .offset(x: pageStride + pageDragOffset)
+                            }
+                        }
+
+                        carouselPageView(
+                            for: currentItem,
+                            isCurrentPage: true,
+                            containerSize: geo.size,
+                            workspaceFrame: workspaceFrame,
+                            neighbors: neighbors
+                        )
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .scaleEffect(effectiveHeroScale)
+                        .offset(
+                            x: pageDragOffset + effectiveHeroOffset.width,
+                            y: effectiveHeroOffset.height
+                        )
+                    }
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+
+                    // BorderTapNavigation visual affordance (non-hit-testing so drags & pinches are never swallowed)
                     if session.isBorderTapNavigationEnabled {
                         HStack {
-                            Button {
-                                session.selectPreviousItem()
-                            } label: {
-                                Color.white.opacity(0.001)
-                                    .frame(width: zoneWidth)
-                                    .overlay(
-                                        Image(systemName: "chevron.left")
-                                            .font(.title2.weight(.bold))
-                                            .foregroundStyle(.white.opacity(0.25))
-                                            .padding(.leading, 8),
-                                        alignment: .leading
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Previous MediaItem")
+                            Image(systemName: "chevron.left")
+                                .font(.title2.weight(.bold))
+                                .foregroundStyle(.white.opacity(0.25))
+                                .padding(.leading, 8)
+                                .frame(width: zoneWidth, alignment: .leading)
 
                             Spacer()
 
-                            Button {
-                                session.selectNextItem()
-                            } label: {
-                                Color.white.opacity(0.001)
-                                    .frame(width: zoneWidth)
-                                    .overlay(
-                                        Image(systemName: "chevron.right")
-                                            .font(.title2.weight(.bold))
-                                            .foregroundStyle(.white.opacity(0.25))
-                                            .padding(.trailing, 8),
-                                        alignment: .trailing
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Next MediaItem")
+                            Image(systemName: "chevron.right")
+                                .font(.title2.weight(.bold))
+                                .foregroundStyle(.white.opacity(0.25))
+                                .padding(.trailing, 8)
+                                .frame(width: zoneWidth, alignment: .trailing)
                         }
+                        .allowsHitTesting(false)
+                        .opacity(effectiveChromeOpacity)
                     }
 
-                    // Top overlay info badge
+                    // Stationary Top & Bottom HUD overlays
                     VStack {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(currentItem.displayFileName)
+                                Text(hudItem.displayFileName)
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.white)
-                                if !currentItem.relativeDirectoryPath.isEmpty {
-                                    Text(currentItem.relativeDirectoryPath)
+                                if !hudItem.relativeDirectoryPath.isEmpty {
+                                    Text(hudItem.relativeDirectoryPath)
                                         .font(.caption2)
                                         .foregroundStyle(.white.opacity(0.7))
                                 }
@@ -120,18 +211,38 @@ struct FilmstripView: View {
 
                             Spacer()
 
-                            if currentItem.isMediaPair || currentItem.hasRAWFile {
-                                FilmstripRepresentationControls(item: currentItem, session: session)
+                            if hudItem.isMediaPair || hudItem.hasRAWFile {
+                                FilmstripRepresentationControls(item: hudItem, session: session)
                             }
                         }
                         .padding(12)
 
                         Spacer()
 
-                        // Bottom floating curation controls
-                        floatingCurationBar(for: currentItem)
+                        floatingCurationBar(for: hudItem)
                             .padding(.bottom, 12)
                     }
+                    .opacity(effectiveChromeOpacity)
+                }
+                .accessibilityAction(named: "Previous MediaItem") {
+                    if session.isBorderTapNavigationEnabled {
+                        performInstantBorderCut(to: .previous)
+                    }
+                }
+                .accessibilityAction(named: "Next MediaItem") {
+                    if session.isBorderTapNavigationEnabled {
+                        performInstantBorderCut(to: .next)
+                    }
+                }
+                .onAppear {
+                    mainCanvasSize = geo.size
+                    canvasWorkspaceRect = workspaceFrame
+                }
+                .onChange(of: geo.size) { _, newSize in
+                    mainCanvasSize = newSize
+                }
+                .onChange(of: workspaceFrame) { _, newFrame in
+                    canvasWorkspaceRect = newFrame
                 }
             }
         } else {
@@ -141,6 +252,239 @@ struct FilmstripView: View {
                 description: Text("Select an item in the filmstrip or grid to preview.")
             )
         }
+    }
+
+    @ViewBuilder
+    private func carouselPageView(
+        for pageItem: MediaItem,
+        isCurrentPage: Bool,
+        containerSize: CGSize,
+        workspaceFrame: CGRect,
+        neighbors: (previous: MediaItem?, current: MediaItem?, next: MediaItem?)
+    ) -> some View {
+        if pageItem.kind == .video {
+            FilmstripVideoCanvasView(
+                url: pageItem.primaryFile.url,
+                item: pageItem,
+                session: session,
+                isCurrentPage: isCurrentPage,
+                isExternalGestureActive: !isCurrentPage || pageDragOffset != 0 || heroMetrics.isActive || isCommittingToGrid,
+                pageDragOffset: isCurrentPage ? $pageDragOffset : .constant(0),
+                onCommitPageTurn: { direction in
+                    commitCarouselPageTurn(direction, containerWidth: containerSize.width, neighbors: neighbors)
+                },
+                onInstantBorderTap: { location in
+                    handleInstantBorderTap(at: location, in: containerSize)
+                },
+                onHeroGestureChanged: { rawScale, translation, predictedEnd in
+                    updateHeroGesture(
+                        rawScale: rawScale,
+                        translation: translation,
+                        predictedEnd: predictedEnd,
+                        workspaceFrame: workspaceFrame
+                    )
+                },
+                onHeroGestureEnded: {
+                    finishHeroGesture(for: pageItem, workspaceFrame: workspaceFrame)
+                }
+            )
+            .id(pageItem.id)
+        } else {
+            FilmstripImageCanvasView(
+                item: pageItem,
+                session: session,
+                isCurrentPage: isCurrentPage,
+                pageDragOffset: isCurrentPage ? $pageDragOffset : .constant(0),
+                onCommitPageTurn: { direction in
+                    commitCarouselPageTurn(direction, containerWidth: containerSize.width, neighbors: neighbors)
+                },
+                onInstantBorderTap: { location in
+                    handleInstantBorderTap(at: location, in: containerSize)
+                },
+                onHeroGestureChanged: { rawScale, translation, predictedEnd in
+                    updateHeroGesture(
+                        rawScale: rawScale,
+                        translation: translation,
+                        predictedEnd: predictedEnd,
+                        workspaceFrame: workspaceFrame
+                    )
+                },
+                onHeroGestureEnded: {
+                    finishHeroGesture(for: pageItem, workspaceFrame: workspaceFrame)
+                }
+            )
+            .id("\(pageItem.id)-\(session.previewSource.rawValue)")
+        }
+    }
+
+    private func handleInstantBorderTap(at location: CGPoint, in containerSize: CGSize) -> Bool {
+        guard session.isBorderTapNavigationEnabled,
+              let direction = CullingLayoutCalculator.borderTapDirection(at: location, in: containerSize) else {
+            return false
+        }
+        performInstantBorderCut(to: direction)
+        return true
+    }
+
+    private func performInstantBorderCut(to direction: BorderTapDirection) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            pageDragOffset = 0
+            switch direction {
+            case .previous:
+                session.selectPreviousItem()
+            case .next:
+                session.selectNextItem()
+            }
+        }
+    }
+
+    private func commitCarouselPageTurn(
+        _ direction: BorderTapDirection?,
+        containerWidth: CGFloat,
+        neighbors: (previous: MediaItem?, current: MediaItem?, next: MediaItem?)
+    ) {
+        let pageStride = max(1.0, containerWidth + CullingLayoutCalculator.filmstripInterPageGutter)
+        switch direction {
+        case .previous:
+            guard let prev = neighbors.previous else {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+                    pageDragOffset = 0
+                }
+                return
+            }
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
+                pageDragOffset = pageStride
+            } completion: {
+                var tx = Transaction(animation: nil)
+                tx.disablesAnimations = true
+                withTransaction(tx) {
+                    session.selectedItemID = prev.id
+                    pageDragOffset = 0
+                }
+            }
+
+        case .next:
+            guard let next = neighbors.next else {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+                    pageDragOffset = 0
+                }
+                return
+            }
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
+                pageDragOffset = -pageStride
+            } completion: {
+                var tx = Transaction(animation: nil)
+                tx.disablesAnimations = true
+                withTransaction(tx) {
+                    session.selectedItemID = next.id
+                    pageDragOffset = 0
+                }
+            }
+
+        case nil:
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+                pageDragOffset = 0
+            }
+        }
+    }
+
+    private func updateHeroGesture(
+        rawScale: CGFloat,
+        translation: CGSize,
+        predictedEnd: CGSize,
+        workspaceFrame: CGRect
+    ) {
+        let metrics = CullingLayoutCalculator.resolveHeroGridTransition(
+            rawScale: rawScale,
+            dragTranslation: translation,
+            predictedEndTranslation: predictedEnd,
+            canvasRect: workspaceFrame,
+            targetGridCellRect: targetGridCellRect,
+            isVerticalPullAllowed: session.isVerticalPullToGridAllowed
+        )
+        heroMetrics = metrics
+        isHeroTransitionActive?.wrappedValue = metrics.isActive
+    }
+
+    private func finishHeroGesture(for item: MediaItem, workspaceFrame: CGRect) {
+        guard heroMetrics.isActive else {
+            isHeroTransitionActive?.wrappedValue = false
+            return
+        }
+
+        if heroMetrics.shouldCommit {
+            isCommittingToGrid = true
+            isHeroTransitionActive?.wrappedValue = true
+
+            let targetTransform = computeTargetGridTransform(for: item, workspaceFrame: workspaceFrame)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+                committedHeroScale = targetTransform.scale
+                committedHeroOffset = targetTransform.offset
+            } completion: {
+                var tx = Transaction(animation: nil)
+                tx.disablesAnimations = true
+                withTransaction(tx) {
+                    session.setViewMode(.grid)
+                    isCommittingToGrid = false
+                    heroMetrics = .inactive
+                    committedHeroScale = 1.0
+                    committedHeroOffset = .zero
+                    isHeroTransitionActive?.wrappedValue = false
+                }
+            }
+        } else {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                heroMetrics = .inactive
+            } completion: {
+                isHeroTransitionActive?.wrappedValue = false
+            }
+        }
+    }
+
+    private func triggerExpandFromGridIfNeeded() {
+        guard let item = session.selectedItem,
+              let cellRect = targetGridCellRect,
+              cellRect.width > 0, cellRect.height > 0,
+              canvasWorkspaceRect.width > 0, canvasWorkspaceRect.height > 0 else {
+            return
+        }
+        let startTransform = computeTargetGridTransform(for: item, workspaceFrame: canvasWorkspaceRect)
+        isExpandingFromGrid = true
+        isHeroTransitionActive?.wrappedValue = true
+        committedHeroScale = startTransform.scale
+        committedHeroOffset = startTransform.offset
+
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            isExpandingFromGrid = false
+            committedHeroScale = 1.0
+            committedHeroOffset = .zero
+        } completion: {
+            isHeroTransitionActive?.wrappedValue = false
+        }
+    }
+
+    private func computeTargetGridTransform(for item: MediaItem, workspaceFrame: CGRect) -> (scale: CGFloat, offset: CGSize) {
+        guard let targetRect = targetGridCellRect,
+              targetRect.width > 0, targetRect.height > 0,
+              workspaceFrame.width > 0, workspaceFrame.height > 0 else {
+            return (scale: 0.25, offset: heroMetrics.interactiveOffset)
+        }
+        let ratio = session.thumbnailAspectRatio(for: item)
+        let fitted = CullingLayoutCalculator.fittedImageSize(
+            aspectRatio: ratio,
+            in: workspaceFrame.size,
+            mediaKind: item.kind
+        )
+        let scaleX = targetRect.width / max(1.0, fitted.width)
+        let scaleY = targetRect.height / max(1.0, fitted.height)
+        let targetScale = max(0.08, min(1.0, min(scaleX, scaleY)))
+        let offset = CGSize(
+            width: targetRect.midX - workspaceFrame.midX,
+            height: targetRect.midY - workspaceFrame.midY
+        )
+        return (scale: targetScale, offset: offset)
     }
 
     // MARK: - Floating Curation Bar
@@ -249,71 +593,6 @@ struct FilmstripView: View {
         }
     }
 
-    // MARK: - Unified Thumbnail Strip
-
-    @ViewBuilder
-    private func thumbnailStrip(position: FilmstripDockPosition) -> some View {
-        ScrollViewReader { proxy in
-            let isHorizontal = position == .bottom
-            let axis: Axis.Set = isHorizontal ? .horizontal : .vertical
-            ScrollView(axis, showsIndicators: true) {
-                if isHorizontal {
-                    LazyHStack(spacing: 8) {
-                        ForEach(session.visibleItems) { item in
-                            thumbnailItemView(for: item, position: .bottom)
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                } else {
-                    LazyVStack(spacing: 8) {
-                        ForEach(session.visibleItems) { item in
-                            thumbnailItemView(for: item, position: .right)
-                                .frame(maxWidth: .infinity)
-                        }
-                    }
-                    .padding(.vertical, 12)
-                    .padding(.horizontal, 8)
-                }
-            }
-            .onChange(of: session.selectedItemID) { _, newID in
-                if let newID {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        proxy.scrollTo(newID, anchor: .center)
-                    }
-                }
-            }
-        }
-    }
-
-    private func thumbnailItemView(for item: MediaItem, position: FilmstripDockPosition) -> some View {
-        FilmstripThumbnailCell(
-            item: item,
-            curation: session.curationMetadata(for: item),
-            syncState: session.syncState(for: item),
-            isSelected: session.selectedItemID == item.id,
-            dockPosition: position,
-            previewSource: session.previewSource,
-            cacheGeneration: session.cacheGeneration,
-            cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
-            aspectRatio: session.thumbnailAspectRatio(for: item),
-            onSelect: {
-                session.selectedItemID = item.id
-            },
-            loadThumbnail: { [session, item] in
-                await session.loadThumbnailImage(for: item, maxPixelSize: 360)
-            },
-            onThumbnailLoaded: { [session, item] image in
-                session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
-            },
-            hydrateMetadata: { [session, item] in
-                await session.hydrateMetadata(for: item)
-            }
-        )
-        .equatable()
-        .id(item.id)
-    }
-
     // MARK: - Conflict Alert Banner
 
     private var conflictAlertBanner: some View {
@@ -339,6 +618,267 @@ struct FilmstripView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color.orange.opacity(0.15))
+    }
+}
+
+// MARK: - Centered-Playhead FilmstripScrubber
+
+struct FilmstripScrubber: View {
+    let session: CullingSession
+    let dockPosition: FilmstripDockPosition
+    var pageDragOffset: CGFloat = 0.0
+    var mainCanvasWidth: CGFloat = 1000.0
+
+    @State private var scrubbedItemID: String?
+    @State private var isProgrammaticJump: Bool = false
+    @State private var isUserScrolling: Bool = false
+    @State private var macDragAnchorIndex: Int? = nil
+
+    var body: some View {
+        GeometryReader { geo in
+            let isHorizontal = dockPosition == .bottom
+            let axis: Axis.Set = isHorizontal ? .horizontal : .vertical
+            let scrubberSpan = isHorizontal ? geo.size.width : geo.size.height
+            let activeTileRawSize: CGSize = {
+                if let selected = session.selectedItem {
+                    return session.filmstripThumbnailSize(for: selected, dockPosition: dockPosition)
+                }
+                return CullingLayoutCalculator.filmstripThumbnailSize(aspectRatio: 1.5, dockPosition: dockPosition)
+            }()
+            let activeTileSpan = isHorizontal ? activeTileRawSize.width : activeTileRawSize.height
+            let activeSlotSpan = activeTileSpan + CullingLayoutCalculator.scrubberActiveTileBreathingMargin * 2.0
+            let halfViewportInset = CullingLayoutCalculator.scrubberHalfViewportInset(
+                scrubberSpan: scrubberSpan,
+                activeTileSpan: activeSlotSpan
+            )
+            let pageStride = max(1.0, mainCanvasWidth + CullingLayoutCalculator.filmstripInterPageGutter)
+            let liveSwipeOffset = CullingLayoutCalculator.scrubberDragInterpolationOffset(
+                pageDragOffset: pageDragOffset,
+                pageStride: pageStride,
+                activeTileSpan: activeTileSpan,
+                dockPosition: dockPosition
+            )
+
+            ScrollViewReader { proxy in
+                ScrollView(axis) {
+                    if isHorizontal {
+                        LazyHStack(spacing: CullingLayoutCalculator.scrubberInterTileSpacing) {
+                            ForEach(session.visibleItems) { item in
+                                scrubberCell(for: item, proxy: proxy)
+                            }
+                        }
+                        .scrollTargetLayout()
+                        .offset(x: liveSwipeOffset)
+                    } else {
+                        LazyVStack(spacing: CullingLayoutCalculator.scrubberInterTileSpacing) {
+                            ForEach(session.visibleItems) { item in
+                                scrubberCell(for: item, proxy: proxy)
+                            }
+                        }
+                        .scrollTargetLayout()
+                        .offset(y: liveSwipeOffset)
+                    }
+                }
+                .contentMargins(isHorizontal ? .horizontal : .vertical, halfViewportInset, for: .scrollContent)
+                .scrollPosition(id: $scrubbedItemID, anchor: .center)
+                .scrollIndicators(.hidden)
+                .modifier(
+                    ScrubberScrollPhaseAndVelocityModifier(
+                        isHorizontal: isHorizontal,
+                        onScrollStateChanged: { isScrolling, velocity in
+                            isUserScrolling = isScrolling
+                            if !isScrolling {
+                                isProgrammaticJump = false
+                            }
+                            session.updateScrubState(
+                                isScrubbing: isScrolling,
+                                velocityPointsPerSecond: velocity
+                            )
+                        }
+                    )
+                )
+                #if os(macOS)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 6)
+                        .onChanged { value in
+                            handleMacClickAndDragScrub(value: value, isHorizontal: isHorizontal, proxy: proxy)
+                        }
+                        .onEnded { _ in
+                            macDragAnchorIndex = nil
+                            session.updateScrubState(isScrubbing: false, velocityPointsPerSecond: 0)
+                        }
+                )
+                #endif
+                .onAppear {
+                    scrubbedItemID = session.selectedItemID
+                    if let selectedID = session.selectedItemID {
+                        proxy.scrollTo(selectedID, anchor: .center)
+                    }
+                }
+                .onChange(of: scrubbedItemID) { _, newID in
+                    guard let newID, newID != session.selectedItemID else { return }
+                    guard !isProgrammaticJump else { return }
+                    var tx = Transaction(animation: nil)
+                    tx.disablesAnimations = true
+                    withTransaction(tx) {
+                        session.selectedItemID = newID
+                    }
+                    if isUserScrolling || session.isScrubbing {
+                        ScrubberHaptics.fireSelectionChanged()
+                    }
+                }
+                .onChange(of: session.selectedItemID) { _, newID in
+                    guard let newID, scrubbedItemID != newID else { return }
+                    scrubbedItemID = newID
+                    withAnimation(.snappy(duration: 0.22)) {
+                        proxy.scrollTo(newID, anchor: .center)
+                    }
+                }
+            }
+        }
+    }
+
+    private func scrubberCell(for item: MediaItem, proxy: ScrollViewProxy) -> some View {
+        let isSelected = session.selectedItemID == item.id
+        return FilmstripThumbnailCell(
+            item: item,
+            curation: session.curationMetadata(for: item),
+            syncState: session.syncState(for: item),
+            isSelected: isSelected,
+            dockPosition: dockPosition,
+            previewSource: session.previewSource,
+            cacheGeneration: session.cacheGeneration,
+            cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
+            aspectRatio: session.thumbnailAspectRatio(for: item),
+            onSelect: {
+                guard session.selectedItemID != item.id else { return }
+                isProgrammaticJump = true
+                session.updateScrubState(isScrubbing: false, velocityPointsPerSecond: 0)
+                // Direct cut on the main viewport without flashing intermediate photos
+                var tx = Transaction(animation: nil)
+                tx.disablesAnimations = true
+                withTransaction(tx) {
+                    session.selectedItemID = item.id
+                }
+                // Smoothly scroll the scrubber ribbon to center the tapped tile
+                withAnimation(.snappy(duration: 0.25)) {
+                    scrubbedItemID = item.id
+                    proxy.scrollTo(item.id, anchor: .center)
+                } completion: {
+                    isProgrammaticJump = false
+                }
+            },
+            loadThumbnail: { [session, item] in
+                await session.loadThumbnailImage(for: item, maxPixelSize: 360)
+            },
+            onThumbnailLoaded: { [session, item] image in
+                session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
+            },
+            hydrateMetadata: { [session, item] in
+                await session.hydrateMetadata(for: item)
+            }
+        )
+        .equatable()
+        .padding(
+            dockPosition == .bottom ? .horizontal : .vertical,
+            isSelected ? CullingLayoutCalculator.scrubberActiveTileBreathingMargin : 0.0
+        )
+        .animation(.snappy(duration: 0.2), value: isSelected)
+        .id(item.id)
+    }
+
+    #if os(macOS)
+    private func handleMacClickAndDragScrub(
+        value: DragGesture.Value,
+        isHorizontal: Bool,
+        proxy: ScrollViewProxy
+    ) {
+        let visible = session.visibleItems
+        guard !visible.isEmpty else { return }
+        if macDragAnchorIndex == nil {
+            if let currentID = session.selectedItemID,
+               let idx = session.cullingSequence.index(for: currentID) {
+                macDragAnchorIndex = idx
+            } else {
+                macDragAnchorIndex = 0
+            }
+        }
+        guard let anchorIndex = macDragAnchorIndex else { return }
+        let delta = isHorizontal ? -value.translation.width : -value.translation.height
+        let predictedDelta = isHorizontal ? -value.predictedEndTranslation.width : -value.predictedEndTranslation.height
+        let velocityEstimate = abs(predictedDelta - delta) * 8.0
+        session.updateScrubState(isScrubbing: true, velocityPointsPerSecond: velocityEstimate)
+
+        let stepSpan: CGFloat = 32.0
+        let indexDelta = Int((delta / stepSpan).rounded())
+        let targetIndex = min(visible.count - 1, max(0, anchorIndex + indexDelta))
+        let targetID = visible[targetIndex].id
+        if session.selectedItemID != targetID {
+            var tx = Transaction(animation: nil)
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                session.selectedItemID = targetID
+                scrubbedItemID = targetID
+                proxy.scrollTo(targetID, anchor: .center)
+            }
+        }
+    }
+    #endif
+}
+
+private struct ScrubberScrollPhaseAndVelocityModifier: ViewModifier {
+    let isHorizontal: Bool
+    let onScrollStateChanged: (Bool, CGFloat) -> Void
+
+    @State private var lastOffset: CGFloat = 0.0
+    @State private var lastTime: TimeInterval = 0.0
+    @State private var currentVelocity: CGFloat = 0.0
+    @State private var isCurrentlyScrolling: Bool = false
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            content
+                .scrollTargetBehavior(.viewAligned(limitBehavior: .never))
+                .onScrollGeometryChange(for: CGFloat.self) { geo in
+                    isHorizontal ? geo.contentOffset.x : geo.contentOffset.y
+                } action: { oldOffset, newOffset in
+                    let now = ProcessInfo.processInfo.systemUptime
+                    let dt = now - lastTime
+                    if dt > 0.002 && dt < 0.5 {
+                        let v = abs(newOffset - oldOffset) / CGFloat(dt)
+                        currentVelocity = v
+                        if isCurrentlyScrolling {
+                            onScrollStateChanged(true, v)
+                        }
+                    }
+                    lastOffset = newOffset
+                    lastTime = now
+                }
+                .onScrollPhaseChange { _, newPhase in
+                    let scrolling = newPhase.isScrolling
+                    isCurrentlyScrolling = scrolling
+                    if !scrolling {
+                        currentVelocity = 0.0
+                    }
+                    onScrollStateChanged(scrolling, scrolling ? currentVelocity : 0.0)
+                }
+        } else {
+            content
+                .scrollTargetBehavior(.viewAligned)
+        }
+    }
+}
+
+@MainActor
+private enum ScrubberHaptics {
+    #if canImport(UIKit) && !os(visionOS)
+    private static let generator = UISelectionFeedbackGenerator()
+    #endif
+
+    static func fireSelectionChanged() {
+        #if canImport(UIKit) && !os(visionOS)
+        generator.selectionChanged()
+        #endif
     }
 }
 
@@ -559,22 +1099,47 @@ struct SwipeActionBadgeView: View {
     }
 }
 
+// MARK: - Active Drag Gesture Mode
+
+private enum CanvasDragMode {
+    case undecided
+    case zoomedPanAndHandoff
+    case verticalPullToGrid
+    case swipeCuration
+    case horizontalPaging
+}
+
 // MARK: - Filmstrip Image Canvas View
 
 struct FilmstripImageCanvasView: View {
     let item: MediaItem
     let session: CullingSession
+    var isCurrentPage: Bool = true
+    var pageDragOffset: Binding<CGFloat> = .constant(0)
+    var onCommitPageTurn: ((BorderTapDirection?) -> Void)? = nil
+    var onInstantBorderTap: ((CGPoint) -> Bool)? = nil
+    var onHeroGestureChanged: ((CGFloat, CGSize, CGSize) -> Void)? = nil
+    var onHeroGestureEnded: (() -> Void)? = nil
 
     @State private var previewImage: CGImage?
     @State private var zoomScale: CGFloat = 1.0
     @State private var pinchScale: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
-    @State private var dragOffset: CGSize = .zero
+    @State private var liveClampedPanOffset: CGSize? = nil
     @State private var swipeTranslation: CGFloat = 0.0
+    @State private var activeDragMode: CanvasDragMode = .undecided
     @State private var isLoading = false
 
+    private var rawCombinedScale: CGFloat {
+        zoomScale * pinchScale
+    }
+
     private var effectiveScale: CGFloat {
-        min(4.0, max(1.0, zoomScale * pinchScale))
+        min(4.0, max(1.0, rawCombinedScale))
+    }
+
+    private var effectivePanOffset: CGSize {
+        liveClampedPanOffset ?? panOffset
     }
 
     private var displayedImage: CGImage? {
@@ -583,16 +1148,30 @@ struct FilmstripImageCanvasView: View {
            let fullRaw = session.inMemoryFullRAWImage(for: item) {
             return fullRaw
         }
-        return previewImage
-            ?? session.inMemoryPreviewImage(for: item, maxPixelSize: 2048)
-            ?? session.inMemoryThumbnailImage(for: item, maxPixelSize: 360)
+        if let preview = previewImage ?? session.inMemoryPreviewImage(for: item, maxPixelSize: 2048) {
+            return preview
+        }
+        return session.inMemoryThumbnailImage(for: item, maxPixelSize: 360)
     }
 
+    private var resolvedAspectRatio: CGFloat {
+        CullingLayoutCalculator.resolveAspectRatio(
+            aspectRatio: session.thumbnailAspectRatio(for: item),
+            displayedThumbnail: displayedImage,
+            mediaKind: item.kind
+        )
+    }
 
     var body: some View {
         GeometryReader { geo in
             let threshold = min(max(80.0, geo.size.width * 0.22), 140.0)
-            let isSwipeActive = session.isSwipeModeEnabled && effectiveScale <= 1.0
+            let isSwipeActive = session.isSwipeModeEnabled && effectiveScale <= 1.0 && isCurrentPage
+            let fittedSize = CullingLayoutCalculator.fittedImageSize(
+                aspectRatio: resolvedAspectRatio,
+                in: geo.size,
+                mediaKind: item.kind
+            )
+            let neighbors = session.adjacentItems(for: item.id)
 
             ZStack {
                 Color.clear
@@ -603,8 +1182,8 @@ struct FilmstripImageCanvasView: View {
                         .scaledToFit()
                         .scaleEffect(effectiveScale)
                         .offset(
-                            x: panOffset.width + dragOffset.width + (isSwipeActive ? swipeTranslation : 0),
-                            y: panOffset.height + dragOffset.height
+                            x: effectivePanOffset.width + (isSwipeActive ? swipeTranslation : 0),
+                            y: effectivePanOffset.height
                         )
                         .rotationEffect(
                             Angle.degrees(
@@ -619,7 +1198,7 @@ struct FilmstripImageCanvasView: View {
                         .tint(.white)
                 }
 
-                // Overlay action badge when swiping horizontally at 1.0x zoom
+                // Overlay action badge when swiping horizontally at 1.0x zoom in SwipeMode
                 if isSwipeActive {
                     if swipeTranslation > 20 {
                         let progress = min(1.0, (swipeTranslation - 20) / max(1.0, threshold - 20))
@@ -638,62 +1217,184 @@ struct FilmstripImageCanvasView: View {
                     }
                 }
             }
-
             .contentShape(Rectangle())
-            // Double-tap zoom gesture (toggles between 1.0 and 2.0)
+            // Point-anchored double-tap zoom (1.0x <-> 2.5x) outside active border tap zones
             .gesture(
-                TapGesture(count: 2).onEnded {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        if zoomScale > 1.0 {
-                            zoomScale = 1.0
-                            panOffset = .zero
-                            dragOffset = .zero
-                        } else {
-                            zoomScale = 2.0
+                SpatialTapGesture(count: 2)
+                    .onEnded { value in
+                        guard isCurrentPage else { return }
+                        if session.isBorderTapNavigationEnabled,
+                           CullingLayoutCalculator.borderTapDirection(at: value.location, in: geo.size) != nil {
+                            resetZoomState(animated: false)
+                            _ = onInstantBorderTap?(value.location) ?? session.handleBorderTap(at: value.location, in: geo.size)
+                            return
+                        }
+                        let result = CullingLayoutCalculator.resolveDoubleTapZoom(
+                            currentScale: zoomScale,
+                            tapLocation: value.location,
+                            containerSize: geo.size,
+                            fittedSize: fittedSize
+                        )
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                            zoomScale = result.scale
+                            panOffset = result.panOffset
+                            liveClampedPanOffset = nil
                         }
                     }
-                }
             )
-            // Pinch-to-zoom (1.0x - 4.0x)
+            // Stationary single-tap BorderTapNavigation (instant 0ms cut, resets zoom to 1.0x)
+            .simultaneousGesture(
+                SpatialTapGesture(count: 1)
+                    .onEnded { value in
+                        guard isCurrentPage, session.isBorderTapNavigationEnabled else { return }
+                        guard CullingLayoutCalculator.borderTapDirection(at: value.location, in: geo.size) != nil else {
+                            return
+                        }
+                        resetZoomState(animated: false)
+                        if let onInstantBorderTap {
+                            _ = onInstantBorderTap(value.location)
+                        } else {
+                            _ = session.handleBorderTap(at: value.location, in: geo.size)
+                        }
+                    }
+            )
+            // Pinch-to-zoom (1.0x - 4.0x) AND continuous pinch-out (< 1.0x) to Grid
             .simultaneousGesture(
                 MagnifyGesture()
                     .onChanged { value in
+                        guard isCurrentPage else { return }
                         pinchScale = value.magnification
                         if swipeTranslation != 0 {
                             swipeTranslation = 0
                         }
+                        let combined = zoomScale * value.magnification
+                        if combined < 1.0 {
+                            liveClampedPanOffset = .zero
+                            onHeroGestureChanged?(combined, .zero, .zero)
+                        } else {
+                            onHeroGestureChanged?(1.0, .zero, .zero)
+                            liveClampedPanOffset = CullingLayoutCalculator.clampPanOffset(
+                                panOffset,
+                                fittedSize: fittedSize,
+                                scale: min(4.0, combined)
+                            )
+                        }
                     }
                     .onEnded { value in
-                        zoomScale = min(4.0, max(1.0, zoomScale * value.magnification))
-                        pinchScale = 1.0
-                        if zoomScale <= 1.0 {
+                        guard isCurrentPage else { return }
+                        let combined = zoomScale * value.magnification
+                        if combined < 1.0 {
+                            zoomScale = 1.0
+                            pinchScale = 1.0
                             panOffset = .zero
-                            dragOffset = .zero
+                            liveClampedPanOffset = nil
+                            onHeroGestureEnded?()
+                        } else {
+                            zoomScale = min(4.0, max(1.0, combined))
+                            pinchScale = 1.0
+                            if zoomScale <= 1.01 {
+                                zoomScale = 1.0
+                                panOffset = .zero
+                                liveClampedPanOffset = nil
+                            } else {
+                                panOffset = CullingLayoutCalculator.clampPanOffset(
+                                    panOffset,
+                                    fittedSize: fittedSize,
+                                    scale: zoomScale
+                                )
+                                liveClampedPanOffset = nil
+                            }
                         }
                     }
             )
-            // Pan gesture when zoomed (> 1.0x) OR Swipe curation when at 1.0x
+            // Multiplexed 1-finger drag: Zoomed Pan + Edge-Pan Handoff | Vertical Pull-to-Grid | SwipeMode | 3-Page Carousel
             .simultaneousGesture(
-                DragGesture()
+                DragGesture(minimumDistance: 8)
                     .onChanged { value in
-                        if effectiveScale > 1.0 {
-                            // Zoomed: inspect focus sharpness by panning
-                            dragOffset = value.translation
-                        } else if session.isSwipeModeEnabled && pinchScale == 1.0 {
-                            // 1.0x zoom: swipe curation
+                        guard isCurrentPage else { return }
+                        if activeDragMode == .undecided {
+                            if effectiveScale > 1.01 {
+                                activeDragMode = .zoomedPanAndHandoff
+                            } else if session.isVerticalPullToGridAllowed
+                                        && value.translation.height > 12.0
+                                        && value.translation.height > abs(value.translation.width) * 1.15 {
+                                activeDragMode = .verticalPullToGrid
+                            } else if session.isSwipeModeEnabled {
+                                activeDragMode = .swipeCuration
+                            } else {
+                                activeDragMode = .horizontalPaging
+                            }
+                        }
+
+                        switch activeDragMode {
+                        case .zoomedPanAndHandoff:
+                            let handoff = CullingLayoutCalculator.resolveZoomPanAndPageHandoff(
+                                currentPanOffset: panOffset,
+                                dragTranslation: value.translation,
+                                fittedSize: fittedSize,
+                                scale: effectiveScale,
+                                hasPrevious: neighbors.previous != nil,
+                                hasNext: neighbors.next != nil
+                            )
+                            liveClampedPanOffset = handoff.clampedPanOffset
+                            pageDragOffset.wrappedValue = handoff.pageDragOffset
+
+                        case .verticalPullToGrid:
+                            onHeroGestureChanged?(1.0, value.translation, value.predictedEndTranslation)
+
+                        case .swipeCuration:
                             swipeTranslation = value.translation.width
+
+                        case .horizontalPaging:
+                            pageDragOffset.wrappedValue = CullingLayoutCalculator.rubberBandedPageOffset(
+                                value.translation.width,
+                                hasPrevious: neighbors.previous != nil,
+                                hasNext: neighbors.next != nil
+                            )
+
+                        case .undecided:
+                            break
                         }
                     }
                     .onEnded { value in
-                        if effectiveScale > 1.0 {
-                            let maxPanX = max(0, (geo.size.width * (effectiveScale - 1)) / 2)
-                            let maxPanY = max(0, (geo.size.height * (effectiveScale - 1)) / 2)
-                            let newX = panOffset.width + value.translation.width
-                            let newY = panOffset.height + value.translation.height
-                            panOffset.width = min(maxPanX, max(-maxPanX, newX))
-                            panOffset.height = min(maxPanY, max(-maxPanY, newY))
-                            dragOffset = .zero
-                        } else if session.isSwipeModeEnabled && pinchScale == 1.0 {
+                        guard isCurrentPage else { return }
+                        let completedMode = activeDragMode
+                        activeDragMode = .undecided
+
+                        switch completedMode {
+                        case .zoomedPanAndHandoff:
+                            let handoff = CullingLayoutCalculator.resolveZoomPanAndPageHandoff(
+                                currentPanOffset: panOffset,
+                                dragTranslation: value.translation,
+                                fittedSize: fittedSize,
+                                scale: effectiveScale,
+                                hasPrevious: neighbors.previous != nil,
+                                hasNext: neighbors.next != nil
+                            )
+                            let velocityDeltaX = value.predictedEndTranslation.width - value.translation.width
+                            let predictedOverflowX = handoff.pageDragOffset + velocityDeltaX
+                            let committedDirection = CullingLayoutCalculator.shouldCommitPageTurn(
+                                pageDragOffset: handoff.pageDragOffset,
+                                predictedEndTranslationX: predictedOverflowX,
+                                containerWidth: geo.size.width,
+                                hasPrevious: neighbors.previous != nil,
+                                hasNext: neighbors.next != nil
+                            )
+                            if let committedDirection {
+                                // Page transition committed: reset outgoing item's zoom to 1.0x
+                                resetZoomState(animated: true)
+                                onCommitPageTurn?(committedDirection)
+                            } else {
+                                // Sprung back to current page: preserve zoom state and clamped pan
+                                panOffset = handoff.clampedPanOffset
+                                liveClampedPanOffset = nil
+                                onCommitPageTurn?(nil)
+                            }
+
+                        case .verticalPullToGrid:
+                            onHeroGestureEnded?()
+
+                        case .swipeCuration:
                             if value.translation.width >= threshold {
                                 withAnimation(.easeOut(duration: 0.2)) {
                                     swipeTranslation = geo.size.width + 100
@@ -713,12 +1414,29 @@ struct FilmstripImageCanvasView: View {
                                     swipeTranslation = 0
                                 }
                             }
+
+                        case .horizontalPaging:
+                            let committedDirection = CullingLayoutCalculator.shouldCommitPageTurn(
+                                pageDragOffset: pageDragOffset.wrappedValue,
+                                predictedEndTranslationX: value.predictedEndTranslation.width,
+                                containerWidth: geo.size.width,
+                                hasPrevious: neighbors.previous != nil,
+                                hasNext: neighbors.next != nil
+                            )
+                            onCommitPageTurn?(committedDirection)
+
+                        case .undecided:
+                            break
                         }
                     }
             )
-            .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
+            .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)-\(session.isHighVelocityScrubbing)") {
                 if let inMemory = session.inMemoryPreviewImage(for: item, maxPixelSize: 2048) {
                     previewImage = inMemory
+                    return
+                }
+                // Suppress new full-resolution decodes while actively scrubbing at high velocity
+                guard !session.isHighVelocityScrubbing else {
                     return
                 }
                 isLoading = true
@@ -730,6 +1448,22 @@ struct FilmstripImageCanvasView: View {
             }
         }
     }
+
+    private func resetZoomState(animated: Bool) {
+        if animated {
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
+                zoomScale = 1.0
+                pinchScale = 1.0
+                panOffset = .zero
+                liveClampedPanOffset = nil
+            }
+        } else {
+            zoomScale = 1.0
+            pinchScale = 1.0
+            panOffset = .zero
+            liveClampedPanOffset = nil
+        }
+    }
 }
 
 // MARK: - Filmstrip Video Canvas View
@@ -738,14 +1472,23 @@ struct FilmstripVideoCanvasView: View {
     let url: URL
     var item: MediaItem? = nil
     var session: CullingSession? = nil
+    var isCurrentPage: Bool = true
+    var isExternalGestureActive: Bool = false
+    var pageDragOffset: Binding<CGFloat> = .constant(0)
+    var onCommitPageTurn: ((BorderTapDirection?) -> Void)? = nil
+    var onInstantBorderTap: ((CGPoint) -> Bool)? = nil
+    var onHeroGestureChanged: ((CGFloat, CGSize, CGSize) -> Void)? = nil
+    var onHeroGestureEnded: (() -> Void)? = nil
 
     @State private var player: AVPlayer?
     @State private var swipeTranslation: CGFloat = 0.0
+    @State private var activeDragMode: CanvasDragMode = .undecided
 
     var body: some View {
         GeometryReader { geo in
             let threshold = min(max(80.0, geo.size.width * 0.22), 140.0)
-            let isSwipeActive = (session?.isSwipeModeEnabled == true) && item != nil
+            let isSwipeActive = (session?.isSwipeModeEnabled == true) && item != nil && isCurrentPage
+            let neighbors: (previous: MediaItem?, current: MediaItem?, next: MediaItem?) = session?.adjacentItems(for: item?.id) ?? (nil, item, nil)
 
             ZStack {
                 Group {
@@ -784,36 +1527,123 @@ struct FilmstripVideoCanvasView: View {
                 }
             }
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture()
-                    .onChanged { value in
-                        if isSwipeActive {
-                            swipeTranslation = value.translation.width
-                        }
-                    }
+            .simultaneousGesture(
+                SpatialTapGesture(count: 1)
                     .onEnded { value in
-                        guard isSwipeActive, let session, let item else { return }
-                        if value.translation.width >= threshold {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                swipeTranslation = geo.size.width + 100
-                            } completion: {
-                                swipeTranslation = 0
-                            }
-                            session.executeSwipe(.right, for: item)
-                        } else if value.translation.width <= -threshold {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                swipeTranslation = -geo.size.width - 100
-                            } completion: {
-                                swipeTranslation = 0
-                            }
-                            session.executeSwipe(.left, for: item)
+                        guard isCurrentPage, let session, session.isBorderTapNavigationEnabled else { return }
+                        guard CullingLayoutCalculator.borderTapDirection(at: value.location, in: geo.size) != nil else {
+                            return
+                        }
+                        player?.pause()
+                        if let onInstantBorderTap {
+                            _ = onInstantBorderTap(value.location)
                         } else {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                                swipeTranslation = 0
-                            }
+                            _ = session.handleBorderTap(at: value.location, in: geo.size)
                         }
                     }
             )
+            .simultaneousGesture(
+                MagnifyGesture()
+                    .onChanged { value in
+                        guard isCurrentPage else { return }
+                        if value.magnification < 1.0 {
+                            player?.pause()
+                            onHeroGestureChanged?(value.magnification, .zero, .zero)
+                        }
+                    }
+                    .onEnded { value in
+                        guard isCurrentPage else { return }
+                        if value.magnification < 1.0 {
+                            onHeroGestureEnded?()
+                        }
+                    }
+            )
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { value in
+                        guard isCurrentPage, let session else { return }
+                        if activeDragMode == .undecided {
+                            player?.pause()
+                            if session.isVerticalPullToGridAllowed
+                                && value.translation.height > 12.0
+                                && value.translation.height > abs(value.translation.width) * 1.15 {
+                                activeDragMode = .verticalPullToGrid
+                            } else if session.isSwipeModeEnabled {
+                                activeDragMode = .swipeCuration
+                            } else {
+                                activeDragMode = .horizontalPaging
+                            }
+                        }
+
+                        switch activeDragMode {
+                        case .verticalPullToGrid:
+                            onHeroGestureChanged?(1.0, value.translation, value.predictedEndTranslation)
+
+                        case .swipeCuration:
+                            swipeTranslation = value.translation.width
+
+                        case .horizontalPaging:
+                            pageDragOffset.wrappedValue = CullingLayoutCalculator.rubberBandedPageOffset(
+                                value.translation.width,
+                                hasPrevious: neighbors.previous != nil,
+                                hasNext: neighbors.next != nil
+                            )
+
+                        default:
+                            break
+                        }
+                    }
+                    .onEnded { value in
+                        guard isCurrentPage, let session else { return }
+                        let completedMode = activeDragMode
+                        activeDragMode = .undecided
+
+                        switch completedMode {
+                        case .verticalPullToGrid:
+                            onHeroGestureEnded?()
+
+                        case .swipeCuration:
+                            guard let item else { return }
+                            if value.translation.width >= threshold {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = geo.size.width + 100
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.executeSwipe(.right, for: item)
+                            } else if value.translation.width <= -threshold {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = -geo.size.width - 100
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.executeSwipe(.left, for: item)
+                            } else {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                    swipeTranslation = 0
+                                }
+                            }
+
+                        case .horizontalPaging:
+                            let committedDirection = CullingLayoutCalculator.shouldCommitPageTurn(
+                                pageDragOffset: pageDragOffset.wrappedValue,
+                                predictedEndTranslationX: value.predictedEndTranslation.width,
+                                containerWidth: geo.size.width,
+                                hasPrevious: neighbors.previous != nil,
+                                hasNext: neighbors.next != nil
+                            )
+                            onCommitPageTurn?(committedDirection)
+
+                        default:
+                            break
+                        }
+                    }
+            )
+            .onChange(of: isExternalGestureActive) { _, isActive in
+                if isActive {
+                    player?.pause()
+                }
+            }
             .onAppear {
                 player = AVPlayer(url: url)
             }
@@ -852,8 +1682,9 @@ struct FilmstripThumbnailCell: View, Equatable {
         thumbnail ?? cachedThumbnail
     }
 
-    private var thumbnailSize: CGSize {
-        CullingLayoutCalculator.filmstripThumbnailSize(
+    var thumbnailSize: CGSize {
+        CullingLayoutCalculator.scrubberTileSize(
+            isSelected: isSelected,
             aspectRatio: aspectRatio,
             displayedThumbnail: displayedImage,
             dockPosition: dockPosition,
@@ -871,143 +1702,133 @@ struct FilmstripThumbnailCell: View, Equatable {
 
     var body: some View {
         let size = thumbnailSize
-        let isCompact = size.width < 70
+        let isCompact = size.width < 60 || size.height < 52
 
         Button(action: {
             onSelect?()
         }) {
-            VStack(spacing: 4) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(neutralMattingColor)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
-                        )
+            ZStack {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(neutralMattingColor)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
+                    )
 
-                    if let cgImage = displayedImage {
-                        Image(decorative: cgImage, scale: 1.0, orientation: .up)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        Image(systemName: item.kind == .video ? "film" : "photo")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                if let cgImage = displayedImage {
+                    Image(decorative: cgImage, scale: 1.0, orientation: .up)
+                        .resizable()
+                        .aspectRatio(contentMode: isSelected ? .fit : .fill)
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                        .opacity(curation.pickFlag == .rejected ? 0.45 : 1.0)
+                } else {
+                    Image(systemName: item.kind == .video ? "film" : "photo")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
-                    // Color label indicator: A sleek vertical accent stripe on the left edge
-                    if curation.colorLabel != .none {
-                        HStack {
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .fill(curation.colorLabel.displayColor)
-                                .frame(width: 4)
-                                .padding(.vertical, 6)
-                                .padding(.leading, 3.5)
-                            Spacer()
-                        }
-                    }
-
-                    // Rating & Flag overlays
-                    VStack {
-                        // Top row: format and sync badges with 3pt spacing and corner offsets
-                        HStack(spacing: 3) {
-                            if item.isMediaPair {
-                                Text("RAW+JPG")
-                                    .font(.caption2.weight(.bold))
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 2)
-                                    .background(.black.opacity(0.8), in: Capsule())
-                                    .foregroundStyle(.yellow)
-                            } else if item.kind == .video {
-                                Image(systemName: "video.fill")
-                                    .font(.caption2)
-                                    .padding(3)
-                                    .background(.black.opacity(0.8), in: Circle())
-                                    .foregroundStyle(.white)
-                            }
-
-                            Spacer()
-
-                            switch syncState {
-                            case .synced:
-                                EmptyView()
-                            case .pendingWrite:
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .font(.caption2)
-                                    .foregroundStyle(.orange)
-                            case .conflicted:
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.orange)
-                            case .loading:
-                                ProgressView()
-                                    .controlSize(.mini)
-                            case .syncError:
-                                Image(systemName: "exclamationmark.circle.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.red)
-                            }
-                        }
-                        .padding(.top, 3)
-                        .padding(.horizontal, (curation.colorLabel != .none) ? 8 : 3)
-
+                // Color label indicator: A sleek vertical accent stripe on the left edge
+                if curation.colorLabel != .none {
+                    HStack {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(curation.colorLabel.displayColor)
+                            .frame(width: 3.5)
+                            .padding(.vertical, 4)
+                            .padding(.leading, 2.5)
                         Spacer()
-
-                        // Bottom row: star rating pill and pick flag circle with compact adjustments
-                        HStack(spacing: isCompact ? 1 : 2) {
-                            if curation.starRating > 0 {
-                                HStack(spacing: 1) {
-                                    Image(systemName: "star.fill")
-                                        .font(.caption2)
-                                        .foregroundStyle(.yellow)
-                                    Text("\(curation.starRating.value)")
-                                        .font(.caption2.weight(.bold))
-                                        .foregroundStyle(.white)
-                                }
-                                .padding(.horizontal, isCompact ? 2.5 : 4)
-                                .padding(.vertical, 2)
-                                .background(.black.opacity(0.8), in: Capsule())
-                            }
-
-                            Spacer()
-
-                            switch curation.pickFlag {
-                            case .picked:
-                                Image(systemName: "flag.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.green)
-                                    .padding(isCompact ? 2 : 3)
-                                    .background(.black.opacity(0.8), in: Circle())
-                            case .rejected:
-                                Image(systemName: "xmark")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(.red)
-                                    .padding(isCompact ? 2 : 3)
-                                    .background(.black.opacity(0.8), in: Circle())
-                            case .unflagged:
-                                EmptyView()
-                            }
-                        }
-                        .padding(.bottom, 3)
-                        .padding(.horizontal, (curation.colorLabel != .none) ? (isCompact ? 8 : 9) : (isCompact ? 3 : 4))
                     }
                 }
-                .frame(width: size.width, height: size.height)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2.5)
-                )
 
-                Text(item.baseName)
-                    .font(.caption.weight(isSelected ? .bold : .regular))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
-                    .frame(width: max(size.width, 64))
+                // Compact Rating & Flag overlays
+                VStack {
+                    HStack(spacing: 2) {
+                        if item.isMediaPair {
+                            Text(isCompact ? "R+J" : "RAW+JPG")
+                                .font(.system(size: isCompact ? 8 : 9, weight: .bold))
+                                .padding(.horizontal, isCompact ? 3 : 4)
+                                .padding(.vertical, 1.5)
+                                .background(.black.opacity(0.8), in: Capsule())
+                                .foregroundStyle(.yellow)
+                        } else if item.kind == .video {
+                            Image(systemName: "video.fill")
+                                .font(.system(size: 8, weight: .semibold))
+                                .padding(2.5)
+                                .background(.black.opacity(0.8), in: Circle())
+                                .foregroundStyle(.white)
+                        }
+
+                        Spacer(minLength: 0)
+
+                        switch syncState {
+                        case .synced:
+                            EmptyView()
+                        case .pendingWrite:
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 8))
+                                .foregroundStyle(.orange)
+                        case .conflicted:
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 8))
+                                .foregroundStyle(.orange)
+                        case .loading:
+                            ProgressView()
+                                .controlSize(.mini)
+                        case .syncError:
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .font(.system(size: 8))
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    .padding(.top, 2.5)
+                    .padding(.horizontal, (curation.colorLabel != .none) ? 6 : 2.5)
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 1) {
+                        if curation.starRating > 0 {
+                            HStack(spacing: 1) {
+                                Image(systemName: "star.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.yellow)
+                                Text("\(curation.starRating.value)")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                            .padding(.horizontal, isCompact ? 2.5 : 3.5)
+                            .padding(.vertical, 1.5)
+                            .background(.black.opacity(0.8), in: Capsule())
+                        }
+
+                        Spacer(minLength: 0)
+
+                        switch curation.pickFlag {
+                        case .picked:
+                            Image(systemName: "flag.fill")
+                                .font(.system(size: 8))
+                                .foregroundStyle(.green)
+                                .padding(2)
+                                .background(.black.opacity(0.8), in: Circle())
+                        case .rejected:
+                            Image(systemName: "xmark")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.red)
+                                .padding(2)
+                                .background(.black.opacity(0.8), in: Circle())
+                        case .unflagged:
+                            EmptyView()
+                        }
+                    }
+                    .padding(.bottom, 2.5)
+                    .padding(.horizontal, (curation.colorLabel != .none) ? 6 : 2.5)
+                }
             }
+            .frame(width: size.width, height: size.height)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2.0)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

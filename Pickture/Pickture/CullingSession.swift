@@ -140,10 +140,32 @@ final class CullingSession: CullingInteractionTarget {
     var subfolderMode: SubfolderMode = .immediate
     var previewSource: PreviewSource = .preferRaster
     var isBorderTapNavigationEnabled: Bool = true
+    static let highVelocityScrubThresholdPointsPerSecond: CGFloat = 650.0
     var viewMode: ViewMode = .grid
     var filmstripDockPosition: FilmstripDockPosition = .bottom
     var isAutoAdvanceEnabled: Bool = false
     var isSwipeModeEnabled: Bool = false
+    private(set) var isScrubbing: Bool = false
+    private(set) var isHighVelocityScrubbing: Bool = false
+
+    var allowVerticalPullToGridInSwipeMode: Bool {
+        get { interactionController.allowVerticalPullToGridInSwipeMode }
+        set { interactionController.allowVerticalPullToGridInSwipeMode = newValue }
+    }
+
+    var isVerticalPullToGridAllowed: Bool {
+        !isSwipeModeEnabled || allowVerticalPullToGridInSwipeMode
+    }
+
+    func updateScrubState(isScrubbing: Bool, velocityPointsPerSecond: CGFloat = 0.0) {
+        let highVelocity = isScrubbing && abs(velocityPointsPerSecond) >= Self.highVelocityScrubThresholdPointsPerSecond
+        let wasHighVelocity = self.isHighVelocityScrubbing
+        self.isScrubbing = isScrubbing
+        self.isHighVelocityScrubbing = highVelocity
+        if wasHighVelocity && !highVelocity {
+            triggerPrefetch()
+        }
+    }
 
     var shortcutProfileKind: ShortcutProfileKind {
         get { interactionController.shortcutProfileKind }
@@ -458,6 +480,32 @@ final class CullingSession: CullingInteractionTarget {
         }
     }
 
+    func adjacentItems(for itemID: String? = nil) -> (previous: MediaItem?, current: MediaItem?, next: MediaItem?) {
+        let items = cullingSequence.items
+        guard !items.isEmpty else { return (nil, nil, nil) }
+        let targetID = itemID ?? selectedItemID
+        guard let targetID, let index = cullingSequence.index(for: targetID) else {
+            let current = items.first
+            let next = items.count > 1 ? items[1] : nil
+            return (nil, current, next)
+        }
+        let previous = index > 0 ? items[index - 1] : nil
+        let current = items[index]
+        let next = (index + 1 < items.count) ? items[index + 1] : nil
+        return (previous, current, next)
+    }
+
+    func displayedHUDItem(pageDragOffset: CGFloat, containerWidth: CGFloat) -> MediaItem? {
+        let neighbors = adjacentItems(for: selectedItemID)
+        let midpoint = max(1.0, containerWidth * 0.5)
+        if pageDragOffset > midpoint, let previous = neighbors.previous {
+            return previous
+        } else if pageDragOffset < -midpoint, let next = neighbors.next {
+            return next
+        }
+        return neighbors.current
+    }
+
     @discardableResult
     func executeCommand(_ command: SessionCommand) -> Bool {
         interactionController.executeCommand(command)
@@ -574,6 +622,9 @@ final class CullingSession: CullingInteractionTarget {
             self?.isCullingNavigating = false
         }
 
+        // Suppress speculative lookahead prefetching while actively scrubbing at high velocity
+        guard !isHighVelocityScrubbing else { return }
+
         Task {
             await coordinator.navigate(
                 selectedID: id,
@@ -654,7 +705,6 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     func clearMediaCache() async {
-        DecodedImageCache.shared.clear()
         thumbnailAspectRatios.removeAll()
         loadedFullRAWItemIDs.removeAll()
         loadingFullRAWItemIDs.removeAll()
@@ -1008,6 +1058,8 @@ final class CullingSession: CullingInteractionTarget {
         indexedExifCount = 0
         totalExifTargetCount = 0
         isCullingNavigating = false
+        isScrubbing = false
+        isHighVelocityScrubbing = false
         navigationIdleTask?.cancel()
         navigationIdleTask = nil
         DirectoryListingCache.shared.clear()
@@ -1118,7 +1170,10 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     func loadPreviewImage(for item: MediaItem, maxPixelSize: Int = 2048) async -> CGImage? {
-        await mediaPipeline.loadPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
+        if isHighVelocityScrubbing {
+            return inMemoryPreviewImage(for: item, maxPixelSize: maxPixelSize)
+        }
+        return await mediaPipeline.loadPreviewImage(for: item, previewSource: previewSource, maxPixelSize: maxPixelSize)
     }
 
     func loadPreviewImageData(for item: MediaItem, maxPixelSize: Int = 2048) async -> Data? {

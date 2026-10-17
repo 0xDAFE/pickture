@@ -12,10 +12,12 @@ struct MediaGridCellView: View, Equatable {
     var cachedThumbnail: CGImage? = nil
     var aspectRatio: CGFloat? = nil
     var metadataDeckHeight: CGFloat = CullingLayoutCalculator.defaultGridMetadataDeckHeight
+    var isHeroHidden: Bool = false
     var onSelect: (() -> Void)? = nil
     var onDoubleClick: (() -> Void)? = nil
     var onResolveConflict: (() -> Void)? = nil
     var onCurationAction: ((CurationAction) -> Void)? = nil
+    var onSelectedStageFrameChange: ((CGRect) -> Void)? = nil
     var loadThumbnail: (() async -> CGImage?)? = nil
     var onThumbnailLoaded: ((CGImage) -> Void)? = nil
     var hydrateMetadata: (() async -> Void)? = nil
@@ -186,6 +188,21 @@ struct MediaGridCellView: View, Equatable {
             x: 0,
             y: 2
         )
+        .opacity(isHeroHidden ? 0.0 : 1.0)
+        .background {
+            if isSelected {
+                GeometryReader { stageGeo in
+                    let frame = stageGeo.frame(in: .named(CullingLayoutCalculator.workspaceCoordinateSpaceName))
+                    Color.clear
+                        .onAppear {
+                            onSelectedStageFrameChange?(frame)
+                        }
+                        .onChange(of: frame) { _, newFrame in
+                            onSelectedStageFrameChange?(newFrame)
+                        }
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -428,6 +445,7 @@ extension MediaGridCellView {
         lhs.cacheGeneration == rhs.cacheGeneration &&
         lhs.aspectRatio == rhs.aspectRatio &&
         lhs.metadataDeckHeight == rhs.metadataDeckHeight &&
+        lhs.isHeroHidden == rhs.isHeroHidden &&
         lhs.cachedThumbnail === rhs.cachedThumbnail
     }
 }
