@@ -477,7 +477,7 @@ nonisolated enum PreviewLoader {
         let targetWidth = Int(isSwapped ? h : w)
         let targetHeight = Int(isSwapped ? w : h)
 
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colorSpace = cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
             data: nil,
             width: targetWidth,
@@ -485,7 +485,7 @@ nonisolated enum PreviewLoader {
             bitsPerComponent: 8,
             bytesPerRow: 0,
             space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            bitmapInfo: cgImage.opaqueOrPremultipliedAlphaInfo.rawValue
         ) else { return cgImage }
 
         var transform = CGAffineTransform.identity
@@ -688,6 +688,19 @@ nonisolated enum PreviewLoader {
 extension CGImage {
     nonisolated var aspectRatio: CGFloat {
         CGFloat(width) / CGFloat(max(1, height))
+    }
+
+    nonisolated var hasAlpha: Bool {
+        switch alphaInfo {
+        case .none, .noneSkipLast, .noneSkipFirst:
+            return false
+        default:
+            return true
+        }
+    }
+
+    nonisolated var opaqueOrPremultipliedAlphaInfo: CGImageAlphaInfo {
+        hasAlpha ? .premultipliedLast : .noneSkipLast
     }
 }
 
