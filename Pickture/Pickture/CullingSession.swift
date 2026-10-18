@@ -319,8 +319,10 @@ final class CullingSession: CullingInteractionTarget {
         guard !ratio.isNaN && !ratio.isInfinite && ratio > 0 else { return }
         let source = previewSource ?? self.previewSource
         let key = aspectRatioKey(for: item, previewSource: source)
-        thumbnailAspectRatios[key] = ratio
-        if source == self.previewSource {
+        if thumbnailAspectRatios[key] != ratio {
+            thumbnailAspectRatios[key] = ratio
+        }
+        if source == self.previewSource, thumbnailAspectRatios[item.id] != ratio {
             thumbnailAspectRatios[item.id] = ratio
         }
 
@@ -334,9 +336,13 @@ final class CullingSession: CullingInteractionTarget {
 
     func recordThumbnailAspectRatio(_ ratio: CGFloat, for itemID: String) {
         guard !ratio.isNaN && !ratio.isInfinite && ratio > 0 else { return }
-        thumbnailAspectRatios[itemID] = ratio
+        if thumbnailAspectRatios[itemID] != ratio {
+            thumbnailAspectRatios[itemID] = ratio
+        }
         let key = aspectRatioKey(for: itemID, previewSource: self.previewSource)
-        thumbnailAspectRatios[key] = ratio
+        if thumbnailAspectRatios[key] != ratio {
+            thumbnailAspectRatios[key] = ratio
+        }
     }
 
     @discardableResult
