@@ -153,6 +153,18 @@ struct GridContentView: View {
                     }
                 }
             }
+            .onChange(of: session.viewMode) { _, newMode in
+                if newMode == .grid, let currentID = session.selectedItemID {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        proxy.scrollTo(currentID, anchor: .center)
+                    }
+                }
+            }
+            .onAppear {
+                if let currentID = session.selectedItemID {
+                    proxy.scrollTo(currentID, anchor: .center)
+                }
+            }
         }
     }
 }

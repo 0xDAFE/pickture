@@ -420,14 +420,29 @@ final class CullingSession: CullingInteractionTarget {
         }
     }
 
+    var currentSequenceIndex: Int? {
+        let items = cullingSequence.items
+        guard !items.isEmpty else { return nil }
+        if let currentID = selectedItemID,
+           let currentIndex = cullingSequence.index(for: currentID) {
+            return currentIndex
+        }
+        return 0
+    }
+
+    var canSelectNextItem: Bool {
+        guard let currentIndex = currentSequenceIndex else { return false }
+        return currentIndex + 1 < cullingSequence.items.count
+    }
+
+    var canSelectPreviousItem: Bool {
+        guard let currentIndex = currentSequenceIndex else { return false }
+        return currentIndex > 0
+    }
+
     func selectNextItem() {
         let items = cullingSequence.items
-        guard !items.isEmpty else { return }
-        guard let currentID = selectedItemID,
-              let currentIndex = cullingSequence.index(for: currentID) else {
-            selectedItemID = items.first?.id
-            return
-        }
+        guard let currentIndex = currentSequenceIndex else { return }
         if currentIndex + 1 < items.count {
             selectedItemID = items[currentIndex + 1].id
         }
@@ -435,12 +450,7 @@ final class CullingSession: CullingInteractionTarget {
 
     func selectPreviousItem() {
         let items = cullingSequence.items
-        guard !items.isEmpty else { return }
-        guard let currentID = selectedItemID,
-              let currentIndex = cullingSequence.index(for: currentID) else {
-            selectedItemID = items.first?.id
-            return
-        }
+        guard let currentIndex = currentSequenceIndex else { return }
         if currentIndex > 0 {
             selectedItemID = items[currentIndex - 1].id
         }

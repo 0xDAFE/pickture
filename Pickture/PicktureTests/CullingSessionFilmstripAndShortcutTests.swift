@@ -835,5 +835,111 @@ struct CullingSessionFilmstripAndShortcutTests {
         _ = loadedButton.body
         #expect(session.previewRepresentation(for: item) == .fullRAW)
     }
+
+    // MARK: - Slice: PinchToGrid and SwipeNavigation Calculations
+
+    @Test("PinchToGrid threshold and commitment rules respect zoom level and scale threshold")
+    func pinchToGridCommitmentRules() {
+        #expect(CullingLayoutCalculator.pinchToGridScaleThreshold == 0.85)
+
+        // At 1.0x zoom: below or equal to threshold commits
+        #expect(CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: 1.0, magnification: 0.84))
+        #expect(CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: 1.0, magnification: 0.85))
+        #expect(!CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: 1.0, magnification: 0.86))
+        #expect(!CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: 1.0, magnification: 1.0))
+
+        // When magnified (> 1.0x): pinching down does NOT commit to grid
+        #expect(!CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: 2.0, magnification: 0.80))
+        #expect(!CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: 1.5, magnification: 0.50))
+    }
+
+    @Test("SwipeNavigation threshold scales with viewport width and clamps safely")
+    func swipeNavigationThresholdCalculation() {
+        // Small width (e.g. 200pt) -> clamped to minimum 60pt
+        #expect(CullingLayoutCalculator.swipeNavigationThreshold(for: 200) == 60)
+
+        // Standard width (e.g. 500pt) -> 20% is 100pt
+        #expect(CullingLayoutCalculator.swipeNavigationThreshold(for: 500) == 100)
+
+        // Large width (e.g. 1000pt) -> clamped to maximum 140pt
+        #expect(CullingLayoutCalculator.swipeNavigationThreshold(for: 1000) == 140)
+
+        // Safe fallback on invalid widths
+        #expect(CullingLayoutCalculator.swipeNavigationThreshold(for: -50) == 60)
+        #expect(CullingLayoutCalculator.swipeNavigationThreshold(for: .nan) == 60)
+    }
+
+    @Test("SwipeNavigation translation preserves linear 1:1 feel internally and damps at boundaries")
+    func swipeNavigationTranslationAndBoundaryDamping() {
+        // Internal item (neither boundary): linear 1:1 translation
+        #expect(CullingLayoutCalculator.swipeNavigationTranslation(offset: 80, isAtLeadingBoundary: false, isAtTrailingBoundary: false) == 80)
+        #expect(CullingLayoutCalculator.swipeNavigationTranslation(offset: -80, isAtLeadingBoundary: false, isAtTrailingBoundary: false) == -80)
+
+        // Leading boundary (first item): dragging right (> 0) is damped, dragging left (< 0) is linear
+        let dampedRight = CullingLayoutCalculator.swipeNavigationTranslation(offset: 100, isAtLeadingBoundary: true, isAtTrailingBoundary: false)
+        #expect(dampedRight > 0)
+        #expect(dampedRight < 100)
+        #expect(dampedRight == 30) // 100 * 0.3 damping
+
+        let linearLeftFromLeading = CullingLayoutCalculator.swipeNavigationTranslation(offset: -100, isAtLeadingBoundary: true, isAtTrailingBoundary: false)
+        #expect(linearLeftFromLeading == -100)
+
+        // Trailing boundary (last item): dragging left (< 0) is damped, dragging right (> 0) is linear
+        let dampedLeft = CullingLayoutCalculator.swipeNavigationTranslation(offset: -100, isAtLeadingBoundary: false, isAtTrailingBoundary: true)
+        #expect(dampedLeft < 0)
+        #expect(dampedLeft > -100)
+        #expect(dampedLeft == -30) // -100 * 0.3 damping
+
+        let linearRightFromTrailing = CullingLayoutCalculator.swipeNavigationTranslation(offset: 100, isAtLeadingBoundary: false, isAtTrailingBoundary: true)
+        #expect(linearRightFromTrailing == 100)
+
+        // Both boundaries (single item in sequence): both directions damped
+        #expect(CullingLayoutCalculator.swipeNavigationTranslation(offset: 100, isAtLeadingBoundary: true, isAtTrailingBoundary: true) == 30)
+        #expect(CullingLayoutCalculator.swipeNavigationTranslation(offset: -100, isAtLeadingBoundary: true, isAtTrailingBoundary: true) == -30)
+    }
+
+    @Test("canSelectNextItem and canSelectPreviousItem accurately reflect boundaries and viewMode transitions preserve active selection")
+    func sequenceBoundariesAndSelectionPreservation() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data("1".utf8).write(to: root.appendingPathComponent("DSC_0001.JPG"))
+        try Data("2".utf8).write(to: root.appendingPathComponent("DSC_0002.JPG"))
+        try Data("3".utf8).write(to: root.appendingPathComponent("DSC_0003.JPG"))
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
+        try session.openFolder(at: root)
+
+        #expect(session.items.count == 3)
+        let items = session.items
+        session.selectedItemID = items[0].id
+        session.setViewMode(.filmstrip)
+
+        // At leading boundary (item 0)
+        #expect(!session.canSelectPreviousItem)
+        #expect(session.canSelectNextItem)
+
+        // Advance to middle item
+        session.selectNextItem()
+        #expect(session.selectedItemID == items[1].id)
+        #expect(session.canSelectPreviousItem)
+        #expect(session.canSelectNextItem)
+
+        // Advance to trailing boundary
+        session.selectNextItem()
+        #expect(session.selectedItemID == items[2].id)
+        #expect(session.canSelectPreviousItem)
+        #expect(!session.canSelectNextItem)
+
+        // Boundary clamp: advancing past trailing boundary stays on trailing boundary
+        session.selectNextItem()
+        #expect(session.selectedItemID == items[2].id)
+
+        // Transition back to Grid view: selectedItemID must be preserved
+        session.setViewMode(.grid)
+        #expect(session.viewMode == .grid)
+        #expect(session.selectedItemID == items[2].id)
+    }
 }
+
 
