@@ -1308,49 +1308,79 @@ struct CullingSessionFilmstripAndShortcutTests {
         let item2 = session.items[2]
         session.selectedItemID = item0.id
 
-        // Helper replicating FilmstripScrubber selection gating contract:
-        func evaluateScrubberSelectionUpdate(
-            newID: String?,
-            currentSelectedID: String?,
-            isUserScrolling: Bool,
-            isScrubbing: Bool,
-            isProgrammaticJump: Bool
-        ) -> String? {
-            guard let newID, newID != currentSelectedID else { return nil }
-            guard (isUserScrolling || isScrubbing) && !isProgrammaticJump else { return nil }
-            return newID
-        }
-
         // 1. Programmatic jump or main-canvas swipe offset shifts ($scrubbedItemID changes while isUserScrolling == false):
         // Must NOT overwrite session.selectedItemID
-        let nonUserChange = evaluateScrubberSelectionUpdate(
+        let nonUserChange = CullingLayoutCalculator.shouldApplyScrubberSelection(
             newID: item1.id,
             currentSelectedID: item0.id,
             isUserScrolling: false,
             isScrubbing: false,
             isProgrammaticJump: false
         )
-        #expect(nonUserChange == nil)
+        #expect(nonUserChange == false)
 
         // 2. Programmatic scroll in-flight:
-        let programmaticChange = evaluateScrubberSelectionUpdate(
+        let programmaticChange = CullingLayoutCalculator.shouldApplyScrubberSelection(
             newID: item2.id,
             currentSelectedID: item0.id,
             isUserScrolling: false,
             isScrubbing: false,
             isProgrammaticJump: true
         )
-        #expect(programmaticChange == nil)
+        #expect(programmaticChange == false)
 
         // 3. Active user scrubbing on scrubber ribbon:
-        let userScrubChange = evaluateScrubberSelectionUpdate(
+        let userScrubChange = CullingLayoutCalculator.shouldApplyScrubberSelection(
             newID: item1.id,
             currentSelectedID: item0.id,
             isUserScrolling: true,
             isScrubbing: true,
             isProgrammaticJump: false
         )
-        #expect(userScrubChange == item1.id)
+        #expect(userScrubChange == true)
+    }
+
+    @Test("Async aspect ratio loads keep inactive scrubber tiles stable while selected tile dynamically sizes")
+    func asyncAspectRatioStabilityPreservesInactiveTileDimensions() {
+        // Inactive tiles must always retain stable fixed dimensions (40x72 bottom dock, 112x44 right dock)
+        // regardless of whether their aspect ratio is nil (unloaded), 1.0 (square), 1.5 (3:2), or 0.667 (portrait),
+        // preventing neighbor tiles from sliding during background thumbnail hydration.
+        let testAspectRatios: [CGFloat?] = [nil, 0.5625, 0.667, 1.0, 1.5, 1.777]
+
+        for ratio in testAspectRatios {
+            let inactiveSizeBottom = CullingLayoutCalculator.scrubberTileSize(
+                isSelected: false,
+                aspectRatio: ratio,
+                dockPosition: .bottom
+            )
+            #expect(inactiveSizeBottom.width == 40.0)
+            #expect(inactiveSizeBottom.height == 72.0)
+
+            let inactiveSizeRight = CullingLayoutCalculator.scrubberTileSize(
+                isSelected: false,
+                aspectRatio: ratio,
+                dockPosition: .right
+            )
+            #expect(inactiveSizeRight.width == 112.0)
+            #expect(inactiveSizeRight.height == 44.0)
+        }
+
+        // When selected, the active tile dynamically sizes to true aspect ratio:
+        let selectedLandscapeBottom = CullingLayoutCalculator.scrubberTileSize(
+            isSelected: true,
+            aspectRatio: 1.5,
+            dockPosition: .bottom
+        )
+        #expect(selectedLandscapeBottom.width == 108.0)
+        #expect(selectedLandscapeBottom.height == 72.0)
+
+        let selectedPortraitBottom = CullingLayoutCalculator.scrubberTileSize(
+            isSelected: true,
+            aspectRatio: 0.667,
+            dockPosition: .bottom
+        )
+        #expect(abs(selectedPortraitBottom.width - 48.0) < 0.1)
+        #expect(selectedPortraitBottom.height == 72.0)
     }
 }
 

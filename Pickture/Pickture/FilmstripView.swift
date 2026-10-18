@@ -99,11 +99,6 @@ struct FilmstripView: View {
                 }
             }
         }
-        .onChange(of: session.selectedItemID) { _, _ in
-            if pageDragOffset != 0 {
-                pageDragOffset = 0
-            }
-        }
     }
 
     // MARK: - Main Canvas Area
@@ -340,6 +335,33 @@ struct FilmstripView: View {
         }
     }
 
+    private func commitPageTurn(
+        to item: MediaItem?,
+        direction: BorderTapDirection,
+        pageStride: CGFloat
+    ) {
+        guard let item else {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+                pageDragOffset = 0
+            }
+            return
+        }
+        let compensatedOffset = CullingLayoutCalculator.compensatedPageDragOffset(
+            currentOffset: pageDragOffset,
+            direction: direction,
+            pageStride: pageStride
+        )
+        var tx = Transaction(animation: nil)
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            session.selectedItemID = item.id
+            pageDragOffset = compensatedOffset
+        }
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
+            pageDragOffset = 0
+        }
+    }
+
     private func commitCarouselPageTurn(
         _ direction: BorderTapDirection?,
         containerWidth: CGFloat,
@@ -348,49 +370,9 @@ struct FilmstripView: View {
         let pageStride = max(1.0, containerWidth + CullingLayoutCalculator.filmstripInterPageGutter)
         switch direction {
         case .previous:
-            guard let prev = neighbors.previous else {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
-                    pageDragOffset = 0
-                }
-                return
-            }
-            let compensatedOffset = CullingLayoutCalculator.compensatedPageDragOffset(
-                currentOffset: pageDragOffset,
-                direction: .previous,
-                pageStride: pageStride
-            )
-            var tx = Transaction(animation: nil)
-            tx.disablesAnimations = true
-            withTransaction(tx) {
-                session.selectedItemID = prev.id
-                pageDragOffset = compensatedOffset
-            }
-            withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
-                pageDragOffset = 0
-            }
-
+            commitPageTurn(to: neighbors.previous, direction: .previous, pageStride: pageStride)
         case .next:
-            guard let next = neighbors.next else {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
-                    pageDragOffset = 0
-                }
-                return
-            }
-            let compensatedOffset = CullingLayoutCalculator.compensatedPageDragOffset(
-                currentOffset: pageDragOffset,
-                direction: .next,
-                pageStride: pageStride
-            )
-            var tx = Transaction(animation: nil)
-            tx.disablesAnimations = true
-            withTransaction(tx) {
-                session.selectedItemID = next.id
-                pageDragOffset = compensatedOffset
-            }
-            withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
-                pageDragOffset = 0
-            }
-
+            commitPageTurn(to: neighbors.next, direction: .next, pageStride: pageStride)
         case nil:
             withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
                 pageDragOffset = 0
@@ -740,14 +722,19 @@ struct FilmstripScrubber: View {
                 .onAppear {
                     scrubbedItemID = session.selectedItemID
                     if let selectedID = session.selectedItemID {
-                        DispatchQueue.main.async {
+                        Task { @MainActor in
                             proxy.scrollTo(selectedID, anchor: .center)
                         }
                     }
                 }
                 .onChange(of: scrubbedItemID) { _, newID in
-                    guard let newID, newID != session.selectedItemID else { return }
-                    guard (isUserScrolling || session.isScrubbing), !isProgrammaticJump else { return }
+                    guard CullingLayoutCalculator.shouldApplyScrubberSelection(
+                        newID: newID,
+                        currentSelectedID: session.selectedItemID,
+                        isUserScrolling: isUserScrolling,
+                        isScrubbing: session.isScrubbing,
+                        isProgrammaticJump: isProgrammaticJump
+                    ), let newID else { return }
                     var tx = Transaction(animation: nil)
                     tx.disablesAnimations = true
                     withTransaction(tx) {
@@ -758,7 +745,7 @@ struct FilmstripScrubber: View {
                 .onChange(of: session.selectedItemID) { _, newID in
                     guard let newID else { return }
                     scrubbedItemID = newID
-                    guard !isUserScrolling, !isProgrammaticJump else { return }
+                    guard !isUserScrolling else { return }
                     isProgrammaticJump = true
                     withAnimation(.snappy(duration: 0.22)) {
                         proxy.scrollTo(newID, anchor: .center)
@@ -767,15 +754,18 @@ struct FilmstripScrubber: View {
                     }
                 }
                 .onChange(of: activeSlotSpan) { _, _ in
-                    guard !isUserScrolling, !isProgrammaticJump, let selectedID = session.selectedItemID else { return }
-                    proxy.scrollTo(selectedID, anchor: .center)
+                    centerPlayheadIfNeeded(proxy: proxy)
                 }
                 .onChange(of: scrubberSpan) { _, _ in
-                    guard !isUserScrolling, !isProgrammaticJump, let selectedID = session.selectedItemID else { return }
-                    proxy.scrollTo(selectedID, anchor: .center)
+                    centerPlayheadIfNeeded(proxy: proxy)
                 }
             }
         }
+    }
+
+    private func centerPlayheadIfNeeded(proxy: ScrollViewProxy) {
+        guard !isUserScrolling, !isProgrammaticJump, let selectedID = session.selectedItemID else { return }
+        proxy.scrollTo(selectedID, anchor: .center)
     }
 
     private func scrubberCell(for item: MediaItem, proxy: ScrollViewProxy) -> some View {

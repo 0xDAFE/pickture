@@ -150,6 +150,18 @@ enum CullingLayoutCalculator {
         }
     }
 
+    static func shouldApplyScrubberSelection(
+        newID: String?,
+        currentSelectedID: String?,
+        isUserScrolling: Bool,
+        isScrubbing: Bool,
+        isProgrammaticJump: Bool
+    ) -> Bool {
+        guard let newID, newID != currentSelectedID else { return false }
+        guard (isUserScrolling || isScrubbing) && !isProgrammaticJump else { return false }
+        return true
+    }
+
     static func resolveHeroGridTransition(
         rawScale: CGFloat,
         dragTranslation: CGSize,
