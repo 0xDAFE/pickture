@@ -574,7 +574,10 @@ struct FilmstripImageCanvasView: View {
     @State private var isLoading = false
 
     private var effectiveScale: CGFloat {
-        min(4.0, max(1.0, zoomScale * pinchScale))
+        if zoomScale <= 1.0 {
+            return min(4.0, max(0.75, zoomScale * pinchScale))
+        }
+        return min(4.0, max(1.0, zoomScale * pinchScale))
     }
 
     private var displayedImage: CGImage? {
@@ -591,8 +594,11 @@ struct FilmstripImageCanvasView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let threshold = min(max(80.0, geo.size.width * 0.22), 140.0)
-            let isSwipeActive = session.isSwipeModeEnabled && effectiveScale <= 1.0
+            let threshold = CullingLayoutCalculator.swipeNavigationThreshold(for: geo.size.width)
+            let isSwipeCullingActive = session.isSwipeModeEnabled && effectiveScale <= 1.0
+            let isSwipeNavActive = !session.isSwipeModeEnabled && effectiveScale <= 1.0
+            let isAtLeading = !session.canSelectPreviousItem
+            let isAtTrailing = !session.canSelectNextItem
 
             ZStack {
                 Color.clear
@@ -603,12 +609,12 @@ struct FilmstripImageCanvasView: View {
                         .scaledToFit()
                         .scaleEffect(effectiveScale)
                         .offset(
-                            x: panOffset.width + dragOffset.width + (isSwipeActive ? swipeTranslation : 0),
+                            x: panOffset.width + dragOffset.width + (isSwipeCullingActive || isSwipeNavActive ? swipeTranslation : 0),
                             y: panOffset.height + dragOffset.height
                         )
                         .rotationEffect(
                             Angle.degrees(
-                                isSwipeActive
+                                isSwipeCullingActive
                                     ? Double(min(12.0, max(-12.0, swipeTranslation / 25.0)))
                                     : 0
                             )
@@ -619,8 +625,8 @@ struct FilmstripImageCanvasView: View {
                         .tint(.white)
                 }
 
-                // Overlay action badge when swiping horizontally at 1.0x zoom
-                if isSwipeActive {
+                // Overlay action badge when swiping horizontally at 1.0x zoom in dedicated SwipeMode
+                if isSwipeCullingActive {
                     if swipeTranslation > 20 {
                         let progress = min(1.0, (swipeTranslation - 20) / max(1.0, threshold - 20))
                         SwipeActionBadgeView(action: session.swipeRightAction, direction: .right)
@@ -654,7 +660,7 @@ struct FilmstripImageCanvasView: View {
                     }
                 }
             )
-            // Pinch-to-zoom (1.0x - 4.0x)
+            // Pinch-to-zoom (1.0x - 4.0x) & PinchToGrid
             .simultaneousGesture(
                 MagnifyGesture()
                     .onChanged { value in
@@ -664,15 +670,24 @@ struct FilmstripImageCanvasView: View {
                         }
                     }
                     .onEnded { value in
-                        zoomScale = min(4.0, max(1.0, zoomScale * value.magnification))
-                        pinchScale = 1.0
-                        if zoomScale <= 1.0 {
-                            panOffset = .zero
-                            dragOffset = .zero
+                        if CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: zoomScale, magnification: value.magnification) {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                session.setViewMode(.grid)
+                            }
+                            pinchScale = 1.0
+                        } else {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                zoomScale = min(4.0, max(1.0, zoomScale * value.magnification))
+                                pinchScale = 1.0
+                            }
+                            if zoomScale <= 1.0 {
+                                panOffset = .zero
+                                dragOffset = .zero
+                            }
                         }
                     }
             )
-            // Pan gesture when zoomed (> 1.0x) OR Swipe curation when at 1.0x
+            // Pan gesture when zoomed (> 1.0x) OR Swipe curation / navigation when at 1.0x
             .simultaneousGesture(
                 DragGesture()
                     .onChanged { value in
@@ -682,6 +697,13 @@ struct FilmstripImageCanvasView: View {
                         } else if session.isSwipeModeEnabled && pinchScale == 1.0 {
                             // 1.0x zoom: swipe curation
                             swipeTranslation = value.translation.width
+                        } else if !session.isSwipeModeEnabled && pinchScale == 1.0 {
+                            // 1.0x zoom: swipe navigation with boundary damping
+                            swipeTranslation = CullingLayoutCalculator.swipeNavigationTranslation(
+                                offset: value.translation.width,
+                                isAtLeadingBoundary: isAtLeading,
+                                isAtTrailingBoundary: isAtTrailing
+                            )
                         }
                     }
                     .onEnded { value in
@@ -708,6 +730,27 @@ struct FilmstripImageCanvasView: View {
                                     swipeTranslation = 0
                                 }
                                 session.executeSwipe(.left, for: item)
+                            } else {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                    swipeTranslation = 0
+                                }
+                            }
+                        } else if !session.isSwipeModeEnabled && pinchScale == 1.0 {
+                            // SwipeNavigation: Dragging left (width <= -threshold) -> Next, Dragging right (width >= threshold) -> Previous
+                            if value.translation.width <= -threshold && session.canSelectNextItem {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = -geo.size.width
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.selectNextItem()
+                            } else if value.translation.width >= threshold && session.canSelectPreviousItem {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = geo.size.width
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.selectPreviousItem()
                             } else {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
                                     swipeTranslation = 0
@@ -741,11 +784,15 @@ struct FilmstripVideoCanvasView: View {
 
     @State private var player: AVPlayer?
     @State private var swipeTranslation: CGFloat = 0.0
+    @State private var pinchScale: CGFloat = 1.0
 
     var body: some View {
         GeometryReader { geo in
-            let threshold = min(max(80.0, geo.size.width * 0.22), 140.0)
-            let isSwipeActive = (session?.isSwipeModeEnabled == true) && item != nil
+            let threshold = CullingLayoutCalculator.swipeNavigationThreshold(for: geo.size.width)
+            let isSwipeCullingActive = (session?.isSwipeModeEnabled == true) && item != nil
+            let isSwipeNavActive = (session?.isSwipeModeEnabled == false)
+            let isAtLeading = (session?.canSelectPreviousItem == false)
+            let isAtTrailing = (session?.canSelectNextItem == false)
 
             ZStack {
                 Group {
@@ -756,16 +803,17 @@ struct FilmstripVideoCanvasView: View {
                             .tint(.white)
                     }
                 }
-                .offset(x: isSwipeActive ? swipeTranslation : 0)
+                .scaleEffect(min(1.0, max(0.75, pinchScale)))
+                .offset(x: (isSwipeCullingActive || isSwipeNavActive) ? swipeTranslation : 0)
                 .rotationEffect(
                     Angle.degrees(
-                        isSwipeActive
+                        isSwipeCullingActive
                             ? Double(min(12.0, max(-12.0, swipeTranslation / 25.0)))
                             : 0
                     )
                 )
 
-                if isSwipeActive, let session {
+                if isSwipeCullingActive, let session {
                     if swipeTranslation > 20 {
                         let progress = min(1.0, (swipeTranslation - 20) / max(1.0, threshold - 20))
                         SwipeActionBadgeView(action: session.swipeRightAction, direction: .right)
@@ -785,31 +833,80 @@ struct FilmstripVideoCanvasView: View {
             }
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                MagnifyGesture()
                     .onChanged { value in
-                        if isSwipeActive {
-                            swipeTranslation = value.translation.width
+                        pinchScale = value.magnification
+                        if swipeTranslation != 0 {
+                            swipeTranslation = 0
                         }
                     }
                     .onEnded { value in
-                        guard isSwipeActive, let session, let item else { return }
-                        if value.translation.width >= threshold {
+                        if let session, CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: 1.0, magnification: value.magnification) {
                             withAnimation(.easeOut(duration: 0.2)) {
-                                swipeTranslation = geo.size.width + 100
-                            } completion: {
-                                swipeTranslation = 0
+                                session.setViewMode(.grid)
                             }
-                            session.executeSwipe(.right, for: item)
-                        } else if value.translation.width <= -threshold {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                swipeTranslation = -geo.size.width - 100
-                            } completion: {
-                                swipeTranslation = 0
-                            }
-                            session.executeSwipe(.left, for: item)
+                            pinchScale = 1.0
                         } else {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                                swipeTranslation = 0
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                pinchScale = 1.0
+                            }
+                        }
+                    }
+            )
+            .simultaneousGesture(
+                DragGesture()
+                    .onChanged { value in
+                        if isSwipeCullingActive {
+                            swipeTranslation = value.translation.width
+                        } else if isSwipeNavActive && pinchScale == 1.0 {
+                            swipeTranslation = CullingLayoutCalculator.swipeNavigationTranslation(
+                                offset: value.translation.width,
+                                isAtLeadingBoundary: isAtLeading,
+                                isAtTrailingBoundary: isAtTrailing
+                            )
+                        }
+                    }
+                    .onEnded { value in
+                        if isSwipeCullingActive, let session, let item {
+                            if value.translation.width >= threshold {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = geo.size.width + 100
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.executeSwipe(.right, for: item)
+                            } else if value.translation.width <= -threshold {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = -geo.size.width - 100
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.executeSwipe(.left, for: item)
+                            } else {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                    swipeTranslation = 0
+                                }
+                            }
+                        } else if isSwipeNavActive, let session, pinchScale == 1.0 {
+                            // SwipeNavigation: Dragging left -> Next, Dragging right -> Previous
+                            if value.translation.width <= -threshold && session.canSelectNextItem {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = -geo.size.width
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.selectNextItem()
+                            } else if value.translation.width >= threshold && session.canSelectPreviousItem {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    swipeTranslation = geo.size.width
+                                } completion: {
+                                    swipeTranslation = 0
+                                }
+                                session.selectPreviousItem()
+                            } else {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                                    swipeTranslation = 0
+                                }
                             }
                         }
                     }
