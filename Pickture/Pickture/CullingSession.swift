@@ -1287,6 +1287,7 @@ final class CullingSession: CullingInteractionTarget {
         if pendingWritesCount > 0 {
             await flushPendingWrites()
         }
+        clearZoomLock()
         self.isLazySidecarHydrationEnabled = lazySidecars
         self.isDiscovering = true
         self.openFolderProgress = 0.0
@@ -1371,6 +1372,7 @@ final class CullingSession: CullingInteractionTarget {
                 await self?.flushPendingWrites()
             }
         }
+        clearZoomLock()
         self.isDiscovering = true
         defer { self.isDiscovering = false }
         do {

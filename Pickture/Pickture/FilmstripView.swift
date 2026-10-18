@@ -575,6 +575,8 @@ struct FilmstripImageCanvasView: View {
 
     var currentZoomScale: CGFloat { zoomScale }
 
+    /// Intentional one-time view-owned @State initialization from parent session.zoomLockState.
+    /// Subsequent scale and anchor mutations are driven locally by canvas gestures and synced back.
     init(item: MediaItem, session: CullingSession) {
         self.item = item
         self.session = session
@@ -654,6 +656,18 @@ struct FilmstripImageCanvasView: View {
                 dragOffset = .zero
             }
             session.setZoomLock(scale: newScale, normalizedAnchor: anchor)
+        }
+    }
+
+    private func updatePanOffsetForDecodedImage(_ image: CGImage, in containerSize: CGSize) {
+        if let lock = session.zoomLockState, lock.scale > 1.0 {
+            let imgSize = CGSize(width: image.width, height: image.height)
+            panOffset = CullingLayoutCalculator.calculatePanOffset(
+                forNormalizedAnchor: lock.normalizedAnchor,
+                containerSize: containerSize,
+                imageSize: imgSize,
+                scale: lock.scale
+            )
         }
     }
 
@@ -785,10 +799,22 @@ struct FilmstripImageCanvasView: View {
                     .onEnded { value in
                         if effectiveScale > 1.0 {
                             let imgSize = currentImageSize(in: geo.size)
-                            let initialPan = (panOffset != .zero) ? panOffset : activePanOffset(in: geo.size)
+                            let basePan: CGSize
+                            if panOffset != .zero {
+                                basePan = panOffset
+                            } else if let lock = session.zoomLockState, lock.scale > 1.0 {
+                                basePan = CullingLayoutCalculator.calculatePanOffset(
+                                    forNormalizedAnchor: lock.normalizedAnchor,
+                                    containerSize: geo.size,
+                                    imageSize: imgSize,
+                                    scale: lock.scale
+                                )
+                            } else {
+                                basePan = .zero
+                            }
                             let newOffset = CGSize(
-                                width: initialPan.width + value.translation.width,
-                                height: initialPan.height + value.translation.height
+                                width: basePan.width + value.translation.width,
+                                height: basePan.height + value.translation.height
                             )
                             panOffset = CullingLayoutCalculator.clampPanOffset(
                                 newOffset,
@@ -863,15 +889,7 @@ struct FilmstripImageCanvasView: View {
             .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
                 if let inMemory = session.inMemoryPreviewImage(for: item, maxPixelSize: 2048) {
                     previewImage = inMemory
-                    if let lock = session.zoomLockState, lock.scale > 1.0 {
-                        let imgSize = CGSize(width: inMemory.width, height: inMemory.height)
-                        panOffset = CullingLayoutCalculator.calculatePanOffset(
-                            forNormalizedAnchor: lock.normalizedAnchor,
-                            containerSize: geo.size,
-                            imageSize: imgSize,
-                            scale: lock.scale
-                        )
-                    }
+                    updatePanOffsetForDecodedImage(inMemory, in: geo.size)
                     return
                 }
                 isLoading = true
@@ -879,14 +897,8 @@ struct FilmstripImageCanvasView: View {
                 let decoded = await session.loadPreviewImage(for: item, maxPixelSize: 2048)
                 if !Task.isCancelled {
                     previewImage = decoded
-                    if let decoded = decoded, let lock = session.zoomLockState, lock.scale > 1.0 {
-                        let imgSize = CGSize(width: decoded.width, height: decoded.height)
-                        panOffset = CullingLayoutCalculator.calculatePanOffset(
-                            forNormalizedAnchor: lock.normalizedAnchor,
-                            containerSize: geo.size,
-                            imageSize: imgSize,
-                            scale: lock.scale
-                        )
+                    if let decoded {
+                        updatePanOffsetForDecodedImage(decoded, in: geo.size)
                     }
                 }
             }

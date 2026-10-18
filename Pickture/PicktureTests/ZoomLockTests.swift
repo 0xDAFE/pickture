@@ -211,6 +211,11 @@ struct ZoomLockTests {
         session.selectFirstItem()
         #expect(session.selectedItemID == item0.id)
         #expect(session.zoomLockState == nil)
+
+        // 11. Opening a folder directly clears ZoomLock
+        session.setZoomLock(scale: 2.0, normalizedAnchor: CGPoint(x: 0.5, y: 0.5))
+        try session.openFolder(at: root)
+        #expect(session.zoomLockState == nil)
     }
 
     // MARK: - Unit 3: Canvas View Model & Gesture Projection
