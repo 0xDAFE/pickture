@@ -420,6 +420,26 @@ final class CullingSession: CullingInteractionTarget {
         }
     }
 
+    var canSelectNextItem: Bool {
+        let items = cullingSequence.items
+        guard !items.isEmpty,
+              let currentID = selectedItemID,
+              let currentIndex = cullingSequence.index(for: currentID) else {
+            return false
+        }
+        return currentIndex + 1 < items.count
+    }
+
+    var canSelectPreviousItem: Bool {
+        let items = cullingSequence.items
+        guard !items.isEmpty,
+              let currentID = selectedItemID,
+              let currentIndex = cullingSequence.index(for: currentID) else {
+            return false
+        }
+        return currentIndex > 0
+    }
+
     func selectNextItem() {
         let items = cullingSequence.items
         guard !items.isEmpty else { return }

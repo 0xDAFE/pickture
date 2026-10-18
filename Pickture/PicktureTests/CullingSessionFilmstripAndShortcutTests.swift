@@ -897,6 +897,49 @@ struct CullingSessionFilmstripAndShortcutTests {
         #expect(CullingLayoutCalculator.swipeNavigationTranslation(offset: 100, isAtLeadingBoundary: true, isAtTrailingBoundary: true) == 30)
         #expect(CullingLayoutCalculator.swipeNavigationTranslation(offset: -100, isAtLeadingBoundary: true, isAtTrailingBoundary: true) == -30)
     }
+
+    @Test("canSelectNextItem and canSelectPreviousItem accurately reflect boundaries and viewMode transitions preserve active selection")
+    func sequenceBoundariesAndSelectionPreservation() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try Data("1".utf8).write(to: root.appendingPathComponent("DSC_0001.JPG"))
+        try Data("2".utf8).write(to: root.appendingPathComponent("DSC_0002.JPG"))
+        try Data("3".utf8).write(to: root.appendingPathComponent("DSC_0003.JPG"))
+
+        let session = CullingSession(storageRootURL: root.appendingPathComponent(".store", isDirectory: true))
+        try session.openFolder(at: root)
+
+        #expect(session.items.count == 3)
+        let items = session.items
+        session.selectedItemID = items[0].id
+        session.setViewMode(.filmstrip)
+
+        // At leading boundary (item 0)
+        #expect(!session.canSelectPreviousItem)
+        #expect(session.canSelectNextItem)
+
+        // Advance to middle item
+        session.selectNextItem()
+        #expect(session.selectedItemID == items[1].id)
+        #expect(session.canSelectPreviousItem)
+        #expect(session.canSelectNextItem)
+
+        // Advance to trailing boundary
+        session.selectNextItem()
+        #expect(session.selectedItemID == items[2].id)
+        #expect(session.canSelectPreviousItem)
+        #expect(!session.canSelectNextItem)
+
+        // Boundary clamp: advancing past trailing boundary stays on trailing boundary
+        session.selectNextItem()
+        #expect(session.selectedItemID == items[2].id)
+
+        // Transition back to Grid view: selectedItemID must be preserved
+        session.setViewMode(.grid)
+        #expect(session.viewMode == .grid)
+        #expect(session.selectedItemID == items[2].id)
+    }
 }
 
 
