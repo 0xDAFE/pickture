@@ -28,6 +28,39 @@ enum CullingLayoutCalculator {
         return nil
     }
 
+    // MARK: - PinchToGrid & SwipeNavigation Calculations
+
+    static let pinchToGridScaleThreshold: CGFloat = 0.85
+
+    static func shouldCommitPinchToGrid(currentZoom: CGFloat, magnification: CGFloat) -> Bool {
+        guard currentZoom <= 1.0 else { return false }
+        return magnification <= pinchToGridScaleThreshold
+    }
+
+    static func swipeNavigationThreshold(for containerWidth: CGFloat) -> CGFloat {
+        guard !containerWidth.isNaN, !containerWidth.isInfinite, containerWidth > 0 else {
+            return 60.0
+        }
+        let calculated = containerWidth * 0.20
+        return min(max(calculated, 60.0), 140.0)
+    }
+
+    static func swipeNavigationTranslation(
+        offset: CGFloat,
+        isAtLeadingBoundary: Bool,
+        isAtTrailingBoundary: Bool
+    ) -> CGFloat {
+        guard !offset.isNaN, !offset.isInfinite else { return 0.0 }
+        let boundaryDamping: CGFloat = 0.30
+
+        if offset > 0 && isAtLeadingBoundary {
+            return offset * boundaryDamping
+        } else if offset < 0 && isAtTrailingBoundary {
+            return offset * boundaryDamping
+        }
+        return offset
+    }
+
     static func filmstripThumbnailSize(
         aspectRatio: CGFloat?,
         displayedThumbnail: CGImage? = nil,
