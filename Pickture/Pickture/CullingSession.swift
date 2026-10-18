@@ -493,12 +493,14 @@ final class CullingSession: CullingInteractionTarget {
     func selectFirstItem() {
         if let first = cullingSequence.items.first {
             selectedItemID = first.id
+            clearZoomLock()
         }
     }
 
     func selectLastItem() {
         if let last = cullingSequence.items.last {
             selectedItemID = last.id
+            clearZoomLock()
         }
     }
 

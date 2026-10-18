@@ -199,6 +199,18 @@ struct ZoomLockTests {
         session.selectItemDirectly(id: item1.id)
         #expect(session.selectedItemID == item1.id)
         #expect(session.zoomLockState == nil)
+
+        // 10. Non-sequential jump navigation (selectFirstItem, selectLastItem) clears ZoomLock
+        session.selectedItemID = item0.id
+        session.setZoomLock(scale: 2.0, normalizedAnchor: CGPoint(x: 0.5, y: 0.5))
+        session.selectLastItem()
+        #expect(session.selectedItemID == item2.id)
+        #expect(session.zoomLockState == nil)
+
+        session.setZoomLock(scale: 2.0, normalizedAnchor: CGPoint(x: 0.5, y: 0.5))
+        session.selectFirstItem()
+        #expect(session.selectedItemID == item0.id)
+        #expect(session.zoomLockState == nil)
     }
 
     // MARK: - Unit 3: Canvas View Model & Gesture Projection
@@ -221,7 +233,7 @@ struct ZoomLockTests {
         session.setZoomLock(scale: 2.5, normalizedAnchor: CGPoint(x: 0.7, y: 0.3))
 
         let canvas = FilmstripImageCanvasView(item: item0, session: session)
-        #expect(canvas.zoomScale == 2.5)
+        #expect(canvas.currentZoomScale == 2.5)
     }
 
     @Test("Double tap calculation centers exactly on double-tapped point")
@@ -249,5 +261,20 @@ struct ZoomLockTests {
         // targetY = -(0.25 - 0.5) * 1200 = 300
         #expect(abs(offset.width - (-400)) < 0.001)
         #expect(abs(offset.height - 300) < 0.001)
+    }
+
+    @Test("CullingLayoutCalculator clamps pan offset within visible bounds")
+    func clampPanOffsetCalculations() {
+        let container = CGSize(width: 800, height: 600)
+        let imageSize = CGSize(width: 4000, height: 3000) // fits 800x600, at 2.0x is 1600x1200
+        // maxPanX = 400, maxPanY = 300
+        let clamped = CullingLayoutCalculator.clampPanOffset(
+            CGSize(width: 600, height: -500),
+            containerSize: container,
+            imageSize: imageSize,
+            scale: 2.0
+        )
+        #expect(clamped.width == 400)
+        #expect(clamped.height == -300)
     }
 }

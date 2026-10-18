@@ -271,4 +271,24 @@ enum CullingLayoutCalculator {
         let v = (tapLocation.y - rect.minY) / rect.height
         return CGPoint(x: min(1.0, max(0.0, u)), y: min(1.0, max(0.0, v)))
     }
+
+    static func clampPanOffset(
+        _ rawOffset: CGSize,
+        containerSize: CGSize,
+        imageSize: CGSize,
+        scale: CGFloat
+    ) -> CGSize {
+        guard containerSize.width > 0, containerSize.height > 0, scale > 1.0 else {
+            return .zero
+        }
+        let fitted = fittedImageSize(imageSize: imageSize, in: containerSize)
+        let scaledWidth = fitted.width * scale
+        let scaledHeight = fitted.height * scale
+        let maxPanX = max(0, (scaledWidth - containerSize.width) / 2.0)
+        let maxPanY = max(0, (scaledHeight - containerSize.height) / 2.0)
+        return CGSize(
+            width: min(maxPanX, max(-maxPanX, rawOffset.width)),
+            height: min(maxPanY, max(-maxPanY, rawOffset.height))
+        )
+    }
 }
