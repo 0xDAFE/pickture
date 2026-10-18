@@ -334,17 +334,6 @@ final class CullingSession: CullingInteractionTarget {
         }
     }
 
-    func recordThumbnailAspectRatio(_ ratio: CGFloat, for itemID: String) {
-        guard !ratio.isNaN && !ratio.isInfinite && ratio > 0 else { return }
-        if thumbnailAspectRatios[itemID] != ratio {
-            thumbnailAspectRatios[itemID] = ratio
-        }
-        let key = aspectRatioKey(for: itemID, previewSource: self.previewSource)
-        if thumbnailAspectRatios[key] != ratio {
-            thumbnailAspectRatios[key] = ratio
-        }
-    }
-
     @discardableResult
     func warmThumbnailAspectRatios(for targetItems: [MediaItem]) -> Task<Void, Never>? {
         guard !targetItems.isEmpty else { return nil }

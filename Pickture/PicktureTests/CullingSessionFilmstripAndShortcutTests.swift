@@ -1180,7 +1180,7 @@ struct CullingSessionFilmstripAndShortcutTests {
             aspectRatio: nil
         )
 
-        session.recordThumbnailAspectRatio(1.5, for: leftItem.id)
+        session.recordThumbnailAspectRatio(1.5, for: leftItem)
 
         let inactiveCellAfter = FilmstripThumbnailCell(
             item: leftItem,

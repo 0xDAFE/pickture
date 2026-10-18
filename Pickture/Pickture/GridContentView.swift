@@ -147,7 +147,7 @@ struct GridContentView: View {
                                 await session.loadThumbnailImage(for: item, maxPixelSize: 360)
                             },
                             onThumbnailLoaded: { [session, item] image in
-                                session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
+                                session.recordThumbnailAspectRatio(image.aspectRatio, for: item)
                             },
                             hydrateMetadata: { [session, item] in
                                 await session.hydrateMetadata(for: item)
