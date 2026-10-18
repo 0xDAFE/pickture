@@ -742,15 +742,15 @@ struct FilmstripImageCanvasView: View {
                                     swipeTranslation = -geo.size.width
                                 } completion: {
                                     swipeTranslation = 0
+                                    session.selectNextItem()
                                 }
-                                session.selectNextItem()
                             } else if value.translation.width >= threshold && session.canSelectPreviousItem {
                                 withAnimation(.easeOut(duration: 0.2)) {
                                     swipeTranslation = geo.size.width
                                 } completion: {
                                     swipeTranslation = 0
+                                    session.selectPreviousItem()
                                 }
-                                session.selectPreviousItem()
                             } else {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
                                     swipeTranslation = 0
@@ -779,8 +779,8 @@ struct FilmstripImageCanvasView: View {
 
 struct FilmstripVideoCanvasView: View {
     let url: URL
-    var item: MediaItem? = nil
-    var session: CullingSession? = nil
+    let item: MediaItem
+    let session: CullingSession
 
     @State private var player: AVPlayer?
     @State private var swipeTranslation: CGFloat = 0.0
@@ -789,10 +789,10 @@ struct FilmstripVideoCanvasView: View {
     var body: some View {
         GeometryReader { geo in
             let threshold = CullingLayoutCalculator.swipeNavigationThreshold(for: geo.size.width)
-            let isSwipeCullingActive = (session?.isSwipeModeEnabled == true) && item != nil
-            let isSwipeNavActive = (session?.isSwipeModeEnabled == false)
-            let isAtLeading = (session?.canSelectPreviousItem == false)
-            let isAtTrailing = (session?.canSelectNextItem == false)
+            let isSwipeCullingActive = session.isSwipeModeEnabled
+            let isSwipeNavActive = !session.isSwipeModeEnabled
+            let isAtLeading = !session.canSelectPreviousItem
+            let isAtTrailing = !session.canSelectNextItem
 
             ZStack {
                 Group {
@@ -813,7 +813,7 @@ struct FilmstripVideoCanvasView: View {
                     )
                 )
 
-                if isSwipeCullingActive, let session {
+                if isSwipeCullingActive {
                     if swipeTranslation > 20 {
                         let progress = min(1.0, (swipeTranslation - 20) / max(1.0, threshold - 20))
                         SwipeActionBadgeView(action: session.swipeRightAction, direction: .right)
@@ -841,7 +841,7 @@ struct FilmstripVideoCanvasView: View {
                         }
                     }
                     .onEnded { value in
-                        if let session, CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: 1.0, magnification: value.magnification) {
+                        if CullingLayoutCalculator.shouldCommitPinchToGrid(currentZoom: 1.0, magnification: value.magnification) {
                             withAnimation(.easeOut(duration: 0.2)) {
                                 session.setViewMode(.grid)
                             }
@@ -867,7 +867,7 @@ struct FilmstripVideoCanvasView: View {
                         }
                     }
                     .onEnded { value in
-                        if isSwipeCullingActive, let session, let item {
+                        if isSwipeCullingActive {
                             if value.translation.width >= threshold {
                                 withAnimation(.easeOut(duration: 0.2)) {
                                     swipeTranslation = geo.size.width + 100
@@ -887,22 +887,22 @@ struct FilmstripVideoCanvasView: View {
                                     swipeTranslation = 0
                                 }
                             }
-                        } else if isSwipeNavActive, let session, pinchScale == 1.0 {
+                        } else if isSwipeNavActive && pinchScale == 1.0 {
                             // SwipeNavigation: Dragging left -> Next, Dragging right -> Previous
                             if value.translation.width <= -threshold && session.canSelectNextItem {
                                 withAnimation(.easeOut(duration: 0.2)) {
                                     swipeTranslation = -geo.size.width
                                 } completion: {
                                     swipeTranslation = 0
+                                    session.selectNextItem()
                                 }
-                                session.selectNextItem()
                             } else if value.translation.width >= threshold && session.canSelectPreviousItem {
                                 withAnimation(.easeOut(duration: 0.2)) {
                                     swipeTranslation = geo.size.width
                                 } completion: {
                                     swipeTranslation = 0
+                                    session.selectPreviousItem()
                                 }
-                                session.selectPreviousItem()
                             } else {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
                                     swipeTranslation = 0

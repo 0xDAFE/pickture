@@ -149,7 +149,7 @@ struct GridContentView: View {
             .onChange(of: session.selectedItemID) { _, newID in
                 if let newID, session.viewMode == .grid {
                     withAnimation(.easeInOut(duration: 0.15)) {
-                        proxy.scrollTo(newID, anchor: .center)
+                        proxy.scrollTo(newID)
                     }
                 }
             }
