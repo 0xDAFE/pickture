@@ -200,4 +200,54 @@ struct ZoomLockTests {
         #expect(session.selectedItemID == item1.id)
         #expect(session.zoomLockState == nil)
     }
+
+    // MARK: - Unit 3: Canvas View Model & Gesture Projection
+
+    @Test("FilmstripImageCanvasView initializes with locked scale when session.isZoomLocked is true")
+    func filmstripCanvasViewInitializationWithZoomLock() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let photo1 = root.appendingPathComponent("IMG001.JPG")
+        try createDummyFile(at: photo1)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        session.isSyncSuspended = true
+        try session.openFolder(at: root)
+
+        let item0 = session.items[0]
+        session.selectedItemID = item0.id
+        session.setZoomLock(scale: 2.5, normalizedAnchor: CGPoint(x: 0.7, y: 0.3))
+
+        let canvas = FilmstripImageCanvasView(item: item0, session: session)
+        #expect(canvas.zoomScale == 2.5)
+    }
+
+    @Test("Double tap calculation centers exactly on double-tapped point")
+    func doubleTapPointTargetingCalculation() {
+        let container = CGSize(width: 800, height: 600)
+        let imageSize = CGSize(width: 4000, height: 3000) // 4:3 fills 800x600
+
+        // Tap at (600, 150) -> normalized anchor (0.75, 0.25)
+        let anchor = CullingLayoutCalculator.normalizedAnchor(
+            forTapLocation: CGPoint(x: 600, y: 150),
+            inContainerSize: container,
+            imageSize: imageSize
+        )
+        #expect(abs(anchor.x - 0.75) < 0.001)
+        #expect(abs(anchor.y - 0.25) < 0.001)
+
+        let offset = CullingLayoutCalculator.calculatePanOffset(
+            forNormalizedAnchor: anchor,
+            containerSize: container,
+            imageSize: imageSize,
+            scale: 2.0
+        )
+        // Scaled is 1600x1200, maxPanX = 400, maxPanY = 300
+        // targetX = -(0.75 - 0.5) * 1600 = -400
+        // targetY = -(0.25 - 0.5) * 1200 = 300
+        #expect(abs(offset.width - (-400)) < 0.001)
+        #expect(abs(offset.height - 300) < 0.001)
+    }
 }

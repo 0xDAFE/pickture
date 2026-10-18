@@ -65,40 +65,35 @@ struct FilmstripView: View {
                     // BorderTapNavigation Edge Tap Zones (applies across both image and video)
                     if session.isBorderTapNavigationEnabled {
                         HStack {
-                            Button {
-                                session.selectPreviousItem()
-                            } label: {
-                                Color.white.opacity(0.001)
-                                    .frame(width: zoneWidth)
-                                    .overlay(
-                                        Image(systemName: "chevron.left")
-                                            .font(.title2.weight(.bold))
-                                            .foregroundStyle(.white.opacity(0.25))
-                                            .padding(.leading, 8),
-                                        alignment: .leading
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Previous MediaItem")
+                            Color.clear
+                                .frame(width: zoneWidth)
+                                .overlay(
+                                    Image(systemName: "chevron.left")
+                                        .font(.title2.weight(.bold))
+                                        .foregroundStyle(.white.opacity(0.25))
+                                        .padding(.leading, 8),
+                                    alignment: .leading
+                                )
+                                .accessibilityElement()
+                                .accessibilityLabel("Previous MediaItem")
+                                .accessibilityAddTraits(.isButton)
 
                             Spacer()
 
-                            Button {
-                                session.selectNextItem()
-                            } label: {
-                                Color.white.opacity(0.001)
-                                    .frame(width: zoneWidth)
-                                    .overlay(
-                                        Image(systemName: "chevron.right")
-                                            .font(.title2.weight(.bold))
-                                            .foregroundStyle(.white.opacity(0.25))
-                                            .padding(.trailing, 8),
-                                        alignment: .trailing
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Next MediaItem")
+                            Color.clear
+                                .frame(width: zoneWidth)
+                                .overlay(
+                                    Image(systemName: "chevron.right")
+                                        .font(.title2.weight(.bold))
+                                        .foregroundStyle(.white.opacity(0.25))
+                                        .padding(.trailing, 8),
+                                    alignment: .trailing
+                                )
+                                .accessibilityElement()
+                                .accessibilityLabel("Next MediaItem")
+                                .accessibilityAddTraits(.isButton)
                         }
+                        .allowsHitTesting(false)
                     }
 
                     // Top overlay info badge
@@ -298,7 +293,7 @@ struct FilmstripView: View {
             cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
             aspectRatio: session.thumbnailAspectRatio(for: item),
             onSelect: {
-                session.selectedItemID = item.id
+                session.selectItemDirectly(id: item.id)
             },
             loadThumbnail: { [session, item] in
                 await session.loadThumbnailImage(for: item, maxPixelSize: 360)
@@ -566,12 +561,22 @@ struct FilmstripImageCanvasView: View {
     let session: CullingSession
 
     @State private var previewImage: CGImage?
-    @State private var zoomScale: CGFloat = 1.0
+    @State var zoomScale: CGFloat = 1.0
     @State private var pinchScale: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
     @State private var dragOffset: CGSize = .zero
     @State private var swipeTranslation: CGFloat = 0.0
     @State private var isLoading = false
+
+    init(item: MediaItem, session: CullingSession) {
+        self.item = item
+        self.session = session
+        if let lock = session.zoomLockState, lock.scale > 1.0 {
+            _zoomScale = State(initialValue: lock.scale)
+        } else {
+            _zoomScale = State(initialValue: 1.0)
+        }
+    }
 
     private var effectiveScale: CGFloat {
         if zoomScale <= 1.0 {
@@ -591,6 +596,59 @@ struct FilmstripImageCanvasView: View {
             ?? session.inMemoryThumbnailImage(for: item, maxPixelSize: 360)
     }
 
+    private func currentImageSize(in containerSize: CGSize) -> CGSize {
+        if let cgImage = displayedImage {
+            return CGSize(width: cgImage.width, height: cgImage.height)
+        }
+        let ratio = session.thumbnailAspectRatio(for: item)
+        return CGSize(width: max(1.0, ratio * 1000), height: 1000)
+    }
+
+    private func activePanOffset(in containerSize: CGSize) -> CGSize {
+        if panOffset != .zero || dragOffset != .zero {
+            return CGSize(width: panOffset.width + dragOffset.width, height: panOffset.height + dragOffset.height)
+        }
+        if let lock = session.zoomLockState, lock.scale > 1.0 {
+            return CullingLayoutCalculator.calculatePanOffset(
+                forNormalizedAnchor: lock.normalizedAnchor,
+                containerSize: containerSize,
+                imageSize: currentImageSize(in: containerSize),
+                scale: lock.scale
+            )
+        }
+        return .zero
+    }
+
+    private func handleDoubleTap(at location: CGPoint, in containerSize: CGSize) {
+        if zoomScale > 1.0 {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                zoomScale = 1.0
+                panOffset = .zero
+                dragOffset = .zero
+            }
+            session.clearZoomLock()
+        } else {
+            let imgSize = currentImageSize(in: containerSize)
+            let anchor = CullingLayoutCalculator.normalizedAnchor(
+                forTapLocation: location,
+                inContainerSize: containerSize,
+                imageSize: imgSize
+            )
+            let newScale: CGFloat = 2.0
+            let newOffset = CullingLayoutCalculator.calculatePanOffset(
+                forNormalizedAnchor: anchor,
+                containerSize: containerSize,
+                imageSize: imgSize,
+                scale: newScale
+            )
+            withAnimation(.easeInOut(duration: 0.25)) {
+                zoomScale = newScale
+                panOffset = newOffset
+                dragOffset = .zero
+            }
+            session.setZoomLock(scale: newScale, normalizedAnchor: anchor)
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -599,6 +657,7 @@ struct FilmstripImageCanvasView: View {
             let isSwipeNavActive = !session.isSwipeModeEnabled && effectiveScale <= 1.0
             let isAtLeading = !session.canSelectPreviousItem
             let isAtTrailing = !session.canSelectNextItem
+            let currentPan = activePanOffset(in: geo.size)
 
             ZStack {
                 Color.clear
@@ -609,8 +668,8 @@ struct FilmstripImageCanvasView: View {
                         .scaledToFit()
                         .scaleEffect(effectiveScale)
                         .offset(
-                            x: panOffset.width + dragOffset.width + (isSwipeCullingActive || isSwipeNavActive ? swipeTranslation : 0),
-                            y: panOffset.height + dragOffset.height
+                            x: currentPan.width + (isSwipeCullingActive || isSwipeNavActive ? swipeTranslation : 0),
+                            y: currentPan.height
                         )
                         .rotationEffect(
                             Angle.degrees(
@@ -646,19 +705,18 @@ struct FilmstripImageCanvasView: View {
             }
 
             .contentShape(Rectangle())
-            // Double-tap zoom gesture (toggles between 1.0 and 2.0)
+            // Double-tap zoom gesture (centers on tapped point) and single-tap border navigation
             .gesture(
-                TapGesture(count: 2).onEnded {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        if zoomScale > 1.0 {
-                            zoomScale = 1.0
-                            panOffset = .zero
-                            dragOffset = .zero
-                        } else {
-                            zoomScale = 2.0
-                        }
+                SpatialTapGesture(count: 2)
+                    .onEnded { event in
+                        handleDoubleTap(at: event.location, in: geo.size)
                     }
-                }
+                    .exclusively(
+                        before: SpatialTapGesture(count: 1)
+                            .onEnded { event in
+                                _ = session.handleBorderTap(at: event.location, in: geo.size)
+                            }
+                    )
             )
             // Pinch-to-zoom (1.0x - 4.0x) & PinchToGrid
             .simultaneousGesture(
@@ -676,13 +734,32 @@ struct FilmstripImageCanvasView: View {
                             }
                             pinchScale = 1.0
                         } else {
+                            let targetScale = min(4.0, max(1.0, zoomScale * value.magnification))
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                zoomScale = min(4.0, max(1.0, zoomScale * value.magnification))
+                                zoomScale = targetScale
                                 pinchScale = 1.0
                             }
-                            if zoomScale <= 1.0 {
+                            if targetScale <= 1.0 {
                                 panOffset = .zero
                                 dragOffset = .zero
+                                session.clearZoomLock()
+                            } else {
+                                let imgSize = currentImageSize(in: geo.size)
+                                let fitted = CullingLayoutCalculator.fittedImageSize(imageSize: imgSize, in: geo.size)
+                                let scaledWidth = fitted.width * targetScale
+                                let scaledHeight = fitted.height * targetScale
+                                let maxPanX = max(0, (scaledWidth - geo.size.width) / 2)
+                                let maxPanY = max(0, (scaledHeight - geo.size.height) / 2)
+                                let basePan = currentPan
+                                panOffset.width = min(maxPanX, max(-maxPanX, basePan.width))
+                                panOffset.height = min(maxPanY, max(-maxPanY, basePan.height))
+                                let anchor = CullingLayoutCalculator.calculateNormalizedAnchor(
+                                    forPanOffset: panOffset,
+                                    containerSize: geo.size,
+                                    imageSize: imgSize,
+                                    scale: targetScale
+                                )
+                                session.setZoomLock(scale: targetScale, normalizedAnchor: anchor)
                             }
                         }
                     }
@@ -708,13 +785,26 @@ struct FilmstripImageCanvasView: View {
                     }
                     .onEnded { value in
                         if effectiveScale > 1.0 {
-                            let maxPanX = max(0, (geo.size.width * (effectiveScale - 1)) / 2)
-                            let maxPanY = max(0, (geo.size.height * (effectiveScale - 1)) / 2)
-                            let newX = panOffset.width + value.translation.width
-                            let newY = panOffset.height + value.translation.height
+                            let imgSize = currentImageSize(in: geo.size)
+                            let fitted = CullingLayoutCalculator.fittedImageSize(imageSize: imgSize, in: geo.size)
+                            let scaledWidth = fitted.width * effectiveScale
+                            let scaledHeight = fitted.height * effectiveScale
+                            let maxPanX = max(0, (scaledWidth - geo.size.width) / 2)
+                            let maxPanY = max(0, (scaledHeight - geo.size.height) / 2)
+                            let basePan = currentPan
+                            let newX = basePan.width + value.translation.width
+                            let newY = basePan.height + value.translation.height
                             panOffset.width = min(maxPanX, max(-maxPanX, newX))
                             panOffset.height = min(maxPanY, max(-maxPanY, newY))
                             dragOffset = .zero
+
+                            let anchor = CullingLayoutCalculator.calculateNormalizedAnchor(
+                                forPanOffset: panOffset,
+                                containerSize: geo.size,
+                                imageSize: imgSize,
+                                scale: effectiveScale
+                            )
+                            session.setZoomLock(scale: effectiveScale, normalizedAnchor: anchor)
                         } else if session.isSwipeModeEnabled && pinchScale == 1.0 {
                             if value.translation.width >= threshold {
                                 withAnimation(.easeOut(duration: 0.2)) {
@@ -759,6 +849,17 @@ struct FilmstripImageCanvasView: View {
                         }
                     }
             )
+            .onAppear {
+                if let lock = session.zoomLockState, lock.scale > 1.0, panOffset == .zero {
+                    let computed = CullingLayoutCalculator.calculatePanOffset(
+                        forNormalizedAnchor: lock.normalizedAnchor,
+                        containerSize: geo.size,
+                        imageSize: currentImageSize(in: geo.size),
+                        scale: lock.scale
+                    )
+                    panOffset = computed
+                }
+            }
             .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)") {
                 if let inMemory = session.inMemoryPreviewImage(for: item, maxPixelSize: 2048) {
                     previewImage = inMemory
@@ -910,6 +1011,11 @@ struct FilmstripVideoCanvasView: View {
                             }
                         }
                     }
+            )
+            .simultaneousGesture(
+                SpatialTapGesture(count: 1).onEnded { event in
+                    _ = session.handleBorderTap(at: event.location, in: geo.size)
+                }
             )
             .onAppear {
                 player = AVPlayer(url: url)
