@@ -87,6 +87,7 @@ _Avoid_: Card view, Tinder mode, Quick cull
 A user-toggleable touch interaction in the Filmstrip view that maps taps in the left and right outer border zones of the main viewport to Previous / Next `MediaItem` navigation, which can be disabled to prevent accidental navigation from thumb grip.
 _Avoid_: Edge swipe, Margin tap
 
+<<<<<<< Updated upstream
 **SwipeNavigation**:
 A touch gesture interaction in the Filmstrip view active when `SwipeMode` is disabled and the viewport is unzoomed ($1.0\times$), allowing horizontal swipes (swiping left to advance, swiping right to return) to navigate between adjacent `MediaItem`s in the active `CullingSequence`.
 _Avoid_: Page flip, Scrub navigation, Pan navigation
@@ -94,6 +95,11 @@ _Avoid_: Page flip, Scrub navigation, Pan navigation
 **PinchToGrid**:
 A two-finger pinch-in gesture interaction in the Filmstrip view that, when executed at unzoomed ($1.0\times$) scale, dismisses the single-item inspection canvas and transitions the Workspace back to the Grid view while preserving the active `MediaItem` selection.
 _Avoid_: Zoom exit, Pinch close, Collapse to grid
+=======
+**ZoomLock**:
+The stateful retention of the active zoom magnification scale and normalized focal anchor across sequential `MediaItem` navigation in the Filmstrip view, enabling rapid critical focus and detail comparison between adjacent candidate captures.
+_Avoid_: Sticky zoom, Frozen zoom, Fixed crop
+>>>>>>> Stashed changes
 
 ### Synchronization & Conflicts
 

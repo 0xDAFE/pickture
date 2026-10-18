@@ -1,0 +1,9 @@
+# Normalized Focal Anchor and Sequential Navigation Retention (ZoomLock)
+
+To enable zero-latency critical focus comparison across candidate shots, Pickture implements `ZoomLock`: retaining active canvas magnification scale and focal position across sequential navigation within the Filmstrip view.
+
+To guarantee that focal comparison remains stable across media files with varying aspect ratios (e.g. 3:2 RAW captures, 16:9 crops, or mixed orientations), pan offsets are not stored in raw screen pixel coordinates. Instead, the focal target is captured as a normalized unit coordinate anchor $(u, v) \in [0, 1] \times [0, 1]$ relative to the media bounds and projected onto the destination viewport, clamped to valid pan boundaries. Double-tapping zooms directly into the tapped coordinate $(u, v)$ rather than centering on the geometric middle of the image, allowing instant lock-on to subject details (such as eyes or fine textures).
+
+To prevent accidental navigation during detail inspection, touches starting within the border tap zones (up to 64pt along screen edges) disambiguate stationary taps (which trigger previous/next item navigation) from drag gestures with translation (which pan the zoomed canvas).
+
+`ZoomLock` is preserved strictly across sequential comparison interactions: `BorderTapNavigation` edge taps, keyboard arrow shortcuts, and curation rating/flagging auto-advance. Switching context via direct thumbnail strip selection, encountering a video item, toggling between Grid and Filmstrip views, or changing folders automatically resets the canvas to standard 1.0x fit. Navigation under `ZoomLock` employs an instant cut (zero sliding or crossfade animation) to facilitate critical focus "blink comparison", and consumes the fast cached preview pipeline in accordance with ADR-0005 to sustain 60 FPS candidate switching without blocking on full RAW demosaicing.
