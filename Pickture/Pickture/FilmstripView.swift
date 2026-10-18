@@ -685,6 +685,9 @@ struct FilmstripScrubber: View {
                             }
                         }
                         .scrollTargetLayout()
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
                         .offset(x: liveSwipeOffset)
                     } else {
                         LazyVStack(spacing: CullingLayoutCalculator.scrubberInterTileSpacing) {
@@ -693,6 +696,9 @@ struct FilmstripScrubber: View {
                             }
                         }
                         .scrollTargetLayout()
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
                         .offset(y: liveSwipeOffset)
                     }
                 }
@@ -706,6 +712,11 @@ struct FilmstripScrubber: View {
                             isUserScrolling = isScrolling
                             if !isScrolling {
                                 isProgrammaticJump = false
+                                if let selectedID = session.selectedItemID {
+                                    withAnimation(.snappy(duration: 0.22)) {
+                                        proxy.scrollTo(selectedID, anchor: .center)
+                                    }
+                                }
                             }
                             session.updateScrubState(
                                 isScrubbing: isScrolling,
@@ -729,27 +740,39 @@ struct FilmstripScrubber: View {
                 .onAppear {
                     scrubbedItemID = session.selectedItemID
                     if let selectedID = session.selectedItemID {
-                        proxy.scrollTo(selectedID, anchor: .center)
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(selectedID, anchor: .center)
+                        }
                     }
                 }
                 .onChange(of: scrubbedItemID) { _, newID in
                     guard let newID, newID != session.selectedItemID else { return }
-                    guard !isProgrammaticJump else { return }
+                    guard (isUserScrolling || session.isScrubbing), !isProgrammaticJump else { return }
                     var tx = Transaction(animation: nil)
                     tx.disablesAnimations = true
                     withTransaction(tx) {
                         session.selectedItemID = newID
                     }
-                    if isUserScrolling || session.isScrubbing {
-                        ScrubberHaptics.fireSelectionChanged()
-                    }
+                    ScrubberHaptics.fireSelectionChanged()
                 }
                 .onChange(of: session.selectedItemID) { _, newID in
-                    guard let newID, scrubbedItemID != newID else { return }
+                    guard let newID else { return }
                     scrubbedItemID = newID
+                    guard !isUserScrolling, !isProgrammaticJump else { return }
+                    isProgrammaticJump = true
                     withAnimation(.snappy(duration: 0.22)) {
                         proxy.scrollTo(newID, anchor: .center)
+                    } completion: {
+                        isProgrammaticJump = false
                     }
+                }
+                .onChange(of: activeSlotSpan) { _, _ in
+                    guard !isUserScrolling, !isProgrammaticJump, let selectedID = session.selectedItemID else { return }
+                    proxy.scrollTo(selectedID, anchor: .center)
+                }
+                .onChange(of: scrubberSpan) { _, _ in
+                    guard !isUserScrolling, !isProgrammaticJump, let selectedID = session.selectedItemID else { return }
+                    proxy.scrollTo(selectedID, anchor: .center)
                 }
             }
         }
@@ -766,7 +789,7 @@ struct FilmstripScrubber: View {
             previewSource: session.previewSource,
             cacheGeneration: session.cacheGeneration,
             cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
-            aspectRatio: session.thumbnailAspectRatio(for: item),
+            aspectRatio: isSelected ? session.thumbnailAspectRatio(for: item) : nil,
             onSelect: {
                 guard session.selectedItemID != item.id else { return }
                 isProgrammaticJump = true
@@ -778,7 +801,7 @@ struct FilmstripScrubber: View {
                     session.selectedItemID = item.id
                 }
                 // Smoothly scroll the scrubber ribbon to center the tapped tile
-                withAnimation(.snappy(duration: 0.25)) {
+                withAnimation(.snappy(duration: 0.22)) {
                     scrubbedItemID = item.id
                     proxy.scrollTo(item.id, anchor: .center)
                 } completion: {
@@ -800,7 +823,7 @@ struct FilmstripScrubber: View {
             dockPosition == .bottom ? .horizontal : .vertical,
             isSelected ? CullingLayoutCalculator.scrubberActiveTileBreathingMargin : 0.0
         )
-        .animation(.snappy(duration: 0.2), value: isSelected)
+        .zIndex(isSelected ? 1 : 0)
         .id(item.id)
     }
 
@@ -860,7 +883,6 @@ private struct ScrubberScrollPhaseAndVelocityModifier: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, macOS 15.0, *) {
             content
-                .scrollTargetBehavior(.viewAligned(limitBehavior: .never))
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
                     isHorizontal ? geo.contentOffset.x : geo.contentOffset.y
                 } action: { oldOffset, newOffset in
@@ -878,7 +900,7 @@ private struct ScrubberScrollPhaseAndVelocityModifier: ViewModifier {
                     }
                 }
                 .onScrollPhaseChange { _, newPhase in
-                    let scrolling = newPhase.isScrolling
+                    let scrolling = (newPhase == .interacting || newPhase == .decelerating)
                     tracker.isCurrentlyScrolling = scrolling
                     if !scrolling {
                         tracker.currentVelocity = 0.0
@@ -888,7 +910,6 @@ private struct ScrubberScrollPhaseAndVelocityModifier: ViewModifier {
                 }
         } else {
             content
-                .scrollTargetBehavior(.viewAligned)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 4)
                         .onChanged { value in

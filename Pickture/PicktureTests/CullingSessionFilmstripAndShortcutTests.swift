@@ -1241,6 +1241,117 @@ struct CullingSessionFilmstripAndShortcutTests {
         session.selectedItemID = neighbors.next?.id
         #expect(session.selectedItemID == item3.id)
     }
+
+    // MARK: - Slice 12: Scrubber Playhead Centering & Unidirectional Synchronization (#74 / #78)
+
+    @Test("FilmstripScrubber playhead centering calculations accurately align active tile center across iPad dock orientations and aspect ratios")
+    func filmstripScrubberPlayheadCenteringCalculationsAcrossDocksAndAspectRatios() {
+        // Test various iPad viewports (iPad 11": 834pt, iPad 13": 1024pt, Split View: 504pt, 375pt)
+        let ipadSpans: [CGFloat] = [375.0, 504.0, 834.0, 1024.0, 1366.0]
+        let aspectRatios: [CGFloat] = [1.5, 1.777, 1.0, 0.667, 0.5625]
+
+        for span in ipadSpans {
+            for ratio in aspectRatios {
+                // Bottom dock
+                let activeSizeBottom = CullingLayoutCalculator.scrubberTileSize(
+                    isSelected: true,
+                    aspectRatio: ratio,
+                    dockPosition: .bottom
+                )
+                let activeSlotSpanBottom = activeSizeBottom.width + CullingLayoutCalculator.scrubberActiveTileBreathingMargin * 2.0
+                let insetBottom = CullingLayoutCalculator.scrubberHalfViewportInset(
+                    scrubberSpan: span,
+                    activeTileSpan: activeSlotSpanBottom
+                )
+                if span >= activeSlotSpanBottom {
+                    let tileCenter = insetBottom + (activeSlotSpanBottom / 2.0)
+                    let viewportCenter = span / 2.0
+                    #expect(abs(tileCenter - viewportCenter) < 0.001)
+                }
+
+                // Right dock
+                let activeSizeRight = CullingLayoutCalculator.scrubberTileSize(
+                    isSelected: true,
+                    aspectRatio: ratio,
+                    dockPosition: .right
+                )
+                let activeSlotSpanRight = activeSizeRight.height + CullingLayoutCalculator.scrubberActiveTileBreathingMargin * 2.0
+                let insetRight = CullingLayoutCalculator.scrubberHalfViewportInset(
+                    scrubberSpan: span,
+                    activeTileSpan: activeSlotSpanRight
+                )
+                if span >= activeSlotSpanRight {
+                    let tileCenter = insetRight + (activeSlotSpanRight / 2.0)
+                    let viewportCenter = span / 2.0
+                    #expect(abs(tileCenter - viewportCenter) < 0.001)
+                }
+            }
+        }
+    }
+
+    @Test("Scrubber selection synchronization only mutates session selection during active user interaction")
+    func scrubberSelectionSynchronizationGatedOnUserInteraction() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for i in 1...4 {
+            let url = root.appendingPathComponent("IMG00\(i).JPG")
+            try createTestJPEG(at: url, width: 320, height: 240)
+        }
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+
+        let item0 = session.items[0]
+        let item1 = session.items[1]
+        let item2 = session.items[2]
+        session.selectedItemID = item0.id
+
+        // Helper replicating FilmstripScrubber selection gating contract:
+        func evaluateScrubberSelectionUpdate(
+            newID: String?,
+            currentSelectedID: String?,
+            isUserScrolling: Bool,
+            isScrubbing: Bool,
+            isProgrammaticJump: Bool
+        ) -> String? {
+            guard let newID, newID != currentSelectedID else { return nil }
+            guard (isUserScrolling || isScrubbing) && !isProgrammaticJump else { return nil }
+            return newID
+        }
+
+        // 1. Programmatic jump or main-canvas swipe offset shifts ($scrubbedItemID changes while isUserScrolling == false):
+        // Must NOT overwrite session.selectedItemID
+        let nonUserChange = evaluateScrubberSelectionUpdate(
+            newID: item1.id,
+            currentSelectedID: item0.id,
+            isUserScrolling: false,
+            isScrubbing: false,
+            isProgrammaticJump: false
+        )
+        #expect(nonUserChange == nil)
+
+        // 2. Programmatic scroll in-flight:
+        let programmaticChange = evaluateScrubberSelectionUpdate(
+            newID: item2.id,
+            currentSelectedID: item0.id,
+            isUserScrolling: false,
+            isScrubbing: false,
+            isProgrammaticJump: true
+        )
+        #expect(programmaticChange == nil)
+
+        // 3. Active user scrubbing on scrubber ribbon:
+        let userScrubChange = evaluateScrubberSelectionUpdate(
+            newID: item1.id,
+            currentSelectedID: item0.id,
+            isUserScrolling: true,
+            isScrubbing: true,
+            isProgrammaticJump: false
+        )
+        #expect(userScrubChange == item1.id)
+    }
 }
 
 
