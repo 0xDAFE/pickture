@@ -65,35 +65,40 @@ struct FilmstripView: View {
                     // BorderTapNavigation Edge Tap Zones (applies across both image and video)
                     if session.isBorderTapNavigationEnabled {
                         HStack {
-                            Color.clear
-                                .frame(width: zoneWidth)
-                                .overlay(
-                                    Image(systemName: "chevron.left")
-                                        .font(.title2.weight(.bold))
-                                        .foregroundStyle(.white.opacity(0.25))
-                                        .padding(.leading, 8),
-                                    alignment: .leading
-                                )
-                                .accessibilityElement()
-                                .accessibilityLabel("Previous MediaItem")
-                                .accessibilityAddTraits(.isButton)
+                            Button {
+                                session.selectPreviousItem()
+                            } label: {
+                                Color.white.opacity(0.001)
+                                    .frame(width: zoneWidth)
+                                    .overlay(
+                                        Image(systemName: "chevron.left")
+                                            .font(.title2.weight(.bold))
+                                            .foregroundStyle(.white.opacity(0.25))
+                                            .padding(.leading, 8),
+                                        alignment: .leading
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Previous MediaItem")
 
                             Spacer()
 
-                            Color.clear
-                                .frame(width: zoneWidth)
-                                .overlay(
-                                    Image(systemName: "chevron.right")
-                                        .font(.title2.weight(.bold))
-                                        .foregroundStyle(.white.opacity(0.25))
-                                        .padding(.trailing, 8),
-                                    alignment: .trailing
-                                )
-                                .accessibilityElement()
-                                .accessibilityLabel("Next MediaItem")
-                                .accessibilityAddTraits(.isButton)
+                            Button {
+                                session.selectNextItem()
+                            } label: {
+                                Color.white.opacity(0.001)
+                                    .frame(width: zoneWidth)
+                                    .overlay(
+                                        Image(systemName: "chevron.right")
+                                            .font(.title2.weight(.bold))
+                                            .foregroundStyle(.white.opacity(0.25))
+                                            .padding(.trailing, 8),
+                                        alignment: .trailing
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Next MediaItem")
                         }
-                        .allowsHitTesting(false)
                     }
 
                     // Top overlay info badge
@@ -707,18 +712,12 @@ struct FilmstripImageCanvasView: View {
             }
 
             .contentShape(Rectangle())
-            // Double-tap zoom gesture (centers on tapped point) and single-tap border navigation
+            // Double-tap zoom gesture (centers on tapped point)
             .gesture(
                 SpatialTapGesture(count: 2)
                     .onEnded { event in
                         handleDoubleTap(at: event.location, in: geo.size)
                     }
-                    .exclusively(
-                        before: SpatialTapGesture(count: 1)
-                            .onEnded { event in
-                                _ = session.handleBorderTap(at: event.location, in: geo.size)
-                            }
-                    )
             )
             // Pinch-to-zoom (1.0x - 4.0x) & PinchToGrid
             .simultaneousGesture(
@@ -1030,11 +1029,6 @@ struct FilmstripVideoCanvasView: View {
                             }
                         }
                     }
-            )
-            .simultaneousGesture(
-                SpatialTapGesture(count: 1).onEnded { event in
-                    _ = session.handleBorderTap(at: event.location, in: geo.size)
-                }
             )
             .onAppear {
                 player = AVPlayer(url: url)
