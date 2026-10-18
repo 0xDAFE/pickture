@@ -643,6 +643,29 @@ struct FilmstripScrubber: View {
     @State private var isUserScrolling: Bool = false
     @State private var macDragAnchorIndex: Int? = nil
 
+    private var effectiveSelectedItemID: String? {
+        isUserScrolling ? (scrubbedItemID ?? session.selectedItemID) : session.selectedItemID
+    }
+
+    private var scrollPositionBinding: Binding<String?> {
+        Binding(
+            get: {
+                effectiveSelectedItemID
+            },
+            set: { newID in
+                scrubbedItemID = newID
+                guard isUserScrolling, !isProgrammaticJump else { return }
+                guard let newID, newID != session.selectedItemID else { return }
+                var tx = Transaction(animation: nil)
+                tx.disablesAnimations = true
+                withTransaction(tx) {
+                    session.selectedItemID = newID
+                }
+                ScrubberHaptics.fireSelectionChanged()
+            }
+        )
+    }
+
     var body: some View {
         GeometryReader { geo in
             let isHorizontal = dockPosition == .bottom
@@ -655,10 +678,12 @@ struct FilmstripScrubber: View {
                 return CullingLayoutCalculator.filmstripThumbnailSize(aspectRatio: 1.5, dockPosition: dockPosition)
             }()
             let activeTileSpan = isHorizontal ? activeTileRawSize.width : activeTileRawSize.height
-            let activeSlotSpan = activeTileSpan + CullingLayoutCalculator.scrubberActiveTileBreathingMargin * 2.0
+            let inactiveTileRawSize = CullingLayoutCalculator.scrubberInactiveTileSize(for: dockPosition)
+            let inactiveTileSpan = isHorizontal ? inactiveTileRawSize.width : inactiveTileRawSize.height
+            let referenceSlotSpan = inactiveTileSpan + CullingLayoutCalculator.scrubberActiveTileBreathingMargin * 2.0
             let halfViewportInset = CullingLayoutCalculator.scrubberHalfViewportInset(
                 scrubberSpan: scrubberSpan,
-                activeTileSpan: activeSlotSpan
+                activeTileSpan: referenceSlotSpan
             )
             let pageStride = max(1.0, mainCanvasWidth + CullingLayoutCalculator.filmstripInterPageGutter)
             let liveSwipeOffset = CullingLayoutCalculator.scrubberDragInterpolationOffset(
@@ -688,8 +713,11 @@ struct FilmstripScrubber: View {
                         .offset(y: liveSwipeOffset)
                     }
                 }
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
                 .contentMargins(isHorizontal ? .horizontal : .vertical, halfViewportInset, for: .scrollContent)
-                .scrollPosition(id: $scrubbedItemID, anchor: .center)
+                .scrollPosition(id: scrollPositionBinding, anchor: .center)
                 .scrollIndicators(.hidden)
                 .modifier(
                     ScrubberScrollPhaseAndVelocityModifier(
@@ -724,31 +752,18 @@ struct FilmstripScrubber: View {
                         proxy.scrollTo(selectedID, anchor: .center)
                     }
                 }
-                .onChange(of: scrubbedItemID) { _, newID in
-                    guard let newID, newID != session.selectedItemID else { return }
-                    guard !isProgrammaticJump else { return }
-                    var tx = Transaction(animation: nil)
-                    tx.disablesAnimations = true
-                    withTransaction(tx) {
-                        session.selectedItemID = newID
-                    }
-                    if isUserScrolling || session.isScrubbing {
-                        ScrubberHaptics.fireSelectionChanged()
-                    }
-                }
                 .onChange(of: session.selectedItemID) { _, newID in
-                    guard let newID, scrubbedItemID != newID else { return }
+                    guard let newID else { return }
                     scrubbedItemID = newID
-                    withAnimation(.snappy(duration: 0.22)) {
-                        proxy.scrollTo(newID, anchor: .center)
-                    }
+                    guard !isUserScrolling, !isProgrammaticJump else { return }
+                    proxy.scrollTo(newID, anchor: .center)
                 }
             }
         }
     }
 
     private func scrubberCell(for item: MediaItem, proxy: ScrollViewProxy) -> some View {
-        let isSelected = session.selectedItemID == item.id
+        let isSelected = effectiveSelectedItemID == item.id
         return FilmstripThumbnailCell(
             item: item,
             curation: session.curationMetadata(for: item),
@@ -758,7 +773,7 @@ struct FilmstripScrubber: View {
             previewSource: session.previewSource,
             cacheGeneration: session.cacheGeneration,
             cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
-            aspectRatio: session.thumbnailAspectRatio(for: item),
+            aspectRatio: isSelected ? session.thumbnailAspectRatio(for: item) : nil,
             onSelect: {
                 guard session.selectedItemID != item.id else { return }
                 isProgrammaticJump = true
@@ -767,11 +782,11 @@ struct FilmstripScrubber: View {
                 var tx = Transaction(animation: nil)
                 tx.disablesAnimations = true
                 withTransaction(tx) {
+                    scrubbedItemID = item.id
                     session.selectedItemID = item.id
                 }
                 // Smoothly scroll the scrubber ribbon to center the tapped tile
-                withAnimation(.snappy(duration: 0.25)) {
-                    scrubbedItemID = item.id
+                withAnimation(.snappy(duration: 0.22)) {
                     proxy.scrollTo(item.id, anchor: .center)
                 } completion: {
                     isProgrammaticJump = false
@@ -781,7 +796,7 @@ struct FilmstripScrubber: View {
                 await session.loadThumbnailImage(for: item, maxPixelSize: 360)
             },
             onThumbnailLoaded: { [session, item] image in
-                session.recordThumbnailAspectRatio(image.aspectRatio, for: item.id)
+                session.recordThumbnailAspectRatio(image.aspectRatio, for: item)
             },
             hydrateMetadata: { [session, item] in
                 await session.hydrateMetadata(for: item)
@@ -792,7 +807,7 @@ struct FilmstripScrubber: View {
             dockPosition == .bottom ? .horizontal : .vertical,
             isSelected ? CullingLayoutCalculator.scrubberActiveTileBreathingMargin : 0.0
         )
-        .animation(.snappy(duration: 0.2), value: isSelected)
+        .zIndex(isSelected ? 1 : 0)
         .id(item.id)
     }
 
@@ -870,7 +885,7 @@ private struct ScrubberScrollPhaseAndVelocityModifier: ViewModifier {
                     }
                 }
                 .onScrollPhaseChange { _, newPhase in
-                    let scrolling = newPhase.isScrolling
+                    let scrolling = (newPhase == .interacting || newPhase == .decelerating)
                     tracker.isCurrentlyScrolling = scrolling
                     if !scrolling {
                         tracker.currentVelocity = 0.0

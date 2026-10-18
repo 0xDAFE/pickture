@@ -1149,7 +1149,53 @@ struct CullingSessionFilmstripAndShortcutTests {
         #expect(disallowedVerticalPull.isActive == false)
         #expect(disallowedVerticalPull.shouldCommit == false)
     }
+
+    @Test("Inactive FilmstripThumbnailCell size and equality remain stable when aspect ratios load")
+    func scrubberInactiveCellLayoutAndEquatableStabilityAcrossAspectRatios() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let img1URL = root.appendingPathComponent("IMG001.JPG")
+        let img2URL = root.appendingPathComponent("IMG002.JPG")
+        try createTestJPEG(at: img1URL, width: 300, height: 200)
+        try createTestJPEG(at: img2URL, width: 200, height: 300)
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+
+        let leftItem = session.items[0]
+        let mainItem = session.items[1]
+        session.selectedItemID = mainItem.id
+
+        let inactiveCellBefore = FilmstripThumbnailCell(
+            item: leftItem,
+            curation: session.curationMetadata(for: leftItem),
+            syncState: session.syncState(for: leftItem),
+            isSelected: false,
+            dockPosition: .bottom,
+            previewSource: session.previewSource,
+            cacheGeneration: session.cacheGeneration,
+            cachedThumbnail: nil,
+            aspectRatio: nil
+        )
+
+        session.recordThumbnailAspectRatio(1.5, for: leftItem)
+
+        let inactiveCellAfter = FilmstripThumbnailCell(
+            item: leftItem,
+            curation: session.curationMetadata(for: leftItem),
+            syncState: session.syncState(for: leftItem),
+            isSelected: false,
+            dockPosition: .bottom,
+            previewSource: session.previewSource,
+            cacheGeneration: session.cacheGeneration,
+            cachedThumbnail: nil,
+            aspectRatio: nil
+        )
+
+        #expect(inactiveCellBefore == inactiveCellAfter)
+        #expect(inactiveCellBefore.thumbnailSize == CGSize(width: 40.0, height: 72.0))
+        #expect(inactiveCellAfter.thumbnailSize == CGSize(width: 40.0, height: 72.0))
+    }
 }
-
-
-
