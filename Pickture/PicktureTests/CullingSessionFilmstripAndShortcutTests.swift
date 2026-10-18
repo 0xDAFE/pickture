@@ -1149,6 +1149,98 @@ struct CullingSessionFilmstripAndShortcutTests {
         #expect(disallowedVerticalPull.isActive == false)
         #expect(disallowedVerticalPull.shouldCommit == false)
     }
+
+    // MARK: - Slice 11: Immediate Selection on Page Turn & Rapid Consecutive Swipes (#74 / #77)
+
+    @Test("Compensated page drag offset preserves seamless on-screen visual positions during immediate page turn commits")
+    func compensatedPageDragOffsetMaintainsVisualPositions() {
+        let containerWidth: CGFloat = 1000.0
+        let pageStride = containerWidth + CullingLayoutCalculator.filmstripInterPageGutter // 1016.0
+
+        // 1. Committing .next at mid-drag (-240pt):
+        // Incoming item was at: pageStride + (-240) = 776pt
+        // Compensated offset for .next becomes: -240 + pageStride = +776pt
+        let dragOffsetNext: CGFloat = -240.0
+        let visualPosNextBefore = pageStride + dragOffsetNext // 776.0
+        let compensatedNext = CullingLayoutCalculator.compensatedPageDragOffset(
+            currentOffset: dragOffsetNext,
+            direction: .next,
+            pageStride: pageStride
+        )
+        #expect(compensatedNext == visualPosNextBefore)
+        #expect(compensatedNext == 776.0)
+
+        // The outgoing item (now previous) is at: -pageStride + compensatedNext = -1016 + 776 = -240pt (identical to old position)
+        let outgoingPosAfterNext = -pageStride + compensatedNext
+        #expect(outgoingPosAfterNext == dragOffsetNext)
+
+        // 2. Committing .previous at mid-drag (+240pt):
+        // Incoming item was at: -pageStride + (+240) = -776pt
+        // Compensated offset for .previous becomes: +240 - pageStride = -776pt
+        let dragOffsetPrev: CGFloat = 240.0
+        let visualPosPrevBefore = -pageStride + dragOffsetPrev // -776.0
+        let compensatedPrev = CullingLayoutCalculator.compensatedPageDragOffset(
+            currentOffset: dragOffsetPrev,
+            direction: .previous,
+            pageStride: pageStride
+        )
+        #expect(compensatedPrev == visualPosPrevBefore)
+        #expect(compensatedPrev == -776.0)
+
+        // The outgoing item (now next) is at: +pageStride + compensatedPrev = 1016 - 776 = +240pt (identical to old position)
+        let outgoingPosAfterPrev = pageStride + compensatedPrev
+        #expect(outgoingPosAfterPrev == dragOffsetPrev)
+    }
+
+    @Test("Rapid consecutive page turns immediately update selection and resolve next neighbors without wedging")
+    func rapidConsecutivePageTurnsImmediatelyAdvanceSelection() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for i in 1...5 {
+            let url = root.appendingPathComponent("IMG00\(i).JPG")
+            try createTestJPEG(at: url, width: 320, height: 240)
+        }
+
+        let storeRoot = root.appendingPathComponent(".test-store", isDirectory: true)
+        let session = CullingSession(storageRootURL: storeRoot)
+        try session.openFolder(at: root)
+
+        #expect(session.items.count == 5)
+        let item0 = session.items[0]
+        let item1 = session.items[1]
+        let item2 = session.items[2]
+        let item3 = session.items[3]
+
+        session.selectedItemID = item0.id
+
+        // First rapid swipe right-to-left: commits .next
+        var neighbors = session.adjacentItems(for: session.selectedItemID!)
+        #expect(neighbors.current?.id == item0.id)
+        #expect(neighbors.next?.id == item1.id)
+
+        // Simulated immediate commit: advances selection instantly to item1
+        session.selectedItemID = neighbors.next?.id
+        #expect(session.selectedItemID == item1.id)
+
+        // Second rapid swipe immediately commits .next again without waiting:
+        neighbors = session.adjacentItems(for: session.selectedItemID!)
+        #expect(neighbors.previous?.id == item0.id)
+        #expect(neighbors.current?.id == item1.id)
+        #expect(neighbors.next?.id == item2.id)
+
+        session.selectedItemID = neighbors.next?.id
+        #expect(session.selectedItemID == item2.id)
+
+        // Third rapid swipe immediately commits .next again:
+        neighbors = session.adjacentItems(for: session.selectedItemID!)
+        #expect(neighbors.previous?.id == item1.id)
+        #expect(neighbors.current?.id == item2.id)
+        #expect(neighbors.next?.id == item3.id)
+
+        session.selectedItemID = neighbors.next?.id
+        #expect(session.selectedItemID == item3.id)
+    }
 }
 
 

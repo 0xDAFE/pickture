@@ -354,15 +354,19 @@ struct FilmstripView: View {
                 }
                 return
             }
+            let compensatedOffset = CullingLayoutCalculator.compensatedPageDragOffset(
+                currentOffset: pageDragOffset,
+                direction: .previous,
+                pageStride: pageStride
+            )
+            var tx = Transaction(animation: nil)
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                session.selectedItemID = prev.id
+                pageDragOffset = compensatedOffset
+            }
             withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
-                pageDragOffset = pageStride
-            } completion: {
-                var tx = Transaction(animation: nil)
-                tx.disablesAnimations = true
-                withTransaction(tx) {
-                    session.selectedItemID = prev.id
-                    pageDragOffset = 0
-                }
+                pageDragOffset = 0
             }
 
         case .next:
@@ -372,15 +376,19 @@ struct FilmstripView: View {
                 }
                 return
             }
+            let compensatedOffset = CullingLayoutCalculator.compensatedPageDragOffset(
+                currentOffset: pageDragOffset,
+                direction: .next,
+                pageStride: pageStride
+            )
+            var tx = Transaction(animation: nil)
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                session.selectedItemID = next.id
+                pageDragOffset = compensatedOffset
+            }
             withAnimation(.spring(response: 0.26, dampingFraction: 0.88)) {
-                pageDragOffset = -pageStride
-            } completion: {
-                var tx = Transaction(animation: nil)
-                tx.disablesAnimations = true
-                withTransaction(tx) {
-                    session.selectedItemID = next.id
-                    pageDragOffset = 0
-                }
+                pageDragOffset = 0
             }
 
         case nil:
@@ -1219,6 +1227,7 @@ struct FilmstripImageCanvasView: View {
     @State private var liveClampedPanOffset: CGSize? = nil
     @State private var swipeTranslation: CGFloat = 0.0
     @State private var activeDragMode: CanvasDragMode = .undecided
+    @State private var dragInitialPageOffset: CGFloat = 0.0
     @State private var isLoading = false
 
     private var rawCombinedScale: CGFloat {
@@ -1395,6 +1404,7 @@ struct FilmstripImageCanvasView: View {
                     .onChanged { value in
                         guard isCurrentPage else { return }
                         if activeDragMode == .undecided {
+                            dragInitialPageOffset = pageDragOffset.wrappedValue
                             if effectiveScale > 1.01 {
                                 activeDragMode = .zoomedPanAndHandoff
                             } else if session.isVerticalPullToGridAllowed
@@ -1428,8 +1438,9 @@ struct FilmstripImageCanvasView: View {
                             swipeTranslation = value.translation.width
 
                         case .horizontalPaging:
+                            let proposedOffset = dragInitialPageOffset + value.translation.width
                             pageDragOffset.wrappedValue = CullingLayoutCalculator.rubberBandedPageOffset(
-                                value.translation.width,
+                                proposedOffset,
                                 hasPrevious: neighbors.previous != nil,
                                 hasNext: neighbors.next != nil
                             )
@@ -1445,6 +1456,7 @@ struct FilmstripImageCanvasView: View {
 
                         switch completedMode {
                         case .zoomedPanAndHandoff:
+                            dragInitialPageOffset = 0.0
                             let handoff = CullingLayoutCalculator.resolveZoomPanAndPageHandoff(
                                 currentPanOffset: panOffset,
                                 dragTranslation: value.translation,
@@ -1474,9 +1486,11 @@ struct FilmstripImageCanvasView: View {
                             }
 
                         case .verticalPullToGrid:
+                            dragInitialPageOffset = 0.0
                             onHeroGestureEnded?()
 
                         case .swipeCuration:
+                            dragInitialPageOffset = 0.0
                             completeSwipeCurationGesture(
                                 translationWidth: value.translation.width,
                                 threshold: threshold,
@@ -1487,20 +1501,32 @@ struct FilmstripImageCanvasView: View {
                             )
 
                         case .horizontalPaging:
+                            let predictedOffset = dragInitialPageOffset + value.predictedEndTranslation.width
                             let committedDirection = CullingLayoutCalculator.shouldCommitPageTurn(
                                 pageDragOffset: pageDragOffset.wrappedValue,
-                                predictedEndTranslationX: value.predictedEndTranslation.width,
+                                predictedEndTranslationX: predictedOffset,
                                 containerWidth: geo.size.width,
                                 hasPrevious: neighbors.previous != nil,
                                 hasNext: neighbors.next != nil
                             )
+                            dragInitialPageOffset = 0.0
                             onCommitPageTurn?(committedDirection)
 
                         case .undecided:
-                            break
+                            dragInitialPageOffset = 0.0
                         }
                     }
             )
+            .onChange(of: isCurrentPage) { _, isCurrent in
+                if !isCurrent {
+                    activeDragMode = .undecided
+                    dragInitialPageOffset = 0.0
+                }
+            }
+            .onDisappear {
+                activeDragMode = .undecided
+                dragInitialPageOffset = 0.0
+            }
             .task(id: "\(item.id)-\(session.previewSource.rawValue)-\(session.cacheGeneration)-\(session.isHighVelocityScrubbing)") {
                 if let inMemory = session.inMemoryPreviewImage(for: item, maxPixelSize: 2048) {
                     previewImage = inMemory
@@ -1554,6 +1580,7 @@ struct FilmstripVideoCanvasView: View {
     @State private var player: AVPlayer?
     @State private var swipeTranslation: CGFloat = 0.0
     @State private var activeDragMode: CanvasDragMode = .undecided
+    @State private var dragInitialPageOffset: CGFloat = 0.0
 
     var body: some View {
         GeometryReader { geo in
@@ -1625,6 +1652,7 @@ struct FilmstripVideoCanvasView: View {
                         guard isCurrentPage, let session else { return }
                         if activeDragMode == .undecided {
                             player?.pause()
+                            dragInitialPageOffset = pageDragOffset.wrappedValue
                             if session.isVerticalPullToGridAllowed
                                 && value.translation.height > 12.0
                                 && value.translation.height > abs(value.translation.width) * 1.15 {
@@ -1644,8 +1672,9 @@ struct FilmstripVideoCanvasView: View {
                             swipeTranslation = value.translation.width
 
                         case .horizontalPaging:
+                            let proposedOffset = dragInitialPageOffset + value.translation.width
                             pageDragOffset.wrappedValue = CullingLayoutCalculator.rubberBandedPageOffset(
-                                value.translation.width,
+                                proposedOffset,
                                 hasPrevious: neighbors.previous != nil,
                                 hasNext: neighbors.next != nil
                             )
@@ -1661,9 +1690,11 @@ struct FilmstripVideoCanvasView: View {
 
                         switch completedMode {
                         case .verticalPullToGrid:
+                            dragInitialPageOffset = 0.0
                             onHeroGestureEnded?()
 
                         case .swipeCuration:
+                            dragInitialPageOffset = 0.0
                             guard let item else { return }
                             completeSwipeCurationGesture(
                                 translationWidth: value.translation.width,
@@ -1675,20 +1706,28 @@ struct FilmstripVideoCanvasView: View {
                             )
 
                         case .horizontalPaging:
+                            let predictedOffset = dragInitialPageOffset + value.predictedEndTranslation.width
                             let committedDirection = CullingLayoutCalculator.shouldCommitPageTurn(
                                 pageDragOffset: pageDragOffset.wrappedValue,
-                                predictedEndTranslationX: value.predictedEndTranslation.width,
+                                predictedEndTranslationX: predictedOffset,
                                 containerWidth: geo.size.width,
                                 hasPrevious: neighbors.previous != nil,
                                 hasNext: neighbors.next != nil
                             )
+                            dragInitialPageOffset = 0.0
                             onCommitPageTurn?(committedDirection)
 
                         default:
-                            break
+                            dragInitialPageOffset = 0.0
                         }
                     }
             )
+            .onChange(of: isCurrentPage) { _, isCurrent in
+                if !isCurrent {
+                    activeDragMode = .undecided
+                    dragInitialPageOffset = 0.0
+                }
+            }
             .onChange(of: isExternalGestureActive) { _, isActive in
                 if isActive {
                     player?.pause()
@@ -1698,6 +1737,8 @@ struct FilmstripVideoCanvasView: View {
                 player = AVPlayer(url: url)
             }
             .onDisappear {
+                activeDragMode = .undecided
+                dragInitialPageOffset = 0.0
                 player?.pause()
                 player = nil
             }

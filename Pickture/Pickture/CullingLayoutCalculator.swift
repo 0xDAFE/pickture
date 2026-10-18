@@ -133,6 +133,23 @@ enum CullingLayoutCalculator {
         return nil
     }
 
+    static func compensatedPageDragOffset(
+        currentOffset: CGFloat,
+        direction: BorderTapDirection,
+        pageStride: CGFloat
+    ) -> CGFloat {
+        guard !currentOffset.isNaN, !currentOffset.isInfinite,
+              !pageStride.isNaN, !pageStride.isInfinite else {
+            return 0.0
+        }
+        switch direction {
+        case .next:
+            return currentOffset + pageStride
+        case .previous:
+            return currentOffset - pageStride
+        }
+    }
+
     static func resolveHeroGridTransition(
         rawScale: CGFloat,
         dragTranslation: CGSize,
