@@ -3,13 +3,19 @@ import SwiftUI
 struct GridContentView: View {
     let session: CullingSession
     var gridColumns: [GridItem]
+    var selectedCellStageRect: Binding<CGRect?>?
+    var isHeroTransitionActive: Bool
 
     init(
         session: CullingSession,
-        gridColumns: [GridItem] = [GridItem(.adaptive(minimum: 185, maximum: 260), spacing: 12)]
+        gridColumns: [GridItem] = [GridItem(.adaptive(minimum: 185, maximum: 260), spacing: 12)],
+        selectedCellStageRect: Binding<CGRect?>? = nil,
+        isHeroTransitionActive: Bool = false
     ) {
         self.session = session
         self.gridColumns = gridColumns
+        self.selectedCellStageRect = selectedCellStageRect
+        self.isHeroTransitionActive = isHeroTransitionActive
     }
 
     var body: some View {
@@ -105,17 +111,19 @@ struct GridContentView: View {
             ScrollView {
                 LazyVGrid(columns: gridColumns, spacing: 12) {
                     ForEach(session.visibleItems) { item in
+                        let isItemSelected = session.selectedItemID == item.id
                         MediaGridCellView(
                             item: item,
                             curation: session.curationMetadata(for: item),
                             syncState: session.syncState(for: item),
-                            isSelected: session.selectedItemID == item.id,
+                            isSelected: isItemSelected,
                             isRecursiveMode: session.subfolderMode == .recursive,
                             previewSource: session.previewSource,
                             cacheGeneration: session.cacheGeneration,
                             cachedThumbnail: session.inMemoryThumbnailImage(for: item, maxPixelSize: 360),
                             aspectRatio: session.thumbnailAspectRatio(for: item),
                             metadataDeckHeight: CullingLayoutCalculator.defaultGridMetadataDeckHeight,
+                            isHeroHidden: isHeroTransitionActive && isItemSelected,
                             onSelect: {
                                 session.selectedItemID = item.id
                             },
@@ -129,6 +137,11 @@ struct GridContentView: View {
                             },
                             onCurationAction: { action in
                                 session.applyCurationAction(action, to: item)
+                            },
+                            onSelectedStageFrameChange: { rect in
+                                if isItemSelected {
+                                    selectedCellStageRect?.wrappedValue = rect
+                                }
                             },
                             loadThumbnail: { [session, item] in
                                 await session.loadThumbnailImage(for: item, maxPixelSize: 360)
@@ -147,9 +160,17 @@ struct GridContentView: View {
                 .padding(16)
             }
             .onChange(of: session.selectedItemID) { _, newID in
-                if let newID, session.viewMode == .grid {
+                guard let newID else { return }
+                if session.viewMode == .grid {
                     withAnimation(.easeInOut(duration: 0.15)) {
                         proxy.scrollTo(newID)
+                    }
+                } else {
+                    // Keep underlying Grid viewport synchronized while paging/scrubbing in Filmstrip
+                    var transaction = Transaction(animation: nil)
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        proxy.scrollTo(newID, anchor: .center)
                     }
                 }
             }

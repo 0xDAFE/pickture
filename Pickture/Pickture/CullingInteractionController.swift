@@ -34,6 +34,7 @@ final class CullingInteractionController {
     var customShortcutMappings: [String: SessionCommand]
     var swipeRightAction: CurationAction
     var swipeLeftAction: CurationAction
+    var allowVerticalPullToGridInSwipeMode: Bool
     private(set) var swipeHistory: [SwipeRecord] = []
 
     var canUndoSwipe: Bool {
@@ -56,13 +57,15 @@ final class CullingInteractionController {
         shortcutProfileKind: ShortcutProfileKind = .lightroom,
         customShortcutMappings: [String: SessionCommand] = [:],
         swipeRightAction: CurationAction = .setPickFlag(.picked),
-        swipeLeftAction: CurationAction = .setPickFlag(.rejected)
+        swipeLeftAction: CurationAction = .setPickFlag(.rejected),
+        allowVerticalPullToGridInSwipeMode: Bool = false
     ) {
         self.target = target
         self.shortcutProfileKind = shortcutProfileKind
         self.customShortcutMappings = customShortcutMappings
         self.swipeRightAction = swipeRightAction
         self.swipeLeftAction = swipeLeftAction
+        self.allowVerticalPullToGridInSwipeMode = allowVerticalPullToGridInSwipeMode
     }
 
     @discardableResult
