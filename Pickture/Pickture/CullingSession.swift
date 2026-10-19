@@ -144,6 +144,28 @@ final class CullingSession: CullingInteractionTarget {
     var filmstripDockPosition: FilmstripDockPosition = .bottom
     var isAutoAdvanceEnabled: Bool = false
     var isSwipeModeEnabled: Bool = false
+    private(set) var zoomLockState: ZoomLockState? = nil
+
+    var isZoomLocked: Bool {
+        zoomLockState != nil && (zoomLockState?.scale ?? 1.0) > 1.0
+    }
+
+    func setZoomLock(scale: CGFloat, normalizedAnchor: CGPoint) {
+        guard let item = selectedItem, item.kind == .photo else {
+            clearZoomLock()
+            return
+        }
+        zoomLockState = ZoomLockState(scale: scale, normalizedAnchor: normalizedAnchor)
+    }
+
+    func clearZoomLock() {
+        zoomLockState = nil
+    }
+
+    func selectItemDirectly(id: String) {
+        clearZoomLock()
+        selectedItemID = id
+    }
 
     var shortcutProfileKind: ShortcutProfileKind {
         get { interactionController.shortcutProfileKind }
@@ -186,10 +208,14 @@ final class CullingSession: CullingInteractionTarget {
     }
 
     func setViewMode(_ mode: ViewMode) {
+        if mode == .grid || viewMode != mode {
+            clearZoomLock()
+        }
         viewMode = mode
     }
 
     func toggleViewMode() {
+        clearZoomLock()
         viewMode = (viewMode == .grid) ? .filmstrip : .grid
     }
 
@@ -444,7 +470,11 @@ final class CullingSession: CullingInteractionTarget {
         let items = cullingSequence.items
         guard let currentIndex = currentSequenceIndex else { return }
         if currentIndex + 1 < items.count {
-            selectedItemID = items[currentIndex + 1].id
+            let nextItem = items[currentIndex + 1]
+            selectedItemID = nextItem.id
+            if nextItem.kind == .video {
+                clearZoomLock()
+            }
         }
     }
 
@@ -452,19 +482,25 @@ final class CullingSession: CullingInteractionTarget {
         let items = cullingSequence.items
         guard let currentIndex = currentSequenceIndex else { return }
         if currentIndex > 0 {
-            selectedItemID = items[currentIndex - 1].id
+            let prevItem = items[currentIndex - 1]
+            selectedItemID = prevItem.id
+            if prevItem.kind == .video {
+                clearZoomLock()
+            }
         }
     }
 
     func selectFirstItem() {
         if let first = cullingSequence.items.first {
             selectedItemID = first.id
+            clearZoomLock()
         }
     }
 
     func selectLastItem() {
         if let last = cullingSequence.items.last {
             selectedItemID = last.id
+            clearZoomLock()
         }
     }
 
@@ -1030,6 +1066,7 @@ final class CullingSession: CullingInteractionTarget {
         currentFolderURL = nil
         items.removeAll()
         selectedItemID = nil
+        clearZoomLock()
         thumbnailAspectRatios.removeAll()
         activeConflictItemID = nil
         isConflictSheetPresented = false
@@ -1250,6 +1287,7 @@ final class CullingSession: CullingInteractionTarget {
         if pendingWritesCount > 0 {
             await flushPendingWrites()
         }
+        clearZoomLock()
         self.isLazySidecarHydrationEnabled = lazySidecars
         self.isDiscovering = true
         self.openFolderProgress = 0.0
@@ -1334,6 +1372,7 @@ final class CullingSession: CullingInteractionTarget {
                 await self?.flushPendingWrites()
             }
         }
+        clearZoomLock()
         self.isDiscovering = true
         defer { self.isDiscovering = false }
         do {

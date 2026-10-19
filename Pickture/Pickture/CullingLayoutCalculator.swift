@@ -175,4 +175,120 @@ enum CullingLayoutCalculator {
             mediaKind: mediaKind
         )
     }
+
+    // MARK: - ZoomLock Coordinate Calculations
+
+    static func fittedImageSize(imageSize: CGSize, in containerSize: CGSize) -> CGSize {
+        guard containerSize.width > 0, containerSize.height > 0,
+              imageSize.width > 0, imageSize.height > 0 else {
+            return containerSize
+        }
+        let imageAspect = imageSize.width / imageSize.height
+        let containerAspect = containerSize.width / containerSize.height
+        if imageAspect >= containerAspect {
+            let width = containerSize.width
+            let height = width / imageAspect
+            return CGSize(width: width, height: height)
+        } else {
+            let height = containerSize.height
+            let width = height * imageAspect
+            return CGSize(width: width, height: height)
+        }
+    }
+
+    static func fittedImageRect(imageSize: CGSize, in containerSize: CGSize) -> CGRect {
+        let fittedSize = fittedImageSize(imageSize: imageSize, in: containerSize)
+        let originX = (containerSize.width - fittedSize.width) / 2.0
+        let originY = (containerSize.height - fittedSize.height) / 2.0
+        return CGRect(origin: CGPoint(x: originX, y: originY), size: fittedSize)
+    }
+
+    static func calculatePanOffset(
+        forNormalizedAnchor anchor: CGPoint,
+        containerSize: CGSize,
+        imageSize: CGSize,
+        scale: CGFloat
+    ) -> CGSize {
+        guard containerSize.width > 0, containerSize.height > 0, scale >= 1.0 else {
+            return .zero
+        }
+        let fitted = fittedImageSize(imageSize: imageSize, in: containerSize)
+        let scaledWidth = fitted.width * scale
+        let scaledHeight = fitted.height * scale
+
+        let maxPanX = max(0, (scaledWidth - containerSize.width) / 2.0)
+        let maxPanY = max(0, (scaledHeight - containerSize.height) / 2.0)
+
+        let targetX = -(anchor.x - 0.5) * scaledWidth
+        let targetY = -(anchor.y - 0.5) * scaledHeight
+
+        let clampedX = min(maxPanX, max(-maxPanX, targetX))
+        let clampedY = min(maxPanY, max(-maxPanY, targetY))
+
+        return CGSize(width: clampedX, height: clampedY)
+    }
+
+    static func calculateNormalizedAnchor(
+        forPanOffset panOffset: CGSize,
+        containerSize: CGSize,
+        imageSize: CGSize,
+        scale: CGFloat
+    ) -> CGPoint {
+        guard containerSize.width > 0, containerSize.height > 0, scale > 1.0 else {
+            return CGPoint(x: 0.5, y: 0.5)
+        }
+        let fitted = fittedImageSize(imageSize: imageSize, in: containerSize)
+        let scaledWidth = fitted.width * scale
+        let scaledHeight = fitted.height * scale
+
+        let u: CGFloat
+        if scaledWidth > 0 {
+            u = 0.5 - (panOffset.width / scaledWidth)
+        } else {
+            u = 0.5
+        }
+
+        let v: CGFloat
+        if scaledHeight > 0 {
+            v = 0.5 - (panOffset.height / scaledHeight)
+        } else {
+            v = 0.5
+        }
+
+        return CGPoint(x: min(1.0, max(0.0, u)), y: min(1.0, max(0.0, v)))
+    }
+
+    static func normalizedAnchor(
+        forTapLocation tapLocation: CGPoint,
+        inContainerSize containerSize: CGSize,
+        imageSize: CGSize
+    ) -> CGPoint {
+        let rect = fittedImageRect(imageSize: imageSize, in: containerSize)
+        guard rect.width > 0, rect.height > 0 else {
+            return CGPoint(x: 0.5, y: 0.5)
+        }
+        let u = (tapLocation.x - rect.minX) / rect.width
+        let v = (tapLocation.y - rect.minY) / rect.height
+        return CGPoint(x: min(1.0, max(0.0, u)), y: min(1.0, max(0.0, v)))
+    }
+
+    static func clampPanOffset(
+        _ rawOffset: CGSize,
+        containerSize: CGSize,
+        imageSize: CGSize,
+        scale: CGFloat
+    ) -> CGSize {
+        guard containerSize.width > 0, containerSize.height > 0, scale > 1.0 else {
+            return .zero
+        }
+        let fitted = fittedImageSize(imageSize: imageSize, in: containerSize)
+        let scaledWidth = fitted.width * scale
+        let scaledHeight = fitted.height * scale
+        let maxPanX = max(0, (scaledWidth - containerSize.width) / 2.0)
+        let maxPanY = max(0, (scaledHeight - containerSize.height) / 2.0)
+        return CGSize(
+            width: min(maxPanX, max(-maxPanX, rawOffset.width)),
+            height: min(maxPanY, max(-maxPanY, rawOffset.height))
+        )
+    }
 }

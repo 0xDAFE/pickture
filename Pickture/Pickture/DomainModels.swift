@@ -989,3 +989,17 @@ nonisolated struct CullingSequence: Hashable, Sendable {
         indicesByItemID[itemID]
     }
 }
+
+// MARK: - ZoomLockState
+
+nonisolated struct ZoomLockState: Equatable, Hashable, Codable, Sendable {
+    public var scale: CGFloat
+    public var normalizedAnchor: CGPoint
+
+    public init(scale: CGFloat, normalizedAnchor: CGPoint = CGPoint(x: 0.5, y: 0.5)) {
+        self.scale = max(1.0, scale)
+        let clampedX = min(1.0, max(0.0, normalizedAnchor.x))
+        let clampedY = min(1.0, max(0.0, normalizedAnchor.y))
+        self.normalizedAnchor = CGPoint(x: clampedX, y: clampedY)
+    }
+}
